@@ -19,6 +19,8 @@ namespace GUI.Types.Viewers
         private TreeView fileListView;
         private readonly Container components;
         private ThemedContextMenuStrip shaderFileContextMenu;
+        private ThemedContextMenuStrip collectionContextMenu;
+        private ThemedContextMenuStrip programContextMenu;
         private readonly VrfGuiContext vrfGuiContext;
         private VfxProgramData? featuresProgram;
 
@@ -54,6 +56,30 @@ namespace GUI.Types.Viewers
             };
             exportBytecodeMenuItem.Click += OnExportBytecodeClick;
             shaderFileContextMenu.Items.Add(exportBytecodeMenuItem);
+
+            collectionContextMenu = new ThemedContextMenuStrip(components)
+            {
+                ImageScalingSize = new System.Drawing.Size(24, 24),
+            };
+            var exportCollectionMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export all decompiled shaders...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportCollectionMenuItem.Click += OnExportCollectionClick;
+            collectionContextMenu.Items.Add(exportCollectionMenuItem);
+
+            programContextMenu = new ThemedContextMenuStrip(components)
+            {
+                ImageScalingSize = new System.Drawing.Size(24, 24),
+            };
+            var exportProgramMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export decompiled shaders...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportProgramMenuItem.Click += OnExportProgramClick;
+            programContextMenu.Items.Add(exportProgramMenuItem);
 
             control = new TextControl(CodeTextBox.HighlightLanguage.Shaders);
             control.AddControl(fileListView);
@@ -232,6 +258,8 @@ namespace GUI.Types.Viewers
                 control?.Dispose();
                 components?.Dispose();
                 shaderFileContextMenu?.Dispose();
+                collectionContextMenu?.Dispose();
+                programContextMenu?.Dispose();
             }
         }
 
@@ -242,12 +270,27 @@ namespace GUI.Types.Viewers
                 return;
             }
 
-            if (e.Button == MouseButtons.Right && e.Node.Tag is VfxShaderFile clickedShader)
+            if (e.Button == MouseButtons.Right)
             {
-                if (clickedShader.Bytecode.Length > 0)
+                if (e.Node.Tag is VfxShaderFile clickedShader && clickedShader.Bytecode.Length > 0)
                 {
                     shaderFileContextMenu.Tag = clickedShader;
                     shaderFileContextMenu.Show(fileListView, e.Location);
+                    return;
+                }
+
+                if (e.Node.Tag is ShaderExtract shaderExtractForExport)
+                {
+                    collectionContextMenu.Tag = shaderExtractForExport;
+                    collectionContextMenu.Show(fileListView, e.Location);
+                    return;
+                }
+
+                if (e.Node.Tag is VfxProgramData programForExport)
+                {
+                    programContextMenu.Tag = programForExport;
+                    programContextMenu.Show(fileListView, e.Location);
+                    return;
                 }
 
                 return;
@@ -400,6 +443,139 @@ namespace GUI.Types.Viewers
             using var output = new IndentedTextWriter();
             var zframeSummary = new PrintZFrameSummary(combo, output);
             control.TextBox.Text = output.ToString();
+        }
+
+        private void OnExportCollectionClick(object? sender, EventArgs e)
+        {
+            if (collectionContextMenu.Tag is not ShaderExtract shaderExtract)
+                return;
+
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Select export folder",
+                InitialDirectory = Settings.Config.SaveDirectory,
+                UseDescriptionForTitle = true,
+            };
+
+            if (dialog.ShowDialog() != DialogResult.OK)
+                return;
+
+            Settings.Config.SaveDirectory = dialog.SelectedPath;
+
+            _ = Task.Run(() =>
+            {
+                foreach (var program in shaderExtract.Shaders)
+                    ExportProgram(program, dialog.SelectedPath);
+
+                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+        }
+
+        private void OnExportProgramClick(object? sender, EventArgs e)
+        {
+            if (programContextMenu.Tag is not VfxProgramData program)
+                return;
+
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Select export folder",
+                InitialDirectory = Settings.Config.SaveDirectory,
+                UseDescriptionForTitle = true,
+            };
+
+            if (dialog.ShowDialog() != DialogResult.OK)
+                return;
+
+            Settings.Config.SaveDirectory = dialog.SelectedPath;
+
+            _ = Task.Run(() =>
+            {
+                ExportProgram(program, dialog.SelectedPath);
+                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+        }
+
+        private static void ExportProgram(VfxProgramData program, string baseDir)
+        {
+            if (program.StaticComboEntries.Count == 0)
+                return;
+
+            var configGen = new ConfigMappingParams(program);
+            List<string> sfNamesAbbrev = [];
+            List<string> dfNamesAbbrev = [];
+
+            foreach (var staticComboEntry in program.StaticComboEntries)
+            {
+                VfxStaticComboData combo;
+                try
+                {
+                    combo = staticComboEntry.Value.Unserialize();
+                }
+                catch
+                {
+                    continue;
+                }
+
+                var sConfig = configGen.GetConfigState(staticComboEntry.Key);
+                sfNamesAbbrev.Clear();
+
+                for (var i = 0; i < program.StaticComboArray.Length; i++)
+                {
+                    if (sConfig[i] == 0)
+                        continue;
+
+                    var sfBlock = program.StaticComboArray[i];
+                    var sfShortName = ShortenShaderParam(sfBlock.Name).ToLowerInvariant();
+                    sfNamesAbbrev.Add(sConfig[i] > 1 ? $"{sfShortName}={sConfig[i]}" : sfShortName);
+                }
+
+                var staticPart = sfNamesAbbrev.Count > 0 ? string.Join("+", sfNamesAbbrev) : "base";
+
+                var sourceIdToRenderStateInfo = new Dictionary<int, VfxRenderStateInfo>(combo.ShaderFiles.Length);
+                foreach (var renderStateInfo in combo.DynamicCombos)
+                    sourceIdToRenderStateInfo.TryAdd(renderStateInfo.ShaderFileId, renderStateInfo);
+
+                foreach (var shaderFile in combo.ShaderFiles)
+                {
+                    if (shaderFile.Bytecode.Length == 0)
+                        continue;
+
+                    dfNamesAbbrev.Clear();
+                    if (sourceIdToRenderStateInfo.TryGetValue(shaderFile.ShaderFileId, out var renderStateInfo))
+                    {
+                        var dConfig = program.GetDBlockConfig(renderStateInfo.DynamicComboId);
+                        for (var i = 0; i < program.DynamicComboArray.Length; i++)
+                        {
+                            if (dConfig[i] == 0)
+                                continue;
+
+                            var dfBlock = program.DynamicComboArray[i];
+                            var dfShortName = ShortenShaderParam(dfBlock.Name).ToLowerInvariant();
+                            dfNamesAbbrev.Add(dConfig[i] > 1 ? $"{dfShortName}={dConfig[i]}" : dfShortName);
+                        }
+                    }
+
+                    var dynamicPart = dfNamesAbbrev.Count > 0 ? $"__{string.Join("+", dfNamesAbbrev)}" : string.Empty;
+                    var platform = shaderFile.BlockName.ToLowerInvariant();
+                    var ext = platform is "glsl" ? "glsl" : "hlsl";
+                    var rawName = $"{staticPart}{dynamicPart}.{ext}";
+                    var safeName = string.Concat(rawName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+
+                    var dir = Path.Combine(baseDir, program.ShaderName ?? "unknown", program.VcsProgramType.ToString(), platform);
+                    Directory.CreateDirectory(dir);
+                    var filePath = Path.Combine(dir, safeName);
+
+                    try
+                    {
+                        var text = shaderFile.GetDecompiledFile();
+                        File.WriteAllText(filePath, text);
+                    }
+                    catch
+                    {
+                        // Skip files that fail to decompile
+                    }
+                }
+            }
         }
 
         private void OnExportBytecodeClick(object? sender, EventArgs e)
