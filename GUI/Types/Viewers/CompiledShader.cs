@@ -525,8 +525,7 @@ namespace GUI.Types.Viewers
                         continue;
 
                     var sfBlock = program.StaticComboArray[i];
-                    var sfShortName = ShortenShaderParam(sfBlock.Name).ToLowerInvariant();
-                    sfNamesAbbrev.Add(sConfig[i] > 1 ? $"{sfShortName}={sConfig[i]}" : sfShortName);
+                    sfNamesAbbrev.Add(sConfig[i] > 1 ? $"{sfBlock.Name}={sConfig[i]}" : sfBlock.Name);
                 }
 
                 var staticPart = sfNamesAbbrev.Count > 0 ? string.Join("+", sfNamesAbbrev) : "base";
@@ -550,8 +549,7 @@ namespace GUI.Types.Viewers
                                 continue;
 
                             var dfBlock = program.DynamicComboArray[i];
-                            var dfShortName = ShortenShaderParam(dfBlock.Name).ToLowerInvariant();
-                            dfNamesAbbrev.Add(dConfig[i] > 1 ? $"{dfShortName}={dConfig[i]}" : dfShortName);
+                            dfNamesAbbrev.Add(dConfig[i] > 1 ? $"{dfBlock.Name}={dConfig[i]}" : dfBlock.Name);
                         }
                     }
 
