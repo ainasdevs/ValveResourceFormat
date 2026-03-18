@@ -10,6 +10,8 @@ using GUI.Utils;
 using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
+using ValveResourceFormat.Renderer.Materials;
+using ValveResourceFormat.Renderer.SceneNodes;
 using ValveResourceFormat.ResourceTypes;
 using Resource = ValveResourceFormat.Resource;
 
@@ -17,7 +19,6 @@ namespace GUI.Types.GLViewers
 {
     /// <summary>
     /// GL Render control with material controls (render modes maybe at some point?).
-    /// Renders a list of MatarialRenderers.
     /// </summary>
     class GLMaterialViewer : GLSingleNodeViewer
     {

@@ -6,13 +6,17 @@ using GUI.Controls;
 using GUI.Utils;
 using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Renderer;
+using ValveResourceFormat.Renderer.Input;
+using ValveResourceFormat.Renderer.Materials;
+using ValveResourceFormat.Renderer.SceneEnvironment;
+using ValveResourceFormat.Renderer.Utils;
 using static ValveResourceFormat.Renderer.PickingTexture;
 
 namespace GUI.Types.GLViewers
 {
     internal abstract class GLSceneViewer : GLBaseControl
     {
-        public Renderer Renderer { get; internal set; }
+        public ValveResourceFormat.Renderer.Renderer Renderer { get; internal set; }
         public UserInput Input { get; protected set; }
 
         public ValveResourceFormat.Renderer.TextRenderer TextRenderer { get; protected set; }
@@ -527,7 +531,7 @@ namespace GUI.Types.GLViewers
                     Scale = 14f,
                     Color = new Color32(0, 150, 255),
                     Text = "* MOVEMENT IS EXPERIMENTAL. EXPECT BUGS. HELP US IMPROVE IT. *",
-                    CenterVertical = true,
+                    CenterHorizontal = true,
                 }, Renderer.Camera);
 
                 TextRenderer.AddTextRelative(new ValveResourceFormat.Renderer.TextRenderer.TextRenderRequest
@@ -537,7 +541,7 @@ namespace GUI.Types.GLViewers
                     Scale = 12f,
                     Color = Color32.Yellow,
                     Text = $"Speed: {Input.Velocity.AsVector2().Length():0.0} u/s",
-                    CenterVertical = true,
+                    CenterHorizontal = true,
                 }, Renderer.Camera);
             }
 

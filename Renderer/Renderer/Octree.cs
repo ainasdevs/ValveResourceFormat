@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using OpenTK.Graphics.OpenGL;
 
 namespace ValveResourceFormat.Renderer
@@ -50,7 +49,7 @@ namespace ValveResourceFormat.Renderer
             /// <summary>
             /// Gets or sets whether an occlusion query has been submitted for this node.
             /// </summary>
-            public bool OcculsionQuerySubmitted { get; set; }
+            public bool OcclusionQuerySubmitted { get; set; }
 
             /// <summary>
             /// Gets or sets whether this node is occluded by other geometry.
@@ -251,7 +250,7 @@ namespace ValveResourceFormat.Renderer
                 }
 
                 FrustumCulled = false;
-                OcculsionQuerySubmitted = false;
+                OcclusionQuerySubmitted = false;
                 OcclusionCulled = false;
             }
 
@@ -322,6 +321,34 @@ namespace ValveResourceFormat.Renderer
                 }
             }
 
+            /// <summary>Queries scene nodes visible within the specified view frustum, ignoring occlusion culling results.</summary>
+            /// <param name="frustum">View frustum to test against.</param>
+            /// <param name="results">List to populate with visible scene nodes.</param>
+            public void QueryNoOcclusion(Frustum frustum, List<SceneNode> results)
+            {
+                if (HasElements)
+                {
+                    foreach (var element in Elements!)
+                    {
+                        if (frustum.Intersects(element.BoundingBox))
+                        {
+                            results.Add(element);
+                        }
+                    }
+                }
+
+                if (HasChildren)
+                {
+                    foreach (var child in Children)
+                    {
+                        if (frustum.Intersects(child.Region))
+                        {
+                            child.QueryNoOcclusion(frustum, results);
+                        }
+                    }
+                }
+            }
+
             /// <summary>
             /// Calculates the combined bounding box of all elements in this node and its children.
             /// </summary>
@@ -364,6 +391,7 @@ namespace ValveResourceFormat.Renderer
         /// </summary>
         public bool Dirty { get; set; } = true;
 
+        /// <summary>Gets or sets an optional debug renderer that visualizes this octree.</summary>
         public OctreeDebugRenderer? DebugRenderer { get; set; }
 
         /// <summary>

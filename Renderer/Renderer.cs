@@ -1,9 +1,10 @@
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
-using System.Threading;
 using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Renderer.Buffers;
+using ValveResourceFormat.Renderer.PostProcess;
+using ValveResourceFormat.Renderer.SceneEnvironment;
 
 namespace ValveResourceFormat.Renderer;
 
@@ -12,23 +13,72 @@ namespace ValveResourceFormat.Renderer;
 /// </summary>
 public class Renderer
 {
+    /// <summary>
+    /// Total time elapsed since the renderer was started, in seconds.
+    /// </summary>
     public float Uptime { get; set; }
+
+    /// <summary>
+    /// Time elapsed since the last frame, in seconds.
+    /// </summary>
     public float DeltaTime { get; set; }
+
+    /// <summary>
+    /// Shared renderer context containing loaders and caches.
+    /// </summary>
     public RendererContext RendererContext { get; }
+
+    /// <summary>
+    /// Active camera used for view and projection transforms.
+    /// </summary>
     public Camera Camera { get; set; }
 
+    /// <summary>
+    /// GPU timing queries for profiling render passes.
+    /// </summary>
     public Timings Timings { get; } = new();
 
+    /// <summary>
+    /// The main scene to render.
+    /// </summary>
     public Scene Scene { get; set; }
+
+    /// <summary>
+    /// Optional 3D skybox scene rendered behind the main scene.
+    /// </summary>
     public Scene? SkyboxScene { get; set; }
+
+    /// <summary>
+    /// Optional 2D skybox rendered as the scene background.
+    /// </summary>
     public SceneSkybox2D? Skybox2D { get; set; }
+
+    /// <summary>
+    /// Default background used when no skybox is available.
+    /// </summary>
     public SceneBackground? BaseBackground { get; protected set; }
 
+    /// <summary>
+    /// GPU uniform buffer containing per-view constants such as view-projection matrices.
+    /// </summary>
     public UniformBuffer<ViewConstants>? ViewBuffer { get; set; }
+
+    /// <summary>
+    /// Named textures bound to reserved slots for all render passes.
+    /// </summary>
     public List<(ReservedTextureSlots Slot, string Name, RenderTexture Texture)> Textures { get; } = [];
 
-    private readonly Shader[] depthOnlyShaders = new Shader[Enum.GetValues<DepthOnlyProgram>().Length];
+    internal readonly Shader[] depthOnlyShaders = new Shader[Enum.GetValues<DepthOnlyProgram>().Length];
+    private readonly Frustum barnLightShadowFrustum = new();
+    /// <summary>
+    /// Depth-only framebuffer used for directional (sun) light shadow mapping.
+    /// </summary>
     public Framebuffer? ShadowDepthBuffer { get; private set; }
+
+    /// <summary>
+    /// Depth-only framebuffer atlas used for barn light shadow mapping.
+    /// </summary>
+    public Framebuffer? BarnLightShadowBuffer { get; private set; }
     /// <summary>
     /// Resolved (non-MSAA) scene color in rgba16f format, used for refraction, bloom input, and luminance computation.
     /// Filled by <see cref="GrabFramebufferCopy"/>.
@@ -45,15 +95,41 @@ public class Renderer
     private readonly StorageBuffer[] histogramBuffers = new StorageBuffer[2];
 
     // Injected
+    /// <summary>
+    /// Target framebuffer for the main scene render; must be set before calling <see cref="Render(Scene.RenderContext)"/>.
+    /// </summary>
     public Framebuffer? MainFramebuffer { get; set; }
+
+    /// <summary>
+    /// Post-processing renderer handling tone mapping, bloom, and MSAA resolve.
+    /// </summary>
     public PostProcessRenderer Postprocess { get; set; }
+
+    /// <summary>
+    /// When not <see langword="null"/>, culling uses this frustum instead of the camera frustum, freezing the cull state.
+    /// </summary>
     public Frustum? LockedCullFrustum { get; set; }
 
     // options
+    /// <summary>
+    /// Width and height in texels of the shadow depth buffers.
+    /// </summary>
     public int ShadowTextureSize { get; set; } = 1024;
+
+    /// <summary>
+    /// When <see langword="true"/>, geometry is rendered as wireframe lines.
+    /// </summary>
     public bool IsWireframe { get; set; }
+
+    /// <summary>
+    /// When <see langword="true"/>, the skybox is included in scene rendering.
+    /// </summary>
     public bool ShowSkybox { get; set; } = true;
 
+    /// <summary>
+    /// Initializes a new renderer with the given context.
+    /// </summary>
+    /// <param name="rendererContext">Shared context providing loaders and caches.</param>
     public Renderer(RendererContext rendererContext)
     {
         RendererContext = rendererContext;
@@ -62,6 +138,9 @@ public class Renderer
         Scene = new Scene(rendererContext);
     }
 
+    /// <summary>
+    /// Allocates GPU resources required for rendering; must be called once before <see cref="Render(Scene.RenderContext)"/>.
+    /// </summary>
     public void Initialize()
     {
         ViewBuffer = new UniformBuffer<ViewConstants>(ReservedBufferSlots.View);
@@ -74,12 +153,19 @@ public class Renderer
 
         GL.DrawBuffer(DrawBufferMode.None);
         GL.ReadBuffer(ReadBufferMode.None);
+        ShadowDepthBuffer.SetShadowDepthSamplerState();
         Textures.Add(new(ReservedTextureSlots.ShadowDepthBufferDepth, "g_tShadowDepthBufferDepth", ShadowDepthBuffer.Depth));
 
-        GL.TextureParameter(ShadowDepthBuffer.Depth!.Handle, TextureParameterName.TextureCompareMode, (int)TextureCompareMode.CompareRToTexture);
-        ShadowDepthBuffer.Depth.SetParameter(TextureParameterName.TextureCompareMode, (int)TextureCompareMode.CompareRToTexture);
-        ShadowDepthBuffer.Depth.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
-        ShadowDepthBuffer.Depth.SetWrapMode(TextureWrapMode.ClampToBorder);
+        // Barn light shadow atlas
+        BarnLightShadowBuffer = Framebuffer.Prepare(nameof(BarnLightShadowBuffer), 4, 4, 0, null, Framebuffer.DepthAttachmentFormat.Depth16);
+        BarnLightShadowBuffer.Initialize();
+        BarnLightShadowBuffer.ClearMask = ClearBufferMask.DepthBufferBit;
+        Debug.Assert(BarnLightShadowBuffer.Depth != null);
+
+        GL.DrawBuffer(DrawBufferMode.None);
+        GL.ReadBuffer(ReadBufferMode.None);
+        BarnLightShadowBuffer.SetShadowDepthSamplerState(true);
+        Textures.Add(new(ReservedTextureSlots.BarnLightShadowDepth, "g_tBarnLightShadowDepth", BarnLightShadowBuffer.Depth));
 
         depthOnlyShaders[(int)DepthOnlyProgram.Static] = Scene.RendererContext.ShaderLoader.LoadShader("vrf.depth_only");
         //depthOnlyShaders[(int)DepthOnlyProgram.StaticAlphaTest] = GuiContext.ShaderLoader.LoadShader("vrf.depth_only", ("F_ALPHA_TEST", 1));
@@ -107,6 +193,9 @@ public class Renderer
         EnsureDepthPyramidSize(256, 256);
     }
 
+    /// <summary>
+    /// Loads embedded or game-provided BRDF LUT, cube fog, and blue noise textures into <see cref="Textures"/>.
+    /// </summary>
     public void LoadRendererResources()
     {
         var rendererAssembly = Assembly.GetAssembly(typeof(RendererContext)) ?? throw new InvalidOperationException("Failed to get renderer assembly");
@@ -243,6 +332,9 @@ public class Renderer
         GL.DepthMask(true);
     }
 
+    /// <summary>
+    /// Renders the opaque and translucent layers of the main scene to <see cref="MainFramebuffer"/>.
+    /// </summary>
     public void DrawMainScene()
     {
         if (MainFramebuffer is null)
@@ -283,12 +375,19 @@ public class Renderer
     }
 
 
+    /// <summary>
+    /// Renders shadows and then the full scene using the provided render context.
+    /// </summary>
     public void Render(Scene.RenderContext renderContext)
     {
         RenderSceneShadows(renderContext);
+        RenderBarnLightShadows(renderContext);
         RenderScenesWithView(renderContext);
     }
 
+    /// <summary>
+    /// Renders the main and skybox scenes using the camera and framebuffer specified in the render context.
+    /// </summary>
     public void RenderScenesWithView(Scene.RenderContext renderContext)
     {
         if (ViewBuffer == null)
@@ -432,6 +531,9 @@ public class Renderer
         }
     }
 
+    /// <summary>
+    /// Renders opaque shadow casters for the directional (sun) light into <see cref="ShadowDepthBuffer"/>.
+    /// </summary>
     public void RenderSceneShadows(Scene.RenderContext renderContext)
     {
         if (ShadowDepthBuffer is null || ViewBuffer is null)
@@ -453,7 +555,84 @@ public class Renderer
         ViewBuffer.Data.SunLightShadowBias = Scene.LightingInfo.SunLightShadowBias;
         ViewBuffer.Update();
 
-        Scene.RenderOpaqueShadows(renderContext, depthOnlyShaders);
+        using (new GLDebugGroup("Direct Light Shadows"))
+        {
+            Scene.RenderOpaqueShadows(renderContext, depthOnlyShaders, Scene.CulledShadowDrawCalls);
+        }
+    }
+
+    private void RenderBarnLightShadows(Scene.RenderContext renderContext)
+    {
+        Debug.Assert(ViewBuffer != null);
+
+        if (!ViewBuffer.Data!.ExperimentalLightsEnabled)
+        {
+            return;
+        }
+
+        if (Scene.LightingInfo.BinnedShadowCasters.Count == 0)
+        {
+            return;
+        }
+
+        using var _ = new GLDebugGroup("Barn Light Shadows");
+        Debug.Assert(BarnLightShadowBuffer != null);
+
+        GL.DepthFunc(DepthFunction.Lequal);
+        GL.DepthRange(0.0, 1.0);
+        GL.ClearDepth(1.0);
+        GL.FrontFace(FrontFaceDirection.Cw);
+
+        GL.Enable(EnableCap.PolygonOffsetFill);
+        GL.PolygonOffset(2f, 0f);
+
+        BarnLightShadowBuffer.Bind(FramebufferTarget.Framebuffer);
+
+        var atlasSize = ShadowTextureSize;
+        Scene.LightingInfo.BarnLightShadowAtlasSize = atlasSize;
+
+        if (BarnLightShadowBuffer.Resize(atlasSize, atlasSize))
+        {
+            BarnLightShadowBuffer.SetShadowDepthSamplerState(true);
+            Textures.RemoveAll(t => t.Slot == ReservedTextureSlots.BarnLightShadowDepth);
+            Textures.Add(new(ReservedTextureSlots.BarnLightShadowDepth, "g_tBarnLightShadowDepth", BarnLightShadowBuffer.Depth!));
+        }
+
+        GL.Enable(EnableCap.ScissorTest);
+        GL.Viewport(0, 0, BarnLightShadowBuffer.Width, BarnLightShadowBuffer.Height);
+        GL.Scissor(0, 0, BarnLightShadowBuffer.Width, BarnLightShadowBuffer.Height);
+        GL.Clear(ClearBufferMask.DepthBufferBit);
+
+        foreach (var caster in Scene.LightingInfo.BinnedShadowCasters)
+        {
+            var region = caster.Region;
+
+            if (region.Width == 0)
+            {
+                continue;
+            }
+
+            GL.Viewport(region.X, region.Y, region.Width, region.Height);
+            GL.Scissor(region.X, region.Y, region.Width, region.Height);
+
+            ViewBuffer.Data.WorldToProjection = caster.WorldToFrustum;
+            ViewBuffer.Update();
+
+            barnLightShadowFrustum.Update(caster.WorldToFrustum);
+
+            // This is performing culling mid render, reusing the scene draw lists.
+            // Should be in update loop.
+            Scene.SetupBarnLightFaceShadow(caster.Light, caster.FaceIndex, barnLightShadowFrustum);
+
+            Scene.RenderOpaqueShadows(renderContext, depthOnlyShaders, caster.Light.FaceShadowCache[caster.FaceIndex].DrawCalls!);
+        }
+
+        GL.Disable(EnableCap.ScissorTest);
+        GL.Disable(EnableCap.PolygonOffsetFill);
+
+        GL.FrontFace(FrontFaceDirection.Ccw);
+        GL.DepthFunc(DepthFunction.Greater);
+        GL.ClearDepth(0.0);
     }
 
     private void ComputeAverageLuminance(Scene.RenderContext renderContext)
@@ -540,6 +719,9 @@ public class Renderer
         }
     }
 
+    /// <summary>
+    /// Resolves MSAA and copies color and/or depth from the framebuffer into <see cref="ResolvedSceneColor"/> and <see cref="ResolvedSceneDepth"/>.
+    /// </summary>
     public void GrabFramebufferCopy(Framebuffer framebuffer, bool copyColor, bool copyDepth)
     {
         if (!copyColor && !copyDepth)
@@ -574,6 +756,9 @@ public class Renderer
         Postprocess.Render(inputFramebuffer, outputFramebuffer, ResolvedSceneColor!, Camera, flipY);
     }
 
+    /// <summary>
+    /// Releases GPU resources owned by this renderer.
+    /// </summary>
     public void Dispose()
     {
         ViewBuffer?.Dispose();
@@ -584,6 +769,9 @@ public class Renderer
         ResolvedSceneDepth?.Delete();
     }
 
+    /// <summary>
+    /// Advances the simulation, updates scene draw calls, and prepares shadow data for the next frame.
+    /// </summary>
     public void Update(Scene.UpdateContext updateContext)
     {
         if (ViewBuffer is null || ShadowDepthBuffer is null)
@@ -603,6 +791,11 @@ public class Renderer
         Scene.PostProcessInfo.UpdatePostProcessing(updateContext.Camera);
 
         Scene.SetupSceneShadows(updateContext.Camera, ShadowDepthBuffer.Width);
+
+        if (ViewBuffer.Data.ExperimentalLightsEnabled)
+        {
+            Scene.LightingInfo.BinBarnLights(Camera.ViewFrustum, Camera.Location);
+        }
 
         if (LockedCullFrustum == null)
         {

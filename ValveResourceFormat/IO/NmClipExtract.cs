@@ -1,10 +1,11 @@
 using System.IO;
 using System.Linq;
 using System.Text;
-using ValveResourceFormat.IO;
+using ValveResourceFormat.ResourceTypes;
+using ValveResourceFormat.ResourceTypes.ModelAnimation2;
 using ValveResourceFormat.Serialization.KeyValues;
 
-namespace ValveResourceFormat.ResourceTypes.ModelAnimation2;
+namespace ValveResourceFormat.IO;
 
 /// <summary>
 /// Extracts Source 2 animation clips to editable format.
@@ -46,11 +47,11 @@ public class NmClipExtract
             kv.AddProperty("m_nAdditiveBaseFrameIdx", 0L);
         }
 
-        var animation = new ModelAnimation.Animation(clip);
+        var animation = new ResourceTypes.ModelAnimation.Animation(clip);
         var skeletonResource = fileLoader.LoadFileCompiled(clip.SkeletonName);
         if (skeletonResource != null)
         {
-            var skeleton = ModelAnimation.Skeleton.FromSkeletonData(((BinaryKV3)skeletonResource.DataBlock!).Data);
+            var skeleton = ResourceTypes.ModelAnimation.Skeleton.FromSkeletonData(((BinaryKV3)skeletonResource.DataBlock!).Data);
             var modelSpaceSamplingChain = clip.Data.GetArray<KVObject>("m_modelSpaceSamplingChain");
             // The array below indexes into the bone sampling chain, which in turn indexes into the skeleton bones.
             var modelSpaceBoneSamplingIndices = clip.Data.GetIntegerArray("m_modelSpaceBoneSamplingIndices");

@@ -2,7 +2,6 @@ using System.IO;
 using System.Text;
 using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.ResourceTypes;
-using ValveResourceFormat.ResourceTypes.ModelAnimation2;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.IO
@@ -177,7 +176,7 @@ namespace ValveResourceFormat.IO
                     break;
 
                 case ResourceType.AnimationGraph:
-                    contentFile = new AnimationGraphExtract(resource).ToContentFile();
+                    contentFile = new AnimationGraphExtract(resource, fileLoader).ToContentFile();
                     break;
 
                 case ResourceType.Panorama:
@@ -318,7 +317,28 @@ namespace ValveResourceFormat.IO
             {
                 FlexSceneFile.FlexSceneFile.MAGIC => new FlexSceneExtract(stream).ToContentFile(),
                 ClosedCaptions.ClosedCaptions.MAGIC => new ClosedCaptionsExtract(stream, fileName).ToContentFile(),
+                NavMesh.NavMeshFile.MAGIC => ExtractNavMesh(stream, fileName),
                 _ => null,
+            };
+        }
+
+        private static ContentFile ExtractNavMesh(Stream stream, string fileName)
+        {
+            var navMesh = new NavMesh.NavMeshFile();
+            navMesh.Read(stream);
+
+            var exporter = new GltfModelExporter(new NullFileLoader())
+            {
+                ProgressReporter = new Progress<string>(_ => { }),
+            };
+            var glbStream = new MemoryStream();
+            var resourceName = Path.GetFileNameWithoutExtension(fileName);
+            exporter.Export(navMesh, resourceName, glbStream);
+
+            return new ContentFile
+            {
+                Data = glbStream.ToArray(),
+                FileName = Path.ChangeExtension(fileName, ".glb"),
             };
         }
 

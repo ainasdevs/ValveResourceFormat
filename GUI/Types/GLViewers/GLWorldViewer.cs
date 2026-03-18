@@ -8,6 +8,9 @@ using GUI.Utils;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
+using ValveResourceFormat.Renderer.SceneEnvironment;
+using ValveResourceFormat.Renderer.SceneNodes;
+using ValveResourceFormat.Renderer.World;
 using ValveResourceFormat.ResourceTypes;
 using static GUI.Controls.SavedCameraPositionsControl;
 using static ValveResourceFormat.Renderer.PickingTexture;
@@ -183,7 +186,8 @@ namespace GUI.Types.GLViewers
 
             if (world != null)
             {
-                LoadedWorld = new WorldLoader(world, Scene, mapExternalReferences);
+                LoadedWorld = new WorldLoader(world, Scene);
+                LoadedWorld.Load(mapExternalReferences);
 
                 if (LoadedWorld.SkyboxScene != null)
                 {
@@ -350,7 +354,11 @@ namespace GUI.Types.GLViewers
                     });
 
                     UiControl.AddCheckBox("Depth Prepass", Scene.EnableDepthPrepass, (v) => Scene.EnableDepthPrepass = v);
-                    UiControl.AddCheckBox("Experimental Lights", false, v => Renderer.ViewBuffer!.Data!.ExperimentalLightsEnabled = v);
+
+                    var enableLights = Scene.LightingInfo.BarnLights.Count < 40;
+                    Renderer.ViewBuffer!.Data!.ExperimentalLightsEnabled = enableLights;
+
+                    UiControl.AddCheckBox("Experimental Lights", enableLights, v => Renderer.ViewBuffer!.Data!.ExperimentalLightsEnabled = v);
 
                     AddSceneExposureSlider();
                 }

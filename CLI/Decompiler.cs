@@ -96,7 +96,7 @@ namespace CLI
         /// <param name="input">-i, Input file to be processed. With no additional arguments, a summary of the input(s) will be displayed.</param>
         /// <param name="output">-o, Output path to write to. If input is a folder (or a VPK), this should be a folder.</param>
         /// <param name="decompile">-d|--vpk_decompile, Decompile supported resource files.</param>
-        /// <param name="texture_decode_flags">Decompile textures with the specified decode flags, example: "none", "auto", "foceldr".</param>
+        /// <param name="texture_decode_flags">Decompile textures with the specified decode flags, example: "none", "auto", "ForceLDR".</param>
         /// <param name="recursive">If specified and given input is a folder, all sub directories will be scanned too.</param>
         /// <param name="recursive_vpk">If specified along with --recursive, will also recurse into VPK archives.</param>
         /// <param name="all">-a, Print the content of each resource block in the file.</param>
@@ -823,6 +823,16 @@ namespace CLI
                 var navMeshFile = new NavMeshFile();
                 navMeshFile.Read(stream);
 
+                if (OutputFile != null && GltfExportFormat != null)
+                {
+                    var outFilePath = Path.ChangeExtension(GetOutputPath(path), GltfExportFormat);
+                    Directory.CreateDirectory(Path.GetDirectoryName(outFilePath)!);
+
+                    using var fileLoader = new GameFileLoader(null, path);
+                    CreateGltfExporter(fileLoader).Export(navMeshFile, path, outFilePath);
+                    return;
+                }
+
                 if (!CollectStats)
                 {
                     Console.WriteLine(navMeshFile.ToString());
@@ -1246,13 +1256,17 @@ namespace CLI
                 {
                     if (manifestData.TryGetValue(filePath, out var oldCrc32) && oldCrc32 == file.CRC32)
                     {
+                        Console.WriteLine("--- Skipped (unchanged) \"{0}\"", filePath);
                         continue;
                     }
 
                     manifestData[filePath] = file.CRC32;
                 }
 
-                Console.WriteLine("\t[archive index: {0:D3}] {1}", file.ArchiveIndex, filePath);
+                if (OutputFile == null)
+                {
+                    Console.WriteLine("\t[archive index: {0:D3}] {1}", file.ArchiveIndex, filePath);
+                }
 
                 var totalLength = (int)file.TotalLength;
                 var rawFileData = ArrayPool<byte>.Shared.Rent(totalLength);
@@ -1295,6 +1309,7 @@ namespace CLI
                             // Only parse the highest SM of features files
                             if (!highestShaderModelFeatures!.Contains(filePath))
                             {
+                                Console.WriteLine("--- Skipped (not highest shader model) \"{0}\"", filePath);
                                 continue;
                             }
 
@@ -1324,6 +1339,8 @@ namespace CLI
                                 Directory.CreateDirectory(Path.GetDirectoryName(outputFile)!);
 
                                 gltfExporter.Export(resource, outputFile);
+
+                                Console.WriteLine("--- Dump written to \"{0}\"", outputFile);
 
                                 continue;
                             }

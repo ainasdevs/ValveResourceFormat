@@ -11,7 +11,7 @@
     <PublishAot>true</PublishAot>
     <IsAotCompatible>true</IsAotCompatible>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,6 +21,9 @@
 
   <ItemGroup>
     <Using Include="ValveResourceFormat.Utils" />
+    <Using Include="ValveResourceFormat.Renderer.Utils" />
+    <Using Include="ValveResourceFormat.Renderer.Shaders" />
+    <Using Include="ValveResourceFormat.Renderer.Materials" />
   </ItemGroup>
 
   <ItemGroup>
