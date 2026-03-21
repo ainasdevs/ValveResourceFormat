@@ -68,6 +68,13 @@ namespace GUI.Types.Viewers
             };
             exportCollectionMenuItem.Click += OnExportCollectionClick;
             collectionContextMenu.Items.Add(exportCollectionMenuItem);
+            var exportCollectionStaticMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export decompiled shaders (static combos only)...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportCollectionStaticMenuItem.Click += OnExportCollectionStaticOnlyClick;
+            collectionContextMenu.Items.Add(exportCollectionStaticMenuItem);
 
             programContextMenu = new ThemedContextMenuStrip(components)
             {
@@ -80,6 +87,13 @@ namespace GUI.Types.Viewers
             };
             exportProgramMenuItem.Click += OnExportProgramClick;
             programContextMenu.Items.Add(exportProgramMenuItem);
+            var exportProgramStaticMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export decompiled shaders (static combos only)...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportProgramStaticMenuItem.Click += OnExportProgramStaticOnlyClick;
+            programContextMenu.Items.Add(exportProgramStaticMenuItem);
 
             control = new TextControl(CodeTextBox.HighlightLanguage.Shaders);
             control.AddControl(fileListView);
@@ -495,7 +509,57 @@ namespace GUI.Types.Viewers
             });
         }
 
-        private static void ExportProgram(VfxProgramData program, string baseDir)
+        private void OnExportCollectionStaticOnlyClick(object? sender, EventArgs e)
+        {
+            if (collectionContextMenu.Tag is not ShaderExtract shaderExtract)
+                return;
+
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Select export folder",
+                InitialDirectory = Settings.Config.SaveDirectory,
+                UseDescriptionForTitle = true,
+            };
+
+            if (dialog.ShowDialog() != DialogResult.OK)
+                return;
+
+            Settings.Config.SaveDirectory = dialog.SelectedPath;
+
+            _ = Task.Run(() =>
+            {
+                foreach (var program in shaderExtract.Shaders)
+                    ExportProgram(program, dialog.SelectedPath, staticCombosOnly: true);
+
+                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+        }
+
+        private void OnExportProgramStaticOnlyClick(object? sender, EventArgs e)
+        {
+            if (programContextMenu.Tag is not VfxProgramData program)
+                return;
+
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "Select export folder",
+                InitialDirectory = Settings.Config.SaveDirectory,
+                UseDescriptionForTitle = true,
+            };
+
+            if (dialog.ShowDialog() != DialogResult.OK)
+                return;
+
+            Settings.Config.SaveDirectory = dialog.SelectedPath;
+
+            _ = Task.Run(() =>
+            {
+                ExportProgram(program, dialog.SelectedPath, staticCombosOnly: true);
+                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+        }
+
+        private static void ExportProgram(VfxProgramData program, string baseDir, bool staticCombosOnly = false)
         {
             if (program.StaticComboEntries.Count == 0)
                 return;
@@ -534,26 +598,33 @@ namespace GUI.Types.Viewers
                 foreach (var renderStateInfo in combo.DynamicCombos)
                     sourceIdToRenderStateInfo.TryAdd(renderStateInfo.ShaderFileId, renderStateInfo);
 
-                foreach (var shaderFile in combo.ShaderFiles)
+                var shaderFiles = staticCombosOnly
+                    ? combo.ShaderFiles.Where(sf => sf.Bytecode.Length > 0).Take(1)
+                    : combo.ShaderFiles.Where(sf => sf.Bytecode.Length > 0);
+
+                foreach (var shaderFile in shaderFiles)
                 {
-                    if (shaderFile.Bytecode.Length == 0)
-                        continue;
+                    var dynamicPart = string.Empty;
 
-                    dfNamesAbbrev.Clear();
-                    if (sourceIdToRenderStateInfo.TryGetValue(shaderFile.ShaderFileId, out var renderStateInfo))
+                    if (!staticCombosOnly)
                     {
-                        var dConfig = program.GetDBlockConfig(renderStateInfo.DynamicComboId);
-                        for (var i = 0; i < program.DynamicComboArray.Length; i++)
+                        dfNamesAbbrev.Clear();
+                        if (sourceIdToRenderStateInfo.TryGetValue(shaderFile.ShaderFileId, out var renderStateInfo))
                         {
-                            if (dConfig[i] == 0)
-                                continue;
+                            var dConfig = program.GetDBlockConfig(renderStateInfo.DynamicComboId);
+                            for (var i = 0; i < program.DynamicComboArray.Length; i++)
+                            {
+                                if (dConfig[i] == 0)
+                                    continue;
 
-                            var dfBlock = program.DynamicComboArray[i];
-                            dfNamesAbbrev.Add(dConfig[i] > 1 ? $"{dfBlock.Name}={dConfig[i]}" : dfBlock.Name);
+                                var dfBlock = program.DynamicComboArray[i];
+                                dfNamesAbbrev.Add(dConfig[i] > 1 ? $"{dfBlock.Name}={dConfig[i]}" : dfBlock.Name);
+                            }
                         }
+
+                        dynamicPart = dfNamesAbbrev.Count > 0 ? $"__{string.Join("+", dfNamesAbbrev)}" : string.Empty;
                     }
 
-                    var dynamicPart = dfNamesAbbrev.Count > 0 ? $"__{string.Join("+", dfNamesAbbrev)}" : string.Empty;
                     var platform = shaderFile.BlockName.ToLowerInvariant();
                     var ext = platform is "glsl" ? "glsl" : "hlsl";
                     var rawName = $"{staticPart}{dynamicPart}.{ext}";
