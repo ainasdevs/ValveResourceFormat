@@ -15,7 +15,7 @@ namespace GUI
 {
     partial class MainForm
     {
-        public void ShowVpkContextMenu(Control control, Point position, bool isRootNode, bool isFolderNode)
+        public void ShowVpkContextMenu(Control control, Point position, bool isRootNode, bool isFolderNode, bool deletedFilesRecovered)
         {
             copyFileNameToolStripMenuItem.Visible = !isRootNode;
             openWithDefaultAppToolStripMenuItem.Visible = !isRootNode && !isFolderNode;
@@ -24,7 +24,7 @@ namespace GUI
             toolStripSeparator3.Visible = isRootNode || !isFolderNode;
 
             verifyPackageContentsToolStripMenuItem.Visible = isRootNode;
-            recoverDeletedToolStripMenuItem.Visible = isRootNode;
+            recoverDeletedToolStripMenuItem.Visible = isRootNode && !deletedFilesRecovered;
 
             vpkContextMenu.Show(control, position);
         }
@@ -112,17 +112,15 @@ namespace GUI
             else if (control is BetterListView listView)
             {
                 context = listView.VrfGuiContext;
-#pragma warning disable IDE0028 // Simplify collection initialization - it doesn't work
                 selectedNodes = [];
 
-                foreach (var item in listView.SelectedItems)
+                foreach (var item in listView.GetSelectedVirtualItems())
                 {
                     if (item is IBetterBaseItem selectedNode)
                     {
                         selectedNodes.Add(selectedNode);
                     }
                 }
-#pragma warning restore IDE0028
             }
             else
             {
@@ -138,6 +136,11 @@ namespace GUI
 
             foreach (var selectedNode in selectedNodes)
             {
+                if (sb.Length > 0)
+                {
+                    sb.AppendLine();
+                }
+
                 if (wantsFullPath)
                 {
                     sb.Append("vpk:");
@@ -192,7 +195,10 @@ namespace GUI
                 }
             }
 
-            Clipboard.SetText(sb.ToString());
+            if (sb.Length > 0)
+            {
+                Clipboard.SetText(sb.ToString());
+            }
         }
 
         private void OpenWithoutViewerToolStripMenuItem_Click(object sender, EventArgs e)
@@ -243,7 +249,7 @@ namespace GUI
                 context = listView.VrfGuiContext;
                 selectedFiles = [];
 
-                foreach (var item in listView.SelectedItems)
+                foreach (var item in listView.GetSelectedVirtualItems())
                 {
                     if (item is not IBetterBaseItem selectedNode)
                     {
@@ -352,7 +358,8 @@ namespace GUI
             else if (control is BetterListView listView)
             {
                 guiContext = listView.VrfGuiContext;
-                selectedNode = listView.SelectedItems.Count > 0 ? listView.SelectedItems[0] as IBetterBaseItem : null;
+                var selectedItems = listView.GetSelectedVirtualItems();
+                selectedNode = selectedItems.Count > 0 ? selectedItems[0] as IBetterBaseItem : null;
             }
             else
             {
@@ -395,14 +402,16 @@ namespace GUI
                     return;
                 }
 
-                if (listView.SelectedItems.Count > 1)
+                var selectedItems = listView.GetSelectedVirtualItems();
+
+                if (selectedItems.Count > 1)
                 {
                     // We're selecting multiple files
-                    ExportFile.ExtractFilesFromListViewNodes(listView.SelectedItems, listView.VrfGuiContext, decompile);
+                    ExportFile.ExtractFilesFromListViewNodes(selectedItems, listView.VrfGuiContext, decompile);
                 }
-                else
+                else if (selectedItems.Count == 1)
                 {
-                    ExportFile.ExtractFilesFromTreeNode((IBetterBaseItem)listView.SelectedItems[0], listView.VrfGuiContext, decompile);
+                    ExportFile.ExtractFilesFromTreeNode((IBetterBaseItem)selectedItems[0], listView.VrfGuiContext, decompile);
                 }
             }
             // Clicking context menu item when right clicking a tab
@@ -442,8 +451,6 @@ namespace GUI
 
         private void RecoverDeletedToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            recoverDeletedToolStripMenuItem.Enabled = false;
-
             if (mainTabs.SelectedTab?.Controls[nameof(TreeViewWithSearchResults)] is TreeViewWithSearchResults treeView)
             {
                 treeView.RecoverDeletedFiles();

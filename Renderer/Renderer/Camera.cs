@@ -122,7 +122,11 @@ namespace ValveResourceFormat.Renderer
             viewConstants.ViewToProjection = ProjectionMatrix;
             viewConstants.CameraPosition = Location;
 
-            Matrix4x4.Invert(ProjectionMatrix, out viewConstants.ProjectionToWorld);
+            if (!Matrix4x4.Invert(ProjectionMatrix, out viewConstants.ProjectionToWorld))
+            {
+                throw new InvalidOperationException("Matrix invert failed");
+            }
+
             viewConstants.InvProjRow3 = new Vector4(
                 viewConstants.ProjectionToWorld.M14,
                 viewConstants.ProjectionToWorld.M24,
@@ -228,6 +232,11 @@ namespace ValveResourceFormat.Renderer
         /// <param name="depth">Depth of the object's bounding box.</param>
         public void FrameObject(Vector3 objectPosition, float width, float height, float depth)
         {
+            if (width == 0 && height == 0 && depth == 0)
+            {
+                return;
+            }
+
             var fov = GetFOV();
             var halfFovVertical = fov * 0.5f;
             var halfFovHorizontal = MathF.Atan(MathF.Tan(halfFovVertical) * AspectRatio);
