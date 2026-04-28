@@ -237,6 +237,15 @@ namespace ValveResourceFormat.Renderer
                 return;
             }
 
+            // Previous operation might have corrupted our angles
+            if (float.IsNaN(Yaw) || float.IsNaN(Pitch))
+            {
+                Yaw = 0;
+                Pitch = 0;
+            }
+
+            RecalculateDirectionVectors();
+
             var fov = GetFOV();
             var halfFovVertical = fov * 0.5f;
             var halfFovHorizontal = MathF.Atan(MathF.Tan(halfFovVertical) * AspectRatio);
@@ -317,7 +326,11 @@ namespace ValveResourceFormat.Renderer
             Pitch = Math.Clamp(Pitch, -PITCH_LIMIT, PITCH_LIMIT);
         }
 
-        private float GetFOV()
+        /// <summary>
+        /// Returns the field of view in radians, as read from the renderer context settings.
+        /// </summary>
+        /// <returns></returns>
+        public float GetFOV()
         {
             return float.DegreesToRadians(RendererContext.FieldOfView);
         }

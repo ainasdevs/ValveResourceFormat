@@ -110,6 +110,11 @@ public class Renderer
     /// </summary>
     public Frustum? LockedCullFrustum { get; set; }
 
+    /// <summary>
+    /// When not <see langword="null"/>, PVS queries use this position instead of the camera position, freezing the PVS state.
+    /// </summary>
+    public Vector3? LockedCullPosition { get; set; }
+
     // options
     /// <summary>
     /// Width and height in texels of the shadow depth buffers.
@@ -415,8 +420,14 @@ public class Renderer
     /// </summary>
     public void Render(Scene.RenderContext renderContext)
     {
+        // Render backfaces into shadow maps
+        GL.FrontFace(FrontFaceDirection.Cw);
+
         RenderSceneShadows(renderContext);
         RenderBarnLightShadows(renderContext);
+
+        GL.FrontFace(FrontFaceDirection.Ccw);
+
         RenderScenesWithView(renderContext);
     }
 
@@ -616,7 +627,6 @@ public class Renderer
         GL.DepthFunc(DepthFunction.Lequal);
         GL.DepthRange(0.0, 1.0);
         GL.ClearDepth(1.0);
-        GL.FrontFace(FrontFaceDirection.Cw);
 
         GL.Enable(EnableCap.PolygonOffsetFill);
         GL.PolygonOffset(2f, 0f);
@@ -665,7 +675,6 @@ public class Renderer
         GL.Disable(EnableCap.ScissorTest);
         GL.Disable(EnableCap.PolygonOffsetFill);
 
-        GL.FrontFace(FrontFaceDirection.Ccw);
         GL.DepthFunc(DepthFunction.Greater);
         GL.ClearDepth(0.0);
     }
@@ -838,6 +847,16 @@ public class Renderer
         if (LockedCullFrustum == null)
         {
             Scene.GetOcclusionTestResults();
+        }
+
+        if (Scene is { EnablePvsCulling: true, VoxelVisibility: not null })
+        {
+            var pvsPosition = LockedCullPosition ?? updateContext.Camera.Location;
+            Scene.CurrentFramePvs = Scene.VoxelVisibility.GetPVSForPoint(pvsPosition);
+        }
+        else
+        {
+            Scene.CurrentFramePvs = null;
         }
 
         Scene.CollectSceneDrawCalls(updateContext.Camera, LockedCullFrustum);

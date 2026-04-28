@@ -1,12 +1,13 @@
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Logging;
+using ValveKeyValue;
+using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Particles.Emitters;
 using ValveResourceFormat.Renderer.Particles.ForceGenerators;
 using ValveResourceFormat.Renderer.Particles.Initializers;
 using ValveResourceFormat.Renderer.Particles.Operators;
 using ValveResourceFormat.Renderer.Particles.PreEmissionOperators;
 using ValveResourceFormat.Renderer.Particles.Renderers;
-using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Renderer.Particles
 {
@@ -18,7 +19,7 @@ namespace ValveResourceFormat.Renderer.Particles
         // These can all be found in particle.dll
 
         // Register particle emitters
-        private static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionEmitter>> EmitterDictionary
+        internal static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionEmitter>> EmitterDictionary
             = new()
             {
                 ["C_OP_InstantaneousEmitter"] = (emitterInfo) => new InstantaneousEmitter(emitterInfo),
@@ -27,7 +28,7 @@ namespace ValveResourceFormat.Renderer.Particles
             };
 
         // Register particle initializers
-        private static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionInitializer>> InitializerDictionary
+        internal static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionInitializer>> InitializerDictionary
             = new()
             {
                 ["C_INIT_AddVectorToVector"] = initializerInfo => new AddVectorToVector(initializerInfo),
@@ -36,6 +37,9 @@ namespace ValveResourceFormat.Renderer.Particles
                 ["C_INIT_CreateWithinBox"] = initializerInfo => new CreateWithinBox(initializerInfo),
                 ["C_INIT_CreateWithinSphere"] = initializerInfo => new CreateWithinSphere(initializerInfo),
                 ["C_INIT_CreateWithinSphereTransform"] = initializerInfo => new CreateWithinSphereTransform(initializerInfo),
+                ["C_INIT_CreateFromCPs"] = initializerInfo => new CreateFromCPs(initializerInfo),
+                ["C_INIT_CreateFromParentParticles"] = initializerInfo => new CreateFromParentParticles(initializerInfo),
+                ["C_INIT_InitFromCPSnapshot"] = initializerInfo => new InitFromCPSnapshot(initializerInfo),
                 ["C_INIT_InitFloat"] = initializerInfo => new InitFloat(initializerInfo),
                 ["C_INIT_InitFloatCollection"] = initializerInfo => new InitFloat(initializerInfo), // initfloat but the numberprovider has fewer options
                 ["C_INIT_InitVec"] = initializerInfo => new InitVec(initializerInfo),
@@ -51,21 +55,26 @@ namespace ValveResourceFormat.Renderer.Particles
                 ["C_INIT_RandomRotationSpeed"] = initializerInfo => new RandomRotationSpeed(initializerInfo),
                 ["C_INIT_RandomScalar"] = initializerInfo => new RandomScalar(initializerInfo),
                 ["C_INIT_RandomSequence"] = initializerInfo => new RandomSequence(initializerInfo),
+                ["C_INIT_SequenceLifeTime"] = initializerInfo => new SequenceLifeTime(initializerInfo),
+                ["C_INIT_RandomSecondSequence"] = initializerInfo => new RandomSecondSequence(initializerInfo),
                 ["C_INIT_RandomTrailLength"] = initializerInfo => new RandomTrailLength(initializerInfo),
                 ["C_INIT_RandomVector"] = initializerInfo => new RandomVector(initializerInfo),
                 ["C_INIT_RandomVectorComponent"] = initializerInfo => new RandomVectorComponent(initializerInfo),
                 ["C_INIT_RandomYaw"] = initializerInfo => new RandomRotation(initializerInfo), // Same as RandomRotation
                 ["C_INIT_RandomYawFlip"] = initializerInfo => new RandomYawFlip(initializerInfo),
+                ["C_INIT_NormalOffset"] = initializerInfo => new NormalOffset(initializerInfo),
                 ["C_INIT_RemapScalar"] = initializerInfo => new RemapScalar(initializerInfo),
                 ["C_INIT_RemapSpeedToScalar"] = initializerInfo => new RemapSpeedToScalar(initializerInfo),
                 ["C_INIT_RemapParticleCountToScalar"] = initializerInfo => new RemapParticleCountToScalar(initializerInfo),
                 ["C_INIT_RingWave"] = initializerInfo => new RingWave(initializerInfo),
+                ["C_INIT_VelocityFromCP"] = initializerInfo => new VelocityFromCP(initializerInfo),
+                ["C_INIT_InheritVelocity"] = initializerInfo => new InheritVelocity(initializerInfo),
                 ["C_INIT_VelocityRadialRandom"] = initializerInfo => new VelocityRadialRandom(initializerInfo),
                 ["C_INIT_VelocityRandom"] = initializerInfo => new VelocityRandom(initializerInfo),
             };
 
         // Register particle operators
-        private static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionOperator>> OperatorDictionary
+        internal static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionOperator>> OperatorDictionary
             = new()
             {
                 ["C_OP_AlphaDecay"] = operatorInfo => new AlphaDecay(operatorInfo),
@@ -94,11 +103,13 @@ namespace ValveResourceFormat.Renderer.Particles
                 ["C_OP_OscillateVector"] = operatorInfo => new OscillateVector(operatorInfo),
                 ["C_OP_OscillateVectorSimple"] = operatorInfo => new OscillateVectorSimple(operatorInfo),
                 ["C_OP_PlaneCull"] = operatorInfo => new PlaneCull(operatorInfo),
-                //["C_OP_PositionLock"] = operatorInfo => new PositionLock(operatorInfo), // This is breaking positioning effects, needs to be rewritten
+                ["C_OP_RestartAfterDuration"] = operatorInfo => new RestartAfterDuration(operatorInfo),
+                ["C_OP_PositionLock"] = operatorInfo => new PositionLock(operatorInfo),
                 ["C_OP_QuantizeFloat"] = operatorInfo => new QuantizeFloat(operatorInfo),
                 ["C_OP_RampScalarLinearSimple"] = operatorInfo => new RampScalarLinearSimple(operatorInfo),
                 ["C_OP_RemapCrossProductOfTwoVectorsToVector"] = operatorInfo => new RemapCrossProductOfTwoVectorsToVector(operatorInfo),
                 ["C_OP_RemapControlPointDirectionToVector"] = operatorInfo => new RemapControlPointDirectionToVector(operatorInfo),
+                ["C_OP_SetCPtoVector"] = operatorInfo => new SetCPtoVector(operatorInfo),
                 ["C_OP_RemapParticleCountToScalar"] = operatorInfo => new OpRemapParticleCountToScalar(operatorInfo),
                 ["C_OP_RemapSpeed"] = operatorInfo => new RemapSpeed(operatorInfo),
                 ["C_OP_RotateVector"] = operatorInfo => new RotateVector(operatorInfo),
@@ -113,7 +124,7 @@ namespace ValveResourceFormat.Renderer.Particles
             };
 
         // Register particle force generators
-        private static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionOperator>> ForceGeneratorDictionary
+        internal static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionOperator>> ForceGeneratorDictionary
             = new()
             {
                 ["C_OP_AttractToControlPoint"] = forceGeneratorInfo => new AttractToControlPoint(forceGeneratorInfo),
@@ -122,15 +133,17 @@ namespace ValveResourceFormat.Renderer.Particles
             };
 
         // Register particle renderers
-        private static readonly Dictionary<string, Func<ParticleDefinitionParser, RendererContext, ParticleFunctionRenderer>> RendererDictionary
+        internal static readonly Dictionary<string, Func<ParticleDefinitionParser, RendererContext, Scene, ParticleFunctionRenderer>> RendererDictionary
             = new()
             {
-                ["C_OP_RenderSprites"] = (rendererInfo, rendererContext) => new RenderSprites(rendererInfo, rendererContext),
-                ["C_OP_RenderTrails"] = (rendererInfo, rendererContext) => new RenderTrails(rendererInfo, rendererContext),
+                ["C_OP_RenderSprites"] = (rendererInfo, rendererContext, scene) => new RenderSprites(rendererInfo, rendererContext),
+                ["C_OP_RenderTrails"] = (rendererInfo, rendererContext, scene) => new RenderTrails(rendererInfo, rendererContext),
+                ["C_OP_RenderStandardLight"] = (rendererInfo, rendererContext, scene) => new RenderStandardLight(rendererInfo, rendererContext, scene),
+                ["C_OP_RenderOmni2Light"] = (rendererInfo, rendererContext, scene) => new RenderOmni2Light(rendererInfo, rendererContext, scene),
             };
 
         // Register particle pre-emission operators (mostly stuff with control points)
-        private static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionPreEmissionOperator>> PreEmissionOperatorDictionary
+        internal static readonly Dictionary<string, Func<ParticleDefinitionParser, ParticleFunctionPreEmissionOperator>> PreEmissionOperatorDictionary
             = new()
             {
                 ["C_OP_DistanceBetweenCPsToCP"] = preEmissionOperatorInfo => new DistanceBetweenCPsToCP(preEmissionOperatorInfo),
@@ -138,6 +151,7 @@ namespace ValveResourceFormat.Renderer.Particles
                 ["C_OP_SetControlPointPositions"] = preEmissionOperatorInfo => new SetControlPointPositions(preEmissionOperatorInfo),
                 ["C_OP_SetControlPointRotation"] = preEmissionOperatorInfo => new SetControlPointRotation(preEmissionOperatorInfo),
                 ["C_OP_SetControlPointToVectorExpression"] = preEmissionOperatorInfo => new SetControlPointToVectorExpression(preEmissionOperatorInfo),
+                ["C_OP_SetControlPointOrientation"] = preEmissionOperatorInfo => new SetControlPointOrientation(preEmissionOperatorInfo),
                 ["C_OP_SetRandomControlPointPosition"] = preEmissionOperatorInfo => new SetRandomControlPointPosition(preEmissionOperatorInfo),
                 ["C_OP_SetSingleControlPointPosition"] = preEmissionOperatorInfo => new SetSingleControlPointPosition(preEmissionOperatorInfo),
                 ["C_OP_StopAfterCPDuration"] = preEmissionOperatorInfo => new StopAfterDuration(preEmissionOperatorInfo),
@@ -211,11 +225,11 @@ namespace ValveResourceFormat.Renderer.Particles
         /// Attempts to create a particle renderer by its Source 2 class name.
         /// </summary>
         /// <returns><see langword="true"/> if the renderer type is supported; otherwise <see langword="false"/>.</returns>
-        public static bool TryCreateRender(string name, KVObject rendererInfo, RendererContext rendererContext, [MaybeNullWhen(false)] out ParticleFunctionRenderer renderer)
+        public static bool TryCreateRender(string name, KVObject rendererInfo, RendererContext rendererContext, Scene scene, [MaybeNullWhen(false)] out ParticleFunctionRenderer renderer)
         {
             if (RendererDictionary.TryGetValue(name, out var factory))
             {
-                renderer = factory(new ParticleDefinitionParser(rendererInfo, rendererContext.Logger), rendererContext);
+                renderer = factory(new ParticleDefinitionParser(rendererInfo, rendererContext.Logger), rendererContext, scene);
                 return true;
             }
 

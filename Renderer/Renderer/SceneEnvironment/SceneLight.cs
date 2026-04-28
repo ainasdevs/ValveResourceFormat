@@ -1,4 +1,5 @@
 using ValveResourceFormat.Renderer.Buffers;
+using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.ResourceTypes.EntityLump;
 
 namespace ValveResourceFormat.Renderer.SceneEnvironment;
@@ -28,6 +29,21 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     }
 
     /// <summary>
+    ///     How direct lighting should be represented.
+    /// </summary>
+    public enum DirectLightType
+    {
+        /// <summary>No direct lighting.</summary>
+        None = 0,
+        /// <summary>Fully baked into lightmap (cheapest).</summary>
+        Static = 1,
+        /// <summary>Fully dynamic (most expensive).</summary>
+        Dynamic = 2,
+        /// <summary>Dynamic direct light with baked shadows.</summary>
+        Stationary = 3,
+    }
+
+    /// <summary>
     ///     Shader light type for rendering calculations.
     /// </summary>
     public enum LightType
@@ -54,7 +70,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     ///     Light index to a baked lightmap.
     ///     Range: 0..255 for GameLightmapVersion 1 and 0..3 for GameLightmapVersion 2.
     /// </summary>
-    public int StationaryLightIndex { get; set; }
+    public int StationaryLightIndex { get; set; } = -1;
 
     /// <summary>Gets or sets the world-space position of the light.</summary>
     public Vector3 Position { get; set; }
@@ -113,8 +129,8 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// <summary>Gets or sets the luminaire anisotropy for capsule-shaped area lights.</summary>
     public float LuminaireAnisotropy { get; set; }
 
-    /// <summary>Gets or sets the luminaire shape index (0 = sphere, 1 = capsule, 2 = rect).</summary>
-    public int LuminaireShape { get; set; }
+    /// <summary>Gets or sets the luminaire shape index (-1 = point, 0 = sphere, 1 = capsule, 2 = rect).</summary>
+    public int LuminaireShape { get; set; } = -1;
 
     /// <summary>Gets or sets the minimum roughness clamped for specular highlight calculations.</summary>
     public float MinRoughness { get; set; } = 0.04f;
@@ -128,8 +144,8 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// <summary>Gets or sets the entity class that created this light.</summary>
     public EntityType Entity { get; set; }
 
-    /// <summary>Gets or sets the direct light contribution mode (0 = off, 1 = stationary, 2 = dynamic).</summary>
-    public int DirectLight { get; set; } = 2;
+    /// <summary>Gets or sets the direct lighting type.</summary>
+    public DirectLightType DirectLight { get; set; } = DirectLightType.Dynamic;
 
     /// <summary>Gets or sets whether this light casts shadows.</summary>
     public int CastShadows { get; set; } = 1;
@@ -173,6 +189,11 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     public bool IsDirty { get; set; } = true;
     internal bool WillDrawShadows { get; set; }
 
+    /// <summary>
+    /// Returns whether this light will produce energy based on its properties.
+    /// </summary>
+    public bool IsVisible => BarnFaces.Length > 0 && Brightness > 0f && BrightnessScale > 0f && Color != Vector3.Zero;
+
     internal Dictionary<int, (int FrustumHash, DepthOnlyDrawBuckets? DrawCalls)> FaceShadowCache { get; } = [];
 
     /// <summary>
@@ -197,7 +218,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         var light = new SceneLight(scene)
         {
             StationaryLightIndex =
-                entity.GetPropertyUnchecked("bakedshadowindex", entity.GetPropertyUnchecked("bakelightindex", -1)),
+                entity.GetInt32Property("bakedshadowindex", entity.GetInt32Property("bakelightindex", -1)),
             Entity = type,
             Type = type switch
             {
@@ -216,29 +237,29 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
             Brightness = type switch
             {
-                EntityType.Environment or EntityType.Omni or EntityType.Spot => entity.GetPropertyUnchecked(
+                EntityType.Environment or EntityType.Omni or EntityType.Spot => entity.GetFloatProperty(
                     "brightness", 1.0f),
-                _ => entity.GetPropertyUnchecked("brightness_lumens", 224.0f)
+                _ => entity.GetFloatProperty("brightness_lumens", 224.0f)
             },
 
-            BrightnessScale = entity.GetPropertyUnchecked("brightnessscale", 1.0f),
-            Range = entity.GetPropertyUnchecked("range", 512.0f),
-            FallOff = entity.GetPropertyUnchecked("skirt", 0.1f)
+            BrightnessScale = entity.GetFloatProperty("brightnessscale", 1.0f),
+            Range = entity.GetFloatProperty("range", 512.0f),
+            FallOff = entity.GetFloatProperty("skirt", 0.1f)
         };
 
         var isNewLightType = type is EntityType.Omni2 or EntityType.Barn or EntityType.Rect;
 
         if (!isNewLightType)
         {
-            light.AttenuationLinear = entity.GetPropertyUnchecked("attenuation1", 0.0f);
-            light.AttenuationQuadratic = entity.GetPropertyUnchecked("attenuation2", 0.0f);
+            light.AttenuationLinear = entity.GetFloatProperty("attenuation1");
+            light.AttenuationQuadratic = entity.GetFloatProperty("attenuation2");
         }
 
         if (isNewLightType || type is EntityType.Environment)
         {
-            light.DirectLight = entity.GetPropertyUnchecked("directlight", 2);
-            light.CastShadows = entity.GetPropertyUnchecked("castshadows", 1);
-            light.ShadowMapSize = entity.GetPropertyUnchecked("shadowmapsize", 1024);
+            light.DirectLight = (DirectLightType)entity.GetInt32Property("directlight", 2);
+            light.CastShadows = entity.GetInt32Property("castshadows", 1);
+            light.ShadowMapSize = entity.GetInt32Property("shadowmapsize", 1024);
             if (light.ShadowMapSize <= 0)
             {
                 light.ShadowMapSize = 1024;
@@ -247,40 +268,40 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
         if (type is EntityType.Spot or EntityType.Barn)
         {
-            light.SpotInnerAngle = entity.GetPropertyUnchecked("innerconeangle", light.SpotInnerAngle);
-            light.SpotOuterAngle = entity.GetPropertyUnchecked("outerconeangle", light.SpotOuterAngle);
+            light.SpotInnerAngle = entity.GetFloatProperty("innerconeangle", light.SpotInnerAngle);
+            light.SpotOuterAngle = entity.GetFloatProperty("outerconeangle", light.SpotOuterAngle);
         }
 
         if (type is EntityType.Barn)
         {
-            light.SoftX = entity.GetPropertyUnchecked("soft_x", 0.25f);
-            light.SoftY = entity.GetPropertyUnchecked("soft_y", 0.25f);
-            light.SkirtNear = entity.GetPropertyUnchecked("skirt_near", 0.05f);
-            light.Shape = entity.GetPropertyUnchecked("shape", 0f);
-            light.LuminaireSize = entity.GetPropertyUnchecked("luminaire_size", 4f);
-            light.LuminaireShape = entity.GetPropertyUnchecked("luminaire_shape", 0);
-            light.LuminaireAnisotropy = entity.GetPropertyUnchecked("luminaire_anisotropy", 0f);
+            light.SoftX = entity.GetFloatProperty("soft_x", 0.25f);
+            light.SoftY = entity.GetFloatProperty("soft_y", 0.25f);
+            light.SkirtNear = entity.GetFloatProperty("skirt_near", 0.05f);
+            light.Shape = entity.GetFloatProperty("shape");
+            light.LuminaireSize = entity.GetFloatProperty("luminaire_size", 4f);
+            light.LuminaireShape = entity.GetInt32Property("luminaire_shape");
+            light.LuminaireAnisotropy = entity.GetFloatProperty("luminaire_anisotropy");
             light.SizeParams = entity.GetVector3Property("size_params");
-            light.CookieTexturePath = entity.GetProperty<string>("lightcookie");
-            light.MinRoughness = entity.GetPropertyUnchecked("minroughness", 0.04f);
+            light.CookieTexturePath = entity.GetStringProperty("lightcookie");
+            light.MinRoughness = entity.GetFloatProperty("minroughness", 0.04f);
 
             light.Shear = entity.GetVector2Property("shear");
         }
 
         if (type is EntityType.Omni2)
         {
-            light.SpotInnerAngle = entity.GetPropertyUnchecked("inner_angle", 0f);
-            light.SpotOuterAngle = entity.GetPropertyUnchecked("outer_angle", 180f);
+            light.SpotInnerAngle = entity.GetFloatProperty("inner_angle");
+            light.SpotOuterAngle = entity.GetFloatProperty("outer_angle", 180f);
             light.SizeParams = entity.GetVector3Property("size_params");
-            light.CookieTexturePath = entity.GetProperty<string>("lightcookie");
-            light.MinRoughness = entity.GetPropertyUnchecked("minroughness", 0.04f);
-            light.LuminaireShape = entity.GetPropertyUnchecked("shape", 0);
-            light.LuminaireSize = entity.GetPropertyUnchecked("luminaire_size", 0f);
+            light.CookieTexturePath = entity.GetStringProperty("lightcookie");
+            light.MinRoughness = entity.GetFloatProperty("minroughness", 0.04f);
+            light.LuminaireShape = entity.GetInt32Property("shape");
+            light.LuminaireSize = entity.GetFloatProperty("luminaire_size");
         }
 
         if (isNewLightType)
         {
-            light.PrecomputedFieldsValid = entity.GetPropertyUnchecked<int>("precomputedfieldsvalid") != 0;
+            light.PrecomputedFieldsValid = entity.GetInt32Property("precomputedfieldsvalid") != 0;
             if (light.PrecomputedFieldsValid)
             {
                 light.PrecomputedObbOrigin = entity.GetVector3Property("precomputedobborigin");
@@ -290,7 +311,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
                 var boundsMaxs = entity.GetVector3Property("precomputedboundsmaxs");
                 light.PrecomputedBounds = new AABB(boundsMins, boundsMaxs);
 
-                light.PrecomputedSubfrusta = entity.GetPropertyUnchecked<int>("precomputedsubfrusta");
+                light.PrecomputedSubfrusta = entity.GetInt32Property("precomputedsubfrusta");
                 if (light.PrecomputedSubfrusta > 0)
                 {
                     light.PrecomputedSubObbOrigins = new Vector3[light.PrecomputedSubfrusta];
@@ -321,8 +342,8 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
         return light.DirectLight switch
         {
-            0 => false,
-            1 => light.StationaryLightIndex is >= 0 and <= 3,
+            DirectLightType.None => false,
+            DirectLightType.Static => light.StationaryLightIndex is >= 0 and <= 3,
             _ => true
         };
     }
@@ -332,8 +353,8 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// </summary>
     public static Vector3 AnglesToDirection(Vector3 angles)
     {
-        var (sinPitch, cosPitch) = MathF.SinCos(angles.X);
-        var (sinYaw, cosYaw) = MathF.SinCos(angles.Y);
+        var (sinPitch, cosPitch) = MathF.SinCos(float.DegreesToRadians(angles.X));
+        var (sinYaw, cosYaw) = MathF.SinCos(float.DegreesToRadians(angles.Y));
 
         return Vector3.Normalize(new Vector3(cosYaw * cosPitch, sinYaw * cosPitch, sinPitch));
     }
@@ -344,6 +365,12 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// <param name="cookiePaths">Map from cookie material path to cookie atlas index.</param>
     public void ComputeBarnFaces(Dictionary<string, int> cookiePaths)
     {
+        if (Range <= 0.0001f)
+        {
+            BarnFaces = [];
+            return;
+        }
+
         if (Entity == EntityType.Barn)
         {
             if (BarnFaces is not { Length: 1 })
@@ -532,6 +559,12 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         var orientationQ = Quaternion.CreateFromRotationMatrix(light.Transform);
         var linearColor = ComputeOmni2Color(light);
 
+        // custom point light hack
+        if (light.LuminaireShape == -1)
+        {
+            nearPlane = 0.001f;
+        }
+
         var cookieW = 0f;
         var cookieParams = new Vector4(1f, 1f, 0f, 0f);
         if (light.CookieTexturePath != null && cookiePaths.TryGetValue(light.CookieTexturePath, out var cookieIndex))
@@ -593,15 +626,21 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         }
     }
 
-    private static Vector3 ComputeOmni2Color(SceneLight light)
+    /// <summary>
+    /// Calculates the effective solid angle of a spotlight cone, clamped to a maximum of 4π steradians (full sphere).
+    /// </summary>
+    public float ComputeConeSolidAngle()
     {
-        var outerRad = float.DegreesToRadians(Math.Clamp(light.SpotOuterAngle, 1f, 180f));
-        var innerRad = float.DegreesToRadians(Math.Clamp(light.SpotInnerAngle, 0f, light.SpotOuterAngle));
+        var outerRad = float.DegreesToRadians(Math.Clamp(SpotOuterAngle, 1f, 180f));
+        var innerRad = float.DegreesToRadians(Math.Clamp(SpotInnerAngle, 0f, SpotOuterAngle));
 
         var avgCos = (MathF.Cos(outerRad) + MathF.Cos(innerRad)) * 0.5f;
-        var coneSolidAngle = MathF.Min(MathF.Tau * (1f - avgCos), 4f * MathF.PI);
+        return MathF.Min(MathF.Tau * (1f - avgCos), 4f * MathF.PI);
+    }
 
-        var colorIntensity = light.Brightness * light.BrightnessScale * (4f * MathF.PI * 10f) / coneSolidAngle;
+    private static Vector3 ComputeOmni2Color(SceneLight light)
+    {
+        var colorIntensity = light.Brightness * light.BrightnessScale * (4f * MathF.PI * 10f) / light.ComputeConeSolidAngle();
         return ColorSpace.SrgbGammaToLinear(light.Color) * colorIntensity;
     }
 

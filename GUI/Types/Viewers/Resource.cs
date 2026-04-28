@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -10,6 +11,7 @@ using GUI.Types.Audio;
 using GUI.Types.GLViewers;
 using GUI.Types.Graphs;
 using GUI.Utils;
+using ValveKeyValue;
 using ValveResourceFormat;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.IO;
@@ -202,6 +204,14 @@ namespace GUI.Types.Viewers
                     {
                         GLViewer = new GLModelViewer(vrfGuiContext, rendererContext, physAggregateData);
                         GLViewerTabName = "PHYSICS";
+                    }
+                    break;
+
+                case ResourceType.WorldVisibility:
+                    if (resource.GetBlockByType(BlockType.VXVS) is VoxelVisibility { BaseClusterCount: > 0 } vxvs)
+                    {
+                        GLViewer = new GLVoxelVisibilityViewer(vrfGuiContext, rendererContext, vxvs);
+                        GLViewerTabName = "VISIBILITY";
                     }
                     break;
 
@@ -526,7 +536,6 @@ namespace GUI.Types.Viewers
 
             if (foundFile.Context != null)
             {
-                Debug.Assert(foundFile.PackageEntry != null);
                 Program.MainForm.OpenFile(foundFile.Context, foundFile.PackageEntry);
                 return true;
             }
@@ -692,6 +701,14 @@ namespace GUI.Types.Viewers
 
         private static void AddTextViewControl(ResourceType resourceType, Block block, TabPage blockTab)
         {
+            if (TryGetKvDataBlock(block, out var kvRoot, out var kvHeader))
+            {
+                var doc = new KVDocument(kvHeader, name: null, kvRoot);
+                var (kv3Text, sourceMap) = KVSerializer.Create(KVSerializationFormat.KeyValues3Text).SerializeWithSourceMap(doc);
+                blockTab.Controls.Add(CodeTextBox.Create(kv3Text, sourceMap: sourceMap));
+                return;
+            }
+
             var text = block.ToString();
             var language = CodeTextBox.HighlightLanguage.KeyValues;
 
@@ -707,13 +724,44 @@ namespace GUI.Types.Viewers
             {
                 language = CodeTextBox.HighlightLanguage.CSS;
             }
-            else if (resourceType == ResourceType.PanoramaScript && block.Type == BlockType.DATA)
+            else if ((resourceType == ResourceType.PanoramaScript || resourceType == ResourceType.PanoramaTypescript) && block.Type == BlockType.DATA)
             {
                 language = CodeTextBox.HighlightLanguage.JS;
             }
 
             var textBox = CodeTextBox.Create(text, language);
             blockTab.Controls.Add(textBox);
+        }
+
+        private static bool TryGetKvDataBlock(Block block, [MaybeNullWhen(false)] out KVObject root, out KVHeader? header)
+        {
+            switch (block)
+            {
+                case BinaryKV3 kv3:
+                    root = kv3.Data.Root;
+                    header = kv3.Data.Header;
+                    return true;
+
+                case KeyValuesOrNTRO kvOrNtro:
+                    root = kvOrNtro.Data;
+                    header = null;
+                    return true;
+
+                case NTRO ntro:
+                    root = ntro.Output;
+                    header = null;
+                    return true;
+
+                case ResourceEditInfo2 red2 when red2.Data is not null:
+                    root = red2.Data.Root;
+                    header = red2.Data.Header;
+                    return true;
+
+                default:
+                    root = null;
+                    header = null;
+                    return false;
+            }
         }
 
         private static void AddReconstructedContentTab(VrfGuiContext vrfGuiContext, ValveResourceFormat.Resource resource, ThemedTabControl resTabs)

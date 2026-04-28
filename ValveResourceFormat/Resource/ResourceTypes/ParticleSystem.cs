@@ -1,4 +1,5 @@
 using System.Linq;
+using ValveKeyValue;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.ResourceTypes
@@ -6,6 +7,7 @@ namespace ValveResourceFormat.ResourceTypes
     /// <summary>
     /// Represents a particle system resource.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/CParticleSystemDefinition">CParticleSystemDefinition</seealso>
     public class ParticleSystem : KeyValuesOrNTRO
     {
         /// <summary>
@@ -58,10 +60,10 @@ namespace ValveResourceFormat.ResourceTypes
 
             if (enabledOnly)
             {
-                children = children.Where(c => !c.ContainsKey("m_bDisableChild") || !c.GetProperty<bool>("m_bDisableChild"));
+                children = children.Where(c => !c.GetBooleanProperty("m_bDisableChild"));
             }
 
-            return children.Select(c => c.GetProperty<string>("m_ChildRef")).ToList();
+            return children.Select(c => c.GetStringProperty("m_ChildRef")).ToList();
         }
     }
 }

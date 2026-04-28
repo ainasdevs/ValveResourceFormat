@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using ValveKeyValue;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.CompiledShader.ShaderUtilHelpers;
@@ -464,12 +465,12 @@ namespace ValveResourceFormat.CompiledShader
             SetFileNameDerivedProperties(resource.FileName!);
             ThrowIfNotSupported(VcsVersion);
 
-            var data = ((BinaryKV3)resource.DataBlock!).Data;
+            KVObject data = ((BinaryKV3)resource.DataBlock!).Data;
 
             if (VcsProgramType is VcsProgramType.Features)
             {
                 FeaturesHeader = new FeaturesHeaderBlock(data);
-                var programData = data.GetProperty<KVObject>("m_programData")!;
+                var programData = data.GetSubCollection("m_programData")!;
                 UnserializeKV3ProgramData(programData);
                 return;
             }
@@ -482,17 +483,17 @@ namespace ValveResourceFormat.CompiledShader
             var programHashes = data.GetArray("m_programHashes");
             foreach (var hashObject in programHashes)
             {
-                var hashBytes = hashObject.GetProperty<byte[]>("m_nHashChar")!;
+                var hashBytes = hashObject.GetArray<byte>("m_nHashChar")!;
                 Debug.Assert(hashBytes.Length == 16);
                 HashesMD5.Add(new Guid(hashBytes));
             }
 
-            FileHash = new Guid(data.GetProperty<KVObject>("m_variableDescriptionVersionHash")!.GetProperty<byte[]>("m_nHashChar")!);
+            FileHash = new Guid(data.GetSubCollection("m_variableDescriptionVersionHash")!.GetArray<byte>("m_nHashChar")!);
             VariableSourceMax = data.GetInt32Property("m_nVariableSourceMax");
 
             var staticCombos = data.GetArray("m_staticComboArray");
-            StaticComboArray = new VfxCombo[staticCombos.Length];
-            for (var i = 0; i < staticCombos.Length; i++)
+            StaticComboArray = new VfxCombo[staticCombos.Count];
+            for (var i = 0; i < staticCombos.Count; i++)
             {
                 StaticComboArray[i] = new VfxCombo(staticCombos[i], i);
             }
@@ -500,15 +501,15 @@ namespace ValveResourceFormat.CompiledShader
             // CalculateComboIds(StaticComboArray);
 
             var staticComboRules = data.GetArray("m_staticComboRuleArray");
-            StaticComboRules = new VfxRule[staticComboRules.Length];
-            for (var i = 0; i < staticComboRules.Length; i++)
+            StaticComboRules = new VfxRule[staticComboRules.Count];
+            for (var i = 0; i < staticComboRules.Count; i++)
             {
                 StaticComboRules[i] = new VfxRule(staticComboRules[i], i);
             }
 
             var dynamicCombos = data.GetArray("m_dynamicComboArray");
-            DynamicComboArray = new VfxCombo[dynamicCombos.Length];
-            for (var i = 0; i < dynamicCombos.Length; i++)
+            DynamicComboArray = new VfxCombo[dynamicCombos.Count];
+            for (var i = 0; i < dynamicCombos.Count; i++)
             {
                 DynamicComboArray[i] = new VfxCombo(dynamicCombos[i], i);
             }
@@ -516,8 +517,8 @@ namespace ValveResourceFormat.CompiledShader
             // CalculateComboIds(DynamicComboArray);
 
             var dynamicComboRules = data.GetArray("m_dynamicComboRuleArray");
-            DynamicComboRules = new VfxRule[dynamicComboRules.Length];
-            for (var i = 0; i < dynamicComboRules.Length; i++)
+            DynamicComboRules = new VfxRule[dynamicComboRules.Count];
+            for (var i = 0; i < dynamicComboRules.Count; i++)
             {
                 DynamicComboRules[i] = new VfxRule(dynamicComboRules[i], i);
             }
@@ -527,22 +528,22 @@ namespace ValveResourceFormat.CompiledShader
             dBlockConfigGen = new ConfigMappingParams(this, isDynamic: true);
 
             var variableDescriptions = data.GetArray("m_variableDescriptionArray");
-            VariableDescriptions = new VfxVariableDescription[variableDescriptions.Length];
-            for (var i = 0; i < variableDescriptions.Length; i++)
+            VariableDescriptions = new VfxVariableDescription[variableDescriptions.Count];
+            for (var i = 0; i < variableDescriptions.Count; i++)
             {
                 VariableDescriptions[i] = new VfxVariableDescription(variableDescriptions[i], i);
             }
 
             var textureProcessors = data.GetArray("m_textureChannelProcessorArray");
-            TextureChannelProcessors = new VfxTextureChannelProcessor[textureProcessors.Length];
-            for (var i = 0; i < textureProcessors.Length; i++)
+            TextureChannelProcessors = new VfxTextureChannelProcessor[textureProcessors.Count];
+            for (var i = 0; i < textureProcessors.Count; i++)
             {
                 TextureChannelProcessors[i] = new VfxTextureChannelProcessor(textureProcessors[i], i);
             }
 
             var vsInputSignatureArray = data.GetArray("m_vsInputSignatureArray");
-            VSInputSignatures = new VsInputSignatureElement[vsInputSignatureArray.Length];
-            for (var i = 0; i < vsInputSignatureArray.Length; i++)
+            VSInputSignatures = new VsInputSignatureElement[vsInputSignatureArray.Count];
+            for (var i = 0; i < vsInputSignatureArray.Count; i++)
             {
                 VSInputSignatures[i] = new VsInputSignatureElement(vsInputSignatureArray[i], i);
             }
@@ -552,7 +553,7 @@ namespace ValveResourceFormat.CompiledShader
             var byteCodeData = data.GetArray("m_byteCodeData");
             var attributes = data.GetArray("m_attributes").Select(a => new VfxShaderAttribute(a)).ToArray();
 
-            for (var i = 0; i < staticComboData.Length; i++)
+            for (var i = 0; i < staticComboData.Count; i++)
             {
                 var staticComboId = staticComboIDs[i];
                 var comboData = staticComboData[i];

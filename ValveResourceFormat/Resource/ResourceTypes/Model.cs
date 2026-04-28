@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Text;
+using ValveKeyValue;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.ResourceTypes.ModelAnimation;
@@ -172,6 +173,10 @@ namespace ValveResourceFormat.ResourceTypes
         {
             var refLODGroupMasks = Data.GetIntegerArray("m_refLODGroupMasks");
             var refMeshes = Data.GetArray<string>("m_refMeshes");
+            if (refMeshes == null)
+            {
+                return [];
+            }
             var result = new List<(int MeshIndex, string MeshName, long LoDMask)>(refMeshes.Length);
 
             for (var meshIndex = 0; meshIndex < refMeshes.Length; meshIndex++)
@@ -180,7 +185,8 @@ namespace ValveResourceFormat.ResourceTypes
 
                 if (!string.IsNullOrEmpty(refMesh))
                 {
-                    result.Add((meshIndex, refMesh, refLODGroupMasks[meshIndex]));
+                    var lodMask = meshIndex < refLODGroupMasks.Length ? refLODGroupMasks[meshIndex] : 0L;
+                    result.Add((meshIndex, refMesh, lodMask));
                 }
             }
 
@@ -206,7 +212,7 @@ namespace ValveResourceFormat.ResourceTypes
             }
 
             var ctrl = Resource.GetBlockByType(BlockType.CTRL) as BinaryKV3;
-            var embeddedMeshes = ctrl?.Data.GetArray("embedded_meshes");
+            var embeddedMeshes = ctrl?.Data.Root.GetArray("embedded_meshes");
 
             if (embeddedMeshes == null)
             {
@@ -214,7 +220,7 @@ namespace ValveResourceFormat.ResourceTypes
                 return cachedEmbeddedMeshes;
             }
 
-            var meshes = new List<(Mesh Mesh, int MeshIndex, string Name)>(embeddedMeshes.Length);
+            var meshes = new List<(Mesh Mesh, int MeshIndex, string Name)>(embeddedMeshes.Count);
 
             foreach (var embeddedMesh in embeddedMeshes)
             {
@@ -279,7 +285,7 @@ namespace ValveResourceFormat.ResourceTypes
         public PhysAggregateData? GetEmbeddedPhys()
         {
             var ctrl = Resource.GetBlockByType(BlockType.CTRL) as BinaryKV3;
-            var embeddedPhys = ctrl?.Data.GetSubCollection("embedded_physics");
+            var embeddedPhys = ctrl?.Data.Root.GetSubCollection("embedded_physics");
 
             if (embeddedPhys == null)
             {
@@ -311,7 +317,7 @@ namespace ValveResourceFormat.ResourceTypes
         public Dictionary<string, string> GetFaceposerFolders()
         {
             var ctrl = Resource.GetBlockByType(BlockType.CTRL) as BinaryKV3;
-            var embeddedAnimation = ctrl?.Data.GetSubCollection("embedded_animation");
+            var embeddedAnimation = ctrl?.Data.Root.GetSubCollection("embedded_animation");
 
             if (embeddedAnimation == null)
             {
@@ -358,7 +364,7 @@ namespace ValveResourceFormat.ResourceTypes
         public IEnumerable<Animation> GetEmbeddedAnimations()
         {
             var ctrl = Resource.GetBlockByType(BlockType.CTRL) as BinaryKV3;
-            var embeddedAnimation = ctrl?.Data.GetSubCollection("embedded_animation");
+            var embeddedAnimation = ctrl?.Data.Root.GetSubCollection("embedded_animation");
 
             if (embeddedAnimation == null)
             {
@@ -394,6 +400,21 @@ namespace ValveResourceFormat.ResourceTypes
         }
 
         /// <summary>
+        /// Get the embedded animations with a different skeleton as animation target.
+        /// </summary>
+        /// <returns></returns>
+        public static IEnumerable<Animation> GetEmbeddedAnimationsWithSkeleton(IFileLoader fileLoader, Skeleton skeleton, Model model)
+        {
+            var old = model.cachedSkeleton;
+
+            model.cachedSkeleton = skeleton;
+            var anims = model.GetAllAnimations(fileLoader);
+
+            model.cachedSkeleton = old;
+            return anims;
+        }
+
+        /// <summary>
         /// Gets animations referenced from other models.
         /// </summary>
         /// <param name="fileLoader">The file loader to use.</param>
@@ -420,8 +441,7 @@ namespace ValveResourceFormat.ResourceTypes
                     continue;
                 }
 
-                model.cachedSkeleton = Skeleton;
-                var anims = model.GetAllAnimations(fileLoader);
+                var anims = GetEmbeddedAnimationsWithSkeleton(fileLoader, Skeleton, model);
                 allAnims.AddRange(anims);
             }
 
@@ -473,8 +493,8 @@ namespace ValveResourceFormat.ResourceTypes
         /// </summary>
         /// <returns>Enumerable of material group names and their materials.</returns>
         public IEnumerable<(string Name, string[] Materials)> GetMaterialGroups()
-           => Data.GetArray<KVObject>("m_materialGroups")
-                .Select(group => (group.GetProperty<string>("m_name"), group.GetArray<string>("m_materials")));
+           => Data.GetArray("m_materialGroups")
+                .Select(group => (group.GetStringProperty("m_name"), group.GetArray<string>("m_materials")));
 
         /// <summary>
         /// Gets the default mesh groups based on the default mesh group mask.
@@ -489,7 +509,7 @@ namespace ValveResourceFormat.ResourceTypes
 
         KVObject? ParseKeyValuesText()
         {
-            var keyvaluesString = Data.GetSubCollection("m_modelInfo").GetProperty<string>("m_keyValueText");
+            var keyvaluesString = Data.GetSubCollection("m_modelInfo").GetStringProperty("m_keyValueText");
 
             const int NullKeyValuesLengthLimit = 140;
             if (string.IsNullOrEmpty(keyvaluesString)
@@ -503,7 +523,7 @@ namespace ValveResourceFormat.ResourceTypes
             using var ms = new MemoryStream(Encoding.UTF8.GetBytes(keyvaluesString));
             try
             {
-                keyvalues = KeyValues3.ParseKVFile(ms).Root;
+                keyvalues = KVDocumentExtensions.ParseKV3(ms).Root;
             }
             catch (Exception e)
             {

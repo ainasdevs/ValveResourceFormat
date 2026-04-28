@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.Linq;
 using Microsoft.Extensions.Logging;
+using ValveKeyValue;
+using ValveResourceFormat.Blocks;
+using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Particles.Emitters;
 using ValveResourceFormat.Renderer.Particles.Initializers;
 using ValveResourceFormat.Renderer.Particles.Operators;
@@ -24,6 +27,8 @@ namespace ValveResourceFormat.Renderer.Particles
 
         private static readonly HashSet<string> loggedWarnings = [];
 
+        private readonly Scene scene;
+
         public AABB LocalBoundingBox { get; private set; } = new AABB(new Vector3(float.MinValue), new Vector3(float.MaxValue));
 
         public string Name { get; set; }
@@ -31,6 +36,7 @@ namespace ValveResourceFormat.Renderer.Particles
 
         private readonly int InitialParticles;
         private readonly int MaxParticles;
+        private readonly float MinimumTimeStep;
         private readonly float MaximumTimeStep;
 
         /// <summary>
@@ -51,30 +57,38 @@ namespace ValveResourceFormat.Renderer.Particles
 
         public ControlPoint MainControlPoint
         {
-            get => systemRenderState.GetControlPoint(0);
+            get => GetControlPoint(0);
             set => systemRenderState.SetControlPoint(0, value);
         }
+
+        public ControlPoint GetControlPoint(int cp) => systemRenderState.GetControlPoint(cp);
 
         private readonly List<ParticleRenderer> childParticleRenderers;
         private readonly RendererContext RendererContext;
         private bool hasStarted;
 
         private readonly ParticleCollection particleCollection;
+        private readonly Dictionary<int, ParticleSnapshot> controlPointSnapshots = [];
+        private readonly int snapshotControlPoint;
         private int particlesEmitted;
         private ParticleSystemRenderState systemRenderState;
 
-        public ParticleRenderer(ParticleSystem particleSystem, RendererContext rendererContext)
+        public ParticleRenderer(ParticleSystem particleSystem, RendererContext rendererContext, Scene scene, ParticleSnapshot? particleSnapshot = null, ParticleSystemRenderState? parentSystemRenderState = null)
         {
             emitParticleAction = EmitParticle;
 
             childParticleRenderers = [];
             this.RendererContext = rendererContext;
+            this.scene = scene;
 
             var parse = new ParticleDefinitionParser(particleSystem.Data, rendererContext.Logger);
             BehaviorVersion = parse.Int32("m_nBehaviorVersion", 13);
             InitialParticles = parse.Int32("m_nInitialParticles", 0);
             MaxParticles = parse.Int32("m_nMaxParticles", 1000);
+            MinimumTimeStep = parse.Float("m_flMinimumTimeStep", 0f);
             MaximumTimeStep = parse.Float("m_flMaximumTimeStep", 0.1f);
+
+            MaximumTimeStep = Math.Max(MinimumTimeStep, MaximumTimeStep);
 
             InfiniteBounds = parse.Boolean("m_bInfiniteBounds", false);
             ParticleBoundingBox = new AABB(
@@ -85,11 +99,32 @@ namespace ValveResourceFormat.Renderer.Particles
             var constantAttributes = new Particle(parse);
             particleCollection = new ParticleCollection(constantAttributes, MaxParticles);
 
-            systemRenderState = new ParticleSystemRenderState()
+            systemRenderState = new ParticleSystemRenderState(parentSystemRenderState)
             {
                 Data = this,
                 EndEarly = false
             };
+
+            snapshotControlPoint = parse.Int32("m_nSnapshotControlPoint", 0);
+
+            if (particleSnapshot != null)
+            {
+                controlPointSnapshots[snapshotControlPoint] = particleSnapshot;
+            }
+            else if (parse.Data.ContainsKey("m_hSnapshot"))
+            {
+                var snapshotPath = parse.Data.GetStringProperty("m_hSnapshot");
+
+                if (!string.IsNullOrEmpty(snapshotPath))
+                {
+                    var snapshotResource = RendererContext.FileLoader.LoadFileCompiled(snapshotPath);
+
+                    if (snapshotResource?.GetBlockByType(BlockType.SNAP) is ParticleSnapshot snap)
+                    {
+                        controlPointSnapshots[snapshotControlPoint] = snap;
+                    }
+                }
+            }
 
             Name = particleSystem.Resource?.FileName ?? "<unnamed>";
 
@@ -103,6 +138,15 @@ namespace ValveResourceFormat.Renderer.Particles
             SetupChildParticles(particleSystem.GetChildParticleNames(true));
 
             CalculateBounds();
+        }
+
+        /// <summary>
+        /// Gets the particle snapshot associated with the given control point, or null if none exists.
+        /// </summary>
+        internal ParticleSnapshot? GetControlPointSnapshot(int controlPoint)
+        {
+            controlPointSnapshots.TryGetValue(controlPoint, out var snap);
+            return snap;
         }
 
         public void Start()
@@ -147,7 +191,7 @@ namespace ValveResourceFormat.Renderer.Particles
 
             foreach (var initializer in Initializers)
             {
-                initializer.Initialize(ref particleCollection.Current[index], systemRenderState);
+                initializer.Initialize(ref particleCollection.Current[index], particleCollection, systemRenderState);
             }
         }
 
@@ -168,6 +212,8 @@ namespace ValveResourceFormat.Renderer.Particles
         {
             Stop();
             systemRenderState.Age = 0;
+            systemRenderState.ParticleCount = 0;
+            particlesEmitted = 0;
             particleCollection.Clear();
             Start();
 
@@ -185,10 +231,7 @@ namespace ValveResourceFormat.Renderer.Particles
                 hasStarted = true;
             }
 
-            if (frameTime > MaximumTimeStep)
-            {
-                frameTime = MaximumTimeStep;
-            }
+            frameTime = Math.Clamp(frameTime, MinimumTimeStep, MaximumTimeStep);
 
             systemRenderState.Age += frameTime;
 
@@ -231,6 +274,11 @@ namespace ValveResourceFormat.Renderer.Particles
 
             // Remove all dead particles
             particleCollection.PruneExpired();
+
+            foreach (var renderer in Renderers)
+            {
+                renderer.Update(particleCollection, systemRenderState);
+            }
 
             foreach (var childParticleRenderer in childParticleRenderers)
             {
@@ -360,7 +408,7 @@ namespace ValveResourceFormat.Renderer.Particles
                     continue;
                 }
 
-                var emitterClass = emitterInfo.GetProperty<string>("_class");
+                var emitterClass = emitterInfo.GetStringProperty("_class");
                 if (ParticleControllerFactory.TryCreateEmitter(emitterClass, emitterInfo, RendererContext.Logger, out var emitter))
                 {
                     Emitters.Add(emitter);
@@ -381,7 +429,7 @@ namespace ValveResourceFormat.Renderer.Particles
                     continue;
                 }
 
-                var initializerClass = initializerInfo.GetProperty<string>("_class");
+                var initializerClass = initializerInfo.GetStringProperty("_class");
                 if (ParticleControllerFactory.TryCreateInitializer(initializerClass, initializerInfo, RendererContext.Logger, out var initializer))
                 {
                     Initializers.Add(initializer);
@@ -402,7 +450,7 @@ namespace ValveResourceFormat.Renderer.Particles
                     continue;
                 }
 
-                var operatorClass = operatorInfo.GetProperty<string>("_class");
+                var operatorClass = operatorInfo.GetStringProperty("_class");
                 if (ParticleControllerFactory.TryCreateOperator(operatorClass, operatorInfo, RendererContext.Logger, out var @operator))
                 {
                     Operators.Add(@operator);
@@ -423,7 +471,7 @@ namespace ValveResourceFormat.Renderer.Particles
                     continue;
                 }
 
-                var operatorClass = forceGenerator.GetProperty<string>("_class");
+                var operatorClass = forceGenerator.GetStringProperty("_class");
                 if (ParticleControllerFactory.TryCreateForceGenerator(operatorClass, forceGenerator, RendererContext.Logger, out var @operator))
                 {
                     Operators.Add(@operator);
@@ -444,8 +492,8 @@ namespace ValveResourceFormat.Renderer.Particles
                     continue;
                 }
 
-                var rendererClass = rendererInfo.GetProperty<string>("_class");
-                if (ParticleControllerFactory.TryCreateRender(rendererClass, rendererInfo, RendererContext, out var renderer))
+                var rendererClass = rendererInfo.GetStringProperty("_class");
+                if (ParticleControllerFactory.TryCreateRender(rendererClass, rendererInfo, RendererContext, scene, out var renderer))
                 {
                     Renderers.Add(renderer);
                 }
@@ -464,7 +512,7 @@ namespace ValveResourceFormat.Renderer.Particles
                     continue;
                 }
 
-                var preEmissionOperatorClass = preEmissionOperatorInfo.GetProperty<string>("_class");
+                var preEmissionOperatorClass = preEmissionOperatorInfo.GetStringProperty("_class");
                 if (ParticleControllerFactory.TryCreatePreEmissionOperator(preEmissionOperatorClass, preEmissionOperatorInfo, RendererContext.Logger, out var preEmissionOperator))
                 {
                     PreEmissionOperators.Add(preEmissionOperator);
@@ -490,7 +538,7 @@ namespace ValveResourceFormat.Renderer.Particles
                 var childSystemDefinition = (ParticleSystem?)childResource.DataBlock;
                 Debug.Assert(childSystemDefinition != null);
 
-                var childSystem = new ParticleRenderer(childSystemDefinition, RendererContext)
+                var childSystem = new ParticleRenderer(childSystemDefinition, RendererContext, scene, null, systemRenderState)
                 {
                     MainControlPoint = MainControlPoint
                 };
@@ -527,6 +575,34 @@ namespace ValveResourceFormat.Renderer.Particles
             foreach (var childRenderer in childParticleRenderers)
             {
                 childRenderer.SetWireframe(isWireframe);
+            }
+        }
+
+        public void Delete()
+        {
+            foreach (var renderer in Renderers)
+            {
+                if (renderer is RenderSprites sprites)
+                {
+                    sprites.Delete();
+                }
+                else if (renderer is RenderTrails trails)
+                {
+                    trails.Delete();
+                }
+                else if (renderer is RenderStandardLight standardLight)
+                {
+                    standardLight.Delete();
+                }
+                else if (renderer is RenderOmni2Light omni2Light)
+                {
+                    omni2Light.Delete();
+                }
+            }
+
+            foreach (var childRenderer in childParticleRenderers)
+            {
+                childRenderer.Delete();
             }
         }
     }

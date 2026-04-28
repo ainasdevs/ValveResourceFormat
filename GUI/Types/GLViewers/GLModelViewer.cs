@@ -143,7 +143,7 @@ namespace GUI.Types.GLViewers
             slowmodeTrackBar = UiControl.AddTrackBar(value =>
             {
                 animationController.FrametimeMultiplier = value;
-            });
+            }, animationController.FrametimeMultiplier);
 
             animationPlayPause.Enabled = false;
             animationTrackBar.Enabled = false;
@@ -267,7 +267,7 @@ namespace GUI.Types.GLViewers
 
                 Input.OrbitTargetProvider = () => modelSceneNode.BoundingBox.Center;
 
-                var animations = modelSceneNode.GetSupportedAnimationNames().ToArray();
+                var animations = modelSceneNode.Animations.Keys.ToArray();
 
                 if (animations.Length > 0)
                 {
@@ -427,9 +427,14 @@ namespace GUI.Types.GLViewers
                 var time = animationController.Time % totalTime;
                 var frameNumber = animationController.Frame + 1;
 
+                var additive = animationController.ActiveAnimation.Clip is { IsAdditive: true }
+                    ? "Additive: true\n"
+                    : string.Empty;
+
                 animationTimeLabel.Text = $"Frame: {frameNumber,4} / {frameCount}\n" +
                     $"Time: {time:F2} / {totalTime:F2}\n" +
-                    $"FPS: {fps:F2}\n";
+                    $"FPS: {fps:F2}\n" +
+                    additive;
             }
 
             void UpdateUiAnimationState(Animation? animation, int frame)

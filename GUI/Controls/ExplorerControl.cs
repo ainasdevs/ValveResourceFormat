@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -5,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Enumeration;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using GUI.Utils;
@@ -25,8 +27,9 @@ namespace GUI.Controls
 
         private const int APPID_RECENT_FILES = -1000;
         private const int APPID_BOOKMARKS = -1001;
+        private readonly TaskCompletionSource handleCreated = new();
         private readonly List<TreeDataNode> TreeData = [];
-        private static readonly Dictionary<string, string> WorkshopAddons = [];
+        private static readonly ConcurrentDictionary<string, string> WorkshopAddons = new();
         public static readonly List<GameFolderLocator.SteamLibraryGameInfo> SteamGames = [];
 
         public ExplorerControl()
@@ -105,24 +108,31 @@ namespace GUI.Controls
             treeView.Nodes.Add(scanningTreeNode);
 
             // Scan for vpks
-            Task.Factory.StartNew(ScanForSteamGames).ContinueWith(t =>
+            var scanTask = Task.Run(ScanForSteamGames);
+            scanTask.ContinueWith(t =>
             {
-                InvokeWorkaround(() =>
+                if (t.Exception == null)
                 {
-                    if (t.Exception != null)
-                    {
-                        scanningTreeNode.Text = t.Exception.Message;
-                        Log.Error(nameof(ExplorerControl), t.Exception.ToString());
-                    }
-                    else
-                    {
-                        scanningTreeNode.Remove();
-                    }
+                    return;
+                }
+
+                Log.Error(nameof(ExplorerControl), t.Exception.ToString());
+
+                treeView.InvokeAsync(() =>
+                {
+                    scanningTreeNode.Text = t.Exception.Message;
                 });
-            });
+            }, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            scanTask.ContinueWith(async t =>
+            {
+                await treeView.InvokeAsync(() =>
+                {
+                    scanningTreeNode.Remove();
+                }).ConfigureAwait(false);
+            }, CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
         }
 
-        private void ScanForSteamGames()
+        private async Task ScanForSteamGames()
         {
             if (GameFolderLocator.SteamPath == null)
             {
@@ -166,7 +176,6 @@ namespace GUI.Controls
             }
 
             var libraryCachePath = Path.Join(GameFolderLocator.SteamPath, "appcache", "librarycache");
-            var kvDeserializer = KVSerializer.Create(KVSerializationFormat.KeyValues1Text);
             KVDocument? libraryAssetsKv = null;
 
             try
@@ -190,27 +199,6 @@ namespace GUI.Controls
                 SteamGames.AddRange(steamGames);
             }
 
-            // Find all games to be displayed in the recent and bookmarked files
-            // to instantly load their icons before rendering the list
-            {
-                foreach (var path in Settings.Config.RecentFiles.Concat(Settings.Config.BookmarkedFiles))
-                {
-                    foreach (var game in SteamGames)
-                    {
-                        if (path.StartsWith(game.GamePath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            GetOrLoadAppImage(game.AppID, libraryAssetsKv, libraryCachePath);
-                        }
-                    }
-                }
-
-                InvokeWorkaround(() =>
-                {
-                    RedrawList(APPID_BOOKMARKS, GetBookmarkedFileNodes());
-                    RedrawList(APPID_RECENT_FILES, GetRecentFileNodes());
-                });
-            }
-
             if (SteamGames.Count == 0)
             {
                 return;
@@ -223,10 +211,7 @@ namespace GUI.Controls
                 BufferSize = 65536,
             };
 
-            var checkedDirVpks = new Dictionary<string, bool>();
-            var scannedGamePaths = new HashSet<string>(SteamGames.Count, StringComparer.OrdinalIgnoreCase);
-
-            bool VpkPredicate(ref FileSystemEntry entry)
+            static bool VpkPredicate(ref FileSystemEntry entry)
             {
                 if (entry.IsDirectory)
                 {
@@ -245,24 +230,17 @@ namespace GUI.Controls
 
                 // If we matched dota_683.vpk, make sure dota_dir.vpk exists before excluding it from results
                 var fixedPackage = $"{entry.ToFullPath()[..^8]}_dir.vpk";
-
-                if (!checkedDirVpks.TryGetValue(fixedPackage, out var ret))
-                {
-                    ret = !File.Exists(fixedPackage);
-                    checkedDirVpks.Add(fixedPackage, ret);
-                }
-
-                return ret;
+                return !File.Exists(fixedPackage);
             }
 
-            foreach (var (appID, appName, steamPath, gamePath) in SteamGames)
-            {
-                // Skip if this game path was already scanned from another appID
-                if (!scannedGamePaths.Add(gamePath))
-                {
-                    continue;
-                }
+            var gamesToScan = SteamGames
+                .DistinctBy(static game => game.GamePath, StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
+            // Start scanning game folders immediately, runs concurrently with icon preloading
+            var scanTask = Parallel.ForEachAsync(gamesToScan, async (game, cancellationToken) =>
+            {
+                var (appID, appName, steamPath, gamePath) = game;
                 var foundFiles = new List<TreeNode>();
 
                 // Find all the vpks in game folder
@@ -304,31 +282,33 @@ namespace GUI.Controls
 
                 if (foundFiles.Count == 0)
                 {
-                    continue;
+                    return;
                 }
 
                 // Find workshop content
                 try
                 {
-                    KVObject workshopInfo;
                     var workshopManifest = Path.Join(steamPath, "workshop", $"appworkshop_{appID}.acf");
 
                     if (File.Exists(workshopManifest))
                     {
+                        var kvDeserializer = KVSerializer.Create(KVSerializationFormat.KeyValues1Text);
+                        KVObject workshopInfo;
+
                         using (var stream = File.OpenRead(workshopManifest))
                         {
                             workshopInfo = kvDeserializer.Deserialize(stream);
                         }
 
-                        foreach (var item in (IEnumerable<KVObject>)workshopInfo["WorkshopItemsInstalled"])
+                        foreach (var item in workshopInfo["WorkshopItemsInstalled"].Children)
                         {
-                            var addonPath = Path.Join(steamPath, "workshop", "content", appID.ToString(CultureInfo.InvariantCulture), item.Name);
+                            var addonPath = Path.Join(steamPath, "workshop", "content", appID.ToString(CultureInfo.InvariantCulture), item.Key);
                             var publishDataPath = Path.Join(addonPath, "publish_data.txt");
-                            var vpk = Path.Join(addonPath, $"{item.Name}.vpk");
+                            var vpk = Path.Join(addonPath, $"{item.Key}.vpk");
 
                             if (!File.Exists(vpk))
                             {
-                                vpk = Path.Join(addonPath, $"{item.Name}_dir.vpk");
+                                vpk = Path.Join(addonPath, $"{item.Key}_dir.vpk");
 
                                 if (!File.Exists(vpk))
                                 {
@@ -339,7 +319,7 @@ namespace GUI.Controls
                             using var stream = File.OpenRead(publishDataPath);
                             var publishData = kvDeserializer.Deserialize(stream);
                             var addonTitle = publishData["title"];
-                            var displayTitle = $"[Workshop {item.Name}] {addonTitle}";
+                            var displayTitle = $"[Workshop {item.Key}] {addonTitle}";
 
                             foundFiles.Add(new TreeNode(displayTitle)
                             {
@@ -361,7 +341,7 @@ namespace GUI.Controls
                 foundFiles.Sort(SortFileNodes);
                 var foundFilesArray = foundFiles.ToArray();
 
-                var treeNodeImage = GetOrLoadAppImage(appID, libraryAssetsKv, libraryCachePath);
+                var treeNodeImage = await GetOrLoadAppImage(appID, libraryAssetsKv, libraryCachePath).ConfigureAwait(false);
 
                 if (treeNodeImage < 0)
                 {
@@ -376,44 +356,73 @@ namespace GUI.Controls
                     SelectedImageIndex = treeNodeImage,
                 };
                 treeNode.Nodes.AddRange(foundFilesArray);
-                TreeData.Add(new TreeDataNode
-                {
-                    ParentNode = treeNode,
-                    AppID = appID,
-                    Children = foundFilesArray,
-                });
 
-                InvokeWorkaround(() =>
+                await handleCreated.Task.ConfigureAwait(false);
+                await treeView.InvokeAsync(() =>
                 {
+                    var newNode = new TreeDataNode
+                    {
+                        ParentNode = treeNode,
+                        AppID = appID,
+                        Children = foundFilesArray,
+                    };
+
+                    var dataIndex = TreeData.Count;
+                    for (var i = TreeData.Count - 1; i >= 0; i--)
+                    {
+                        if (TreeData[i].AppID > appID)
+                        {
+                            dataIndex = i;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+
+                    TreeData.Insert(dataIndex, newNode);
+
                     treeView.BeginUpdate();
-                    treeView.Nodes.Insert(treeView.Nodes.Count - 1, treeNode);
+                    treeView.Nodes.Insert(dataIndex, treeNode);
                     treeView.EndUpdate();
 
                     if (filterTextBox.Text.Length > 0)
                     {
                         OnFilterTextBoxTextChanged(null, EventArgs.Empty); // Hack: re-filter
                     }
-                });
+                }, cancellationToken).ConfigureAwait(false);
+            });
+
+            // Find all games to be displayed in the recent and bookmarked files
+            // to instantly load their icons before rendering the list
+            foreach (var path in Settings.Config.RecentFiles.Concat(Settings.Config.BookmarkedFiles))
+            {
+                foreach (var game in SteamGames)
+                {
+                    if (path.StartsWith(game.GamePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        await GetOrLoadAppImage(game.AppID, libraryAssetsKv, libraryCachePath).ConfigureAwait(false);
+                        break;
+                    }
+                }
             }
 
-            // Update bookmarks and recent files with workshop titles and app logos
-            InvokeWorkaround(() =>
+            await handleCreated.Task.ConfigureAwait(false);
+            await treeView.InvokeAsync(() =>
             {
                 RedrawList(APPID_BOOKMARKS, GetBookmarkedFileNodes());
                 RedrawList(APPID_RECENT_FILES, GetRecentFileNodes());
-            });
-        }
+            }).ConfigureAwait(false);
 
-        private void InvokeWorkaround(Action action)
-        {
-            if (treeView.InvokeRequired && !treeView.IsDisposed)
+            // Wait for all game scans to complete
+            await scanTask.ConfigureAwait(false);
+
+            // Update bookmarks and recent files with workshop titles and app logos
+            await treeView.InvokeAsync(() =>
             {
-                treeView.Invoke(action);
-            }
-            else
-            {
-                action();
-            }
+                RedrawList(APPID_BOOKMARKS, GetBookmarkedFileNodes());
+                RedrawList(APPID_RECENT_FILES, GetRecentFileNodes());
+            }).ConfigureAwait(false);
         }
 
         private void OnTreeViewNodeMouseDoubleClick(object sender, TreeNodeMouseClickEventArgs e)
@@ -710,6 +719,7 @@ namespace GUI.Controls
         private void OnExplorerLoad(object sender, EventArgs e)
         {
             filterTextBox.Focus();
+            handleCreated.TrySetResult();
         }
 
         public void FocusFilter()
@@ -717,7 +727,7 @@ namespace GUI.Controls
             filterTextBox.Focus();
         }
 
-        private int GetOrLoadAppImage(int appID, KVObject? libraryAssetsKv, string libraryCachePath)
+        private async Task<int> GetOrLoadAppImage(int appID, KVDocument? libraryAssetsKv, string libraryCachePath)
         {
             if (MainForm.GameIcons.TryGetValue(appID, out var treeNodeImage))
             {
@@ -738,7 +748,7 @@ namespace GUI.Controls
 
                     if (filename != null)
                     {
-                        appIconPath = Path.Join(libraryCachePath, appIDStr, filename.ToString());
+                        appIconPath = Path.Join(libraryCachePath, appIDStr, (string)filename);
 
                         if (!File.Exists(appIconPath))
                         {
@@ -751,12 +761,14 @@ namespace GUI.Controls
                 {
                     using var appIcon = GetAppResizedImage(appIconPath);
 
-                    InvokeWorkaround(() =>
+                    await handleCreated.Task.ConfigureAwait(false);
+                    treeNodeImage = await treeView.InvokeAsync(() =>
                     {
-                        treeNodeImage = MainForm.ImageList.Images.Count;
+                        var imageIndex = MainForm.ImageList.Images.Count;
                         MainForm.AddFixedImageToImageList(appIcon, MainForm.ImageList);
-                        MainForm.GameIcons.Add(appID, treeNodeImage);
-                    });
+                        MainForm.GameIcons.TryAdd(appID, imageIndex);
+                        return imageIndex;
+                    }).ConfigureAwait(false);
                 }
             }
             catch (Exception)

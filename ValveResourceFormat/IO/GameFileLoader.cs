@@ -187,9 +187,9 @@ namespace ValveResourceFormat.IO
 
                         if (dependencies != null)
                         {
-                            foreach (var dependency in (IEnumerable<KVObject>)dependencies)
+                            foreach (var (_, dependency) in dependencies)
                             {
-                                var dependencyId = (uint)dependency.Value;
+                                var dependencyId = (uint)dependency;
                                 var dependencyVpkPath = Path.Join(workshopRoot, $"{dependencyId}", $"{dependencyId}.vpk");
 
                                 if (File.Exists(dependencyVpkPath))
@@ -420,17 +420,18 @@ namespace ValveResourceFormat.IO
                 }
             }
 
-            Console.WriteLine($"Found \"{gameInfo["game"]}\" from \"{gameinfoPath}\"");
+            gameInfo.TryGetValue("game", out var gameName);
+            Console.WriteLine($"Found \"{gameName}\" from \"{gameinfoPath}\"");
 
-            foreach (var searchPath in (IEnumerable<KVObject>)gameInfo["FileSystem"]["SearchPaths"])
+            foreach (var (key, searchPath) in gameInfo["FileSystem"]["SearchPaths"])
             {
-                if (searchPath.Name == "Game")
+                if (key == "Game")
                 {
-                    folders.Add(Path.Combine(gameRoot, searchPath.Value.ToString()!));
+                    folders.Add(Path.Combine(gameRoot, searchPath.ToString()!));
                 }
-                else if (searchPath.Name == "OfficialAddonRoot")
+                else if (key == "OfficialAddonRoot")
                 {
-                    CurrentGameOfficialAddonsPaths.Add(Path.Combine(gameRoot, searchPath.Value.ToString()!));
+                    CurrentGameOfficialAddonsPaths.Add(Path.Combine(gameRoot, searchPath.ToString()!));
                 }
             }
         }
@@ -445,10 +446,10 @@ namespace ValveResourceFormat.IO
                 using var vsurf = LoadFileCompiled("surfaceproperties/surfaceproperties.vsurf");
                 if (vsurf is not null && vsurf.DataBlock is BinaryKV3 kv3)
                 {
-                    var surfacePropertiesList = kv3.Data.GetArray("SurfacePropertiesList");
+                    var surfacePropertiesList = kv3.Data.Root.GetArray("SurfacePropertiesList");
                     foreach (var surface in surfacePropertiesList)
                     {
-                        var name = surface.GetProperty<string>("surfacePropertyName");
+                        var name = surface.GetStringProperty("surfacePropertyName");
                         var hash = StringToken.Store(name);
                         Debug.Assert(
                             hash == surface.GetUnsignedIntegerProperty("m_nameHash"),

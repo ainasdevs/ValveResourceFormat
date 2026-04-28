@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using ValveKeyValue;
 using ValveResourceFormat.Compression;
 using ValveResourceFormat.Serialization.KeyValues;
 
@@ -32,6 +33,7 @@ namespace ValveResourceFormat.Blocks
         /// <summary>
         /// Represents buffer data stored on disk.
         /// </summary>
+        /// <seealso href="https://s2v.app/SchemaExplorer/cs2/modellib/ModelMeshBufferData_t">ModelMeshBufferData_t</seealso>
         public struct OnDiskBufferData
         {
             /// <summary>
@@ -63,6 +65,7 @@ namespace ValveResourceFormat.Blocks
         /// <summary>
         /// Represents a field in the render input layout.
         /// </summary>
+        /// <seealso href="https://s2v.app/SchemaExplorer/cs2/modellib/RenderInputLayoutField_t">RenderInputLayoutField_t</seealso>
         public struct RenderInputLayoutField
         {
             /// <summary>
@@ -290,16 +293,16 @@ namespace ValveResourceFormat.Blocks
             var inputLayoutFields = data.GetArray("m_inputLayoutFields");
             buffer.InputLayoutFields = [.. inputLayoutFields.Select(static il =>
             {
-                var semanticName = il.Properties["m_pSemanticName"];
+                var semanticName = il["m_pSemanticName"];
                 var semanticNameStr = string.Empty;
 
-                if (semanticName.Value is string str)
+                if (semanticName.ValueType == KVValueType.String)
                 {
-                    semanticNameStr = str;
+                    semanticNameStr = (string)semanticName;
                 }
-                else if (semanticName.Value is byte[] bytes)
+                else if (semanticName.ValueType == KVValueType.BinaryBlob)
                 {
-                    semanticNameStr = Encoding.UTF8.GetString(bytes.AsSpan().TrimEnd((byte)0));
+                    semanticNameStr = Encoding.UTF8.GetString(semanticName.AsBlob().AsSpan().TrimEnd((byte)0));
                 }
                 else
                 {

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq;
 using OpenTK.Graphics.OpenGL;
+using ValveKeyValue;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.Renderer.Buffers;
 using ValveResourceFormat.ResourceTypes;
@@ -211,7 +212,7 @@ namespace ValveResourceFormat.Renderer
             }
         }
 
-        private void ConfigureDrawCalls(Scene scene, VBIB vbib, KVObject[] sceneObjects, Dictionary<string, string>? materialReplacementTable, bool isAggregate)
+        private void ConfigureDrawCalls(Scene scene, VBIB vbib, IReadOnlyList<KVObject> sceneObjects, Dictionary<string, string>? materialReplacementTable, bool isAggregate)
         {
             if (vbib.VertexBuffers.Count == 0)
             {
@@ -234,7 +235,7 @@ namespace ValveResourceFormat.Renderer
 
                 foreach (var objectDrawCall in objectDrawCalls)
                 {
-                    var materialName = objectDrawCall.GetProperty<string>("m_material") ?? objectDrawCall.GetProperty<string>("m_pMaterial");
+                    var materialName = objectDrawCall.GetStringProperty("m_material") ?? objectDrawCall.GetStringProperty("m_pMaterial");
                     if (materialReplacementTable?.TryGetValue(materialName, out var replacementName) is true)
                     {
                         materialName = replacementName;
@@ -295,7 +296,7 @@ namespace ValveResourceFormat.Renderer
                     var material = renderContext.MaterialLoader.GetMaterial(materialName, shaderArguments);
 
                     var drawCall = CreateDrawCall(objectDrawCall, material, vbib, gpuVbib);
-                    if (i < objectDrawBounds.Length)
+                    if (i < objectDrawBounds.Count)
                     {
                         drawCall.DrawBounds = new AABB(
                             objectDrawBounds[i].GetSubCollection("m_vMinBounds").ToVector3(),
@@ -314,7 +315,7 @@ namespace ValveResourceFormat.Renderer
                 var meshlets = sceneObject.GetArray("m_meshlets");
                 if (meshlets != null)
                 {
-                    Meshlets.EnsureCapacity(Meshlets.Count + meshlets.Length);
+                    Meshlets.EnsureCapacity(Meshlets.Count + meshlets.Count);
 
                     foreach (var meshletData in meshlets)
                     {
@@ -355,7 +356,7 @@ namespace ValveResourceFormat.Renderer
                 Material = material,
                 MeshBuffers = renderContext.MeshBufferCache,
                 MeshName = Name,
-                VertexBuffers = new VertexDrawBuffer[vertexBuffers.Length]
+                VertexBuffers = new VertexDrawBuffer[vertexBuffers.Count]
             };
 
             var primitiveType = objectDrawCall.GetEnumValue<RenderPrimitiveType>("m_nPrimitiveType");

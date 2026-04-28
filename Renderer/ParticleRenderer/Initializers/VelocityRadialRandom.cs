@@ -3,8 +3,8 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
     /// <summary>
     /// Initializes particle velocity to a random speed directed radially outward from a control point.
     /// The speed is scaled per-axis by a local coordinate system scale vector.
-    /// Corresponds to <c>C_INIT_VelocityRadialRandom</c>.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_INIT_VelocityRadialRandom">C_INIT_VelocityRadialRandom</seealso>
     class VelocityRadialRandom : ParticleFunctionInitializer
     {
         // unsure if this is actually a vector provider
@@ -24,7 +24,7 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
             controlPoint = parse.Int32("m_nControlPointNumber", controlPoint);
         }
 
-        public override Particle Initialize(ref Particle particle, ParticleSystemRenderState particleSystemState)
+        public override Particle Initialize(ref Particle particle, ParticleCollection particles, ParticleSystemRenderState particleSystemState)
         {
             var speedmin = speedMin.NextNumber(ref particle, particleSystemState);
             var speedmax = speedMax.NextNumber(ref particle, particleSystemState);

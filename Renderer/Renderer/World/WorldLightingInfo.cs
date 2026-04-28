@@ -121,7 +121,7 @@ namespace ValveResourceFormat.Renderer.World
         private readonly List<ShadowRequest> ShadowRequests = [];
         private readonly ShadowAtlasPacker ShadowAtlas = new(64);
 
-        private Dictionary<string, int>? BarnLightCookiePaths;
+        private Dictionary<string, int> BarnLightCookiePaths { get; } = new(StringComparer.OrdinalIgnoreCase);
         private StorageBuffer? BarnLightStorageBuffer;
         /// <summary>Gets the list of shadow casters produced by the most recent <see cref="BinBarnLights"/> call.</summary>
         public List<BinnedShadowCaster> BinnedShadowCasters { get; } = [];
@@ -308,21 +308,21 @@ namespace ValveResourceFormat.Renderer.World
             var staticLights = lights.Where(l => l.StationaryLightIndex >= 0).OrderBy(l => l.StationaryLightIndex).ToList();
             var dynamicLights = lights.Where(l => l.StationaryLightIndex == -1).ToList();
 
-            var currentLightIndex = 0u;
-
             foreach (var light in staticLights)
             {
-                currentLightIndex = (uint)light.StationaryLightIndex;
+                var index = (uint)light.StationaryLightIndex;
 
-                if (currentLightIndex >= LightingConstants.MAX_LIGHTS)
+                if (index >= LightingConstants.MAX_LIGHTS)
                 {
                     continue;
                 }
 
-                AddLight(light, (uint)light.StationaryLightIndex);
+                AddLight(light, index);
 
-                LightingData.StaticLightCount = currentLightIndex + 1;
+                LightingData.StaticLightCount = index + 1;
             }
+
+            var currentLightIndex = LightingData.StaticLightCount;
 
             foreach (var light in dynamicLights)
             {
@@ -336,6 +336,14 @@ namespace ValveResourceFormat.Renderer.World
             }
 
             LightingData.DynamicLightCount = currentLightIndex;
+
+            var envLight = lights.FirstOrDefault(l => l.Entity == SceneLight.EntityType.Environment);
+            if (envLight != null)
+            {
+                LightingData.LightToWorld[0] = envLight.Transform;
+                LightingData.LightPosition_Type[0] = new Vector4(envLight.Position, (int)envLight.Type);
+                LightingData.LightColor_Brightness[0] = new Vector4(ColorSpace.SrgbGammaToLinear(envLight.Color), envLight.Brightness);
+            }
         }
 
         /// <summary>
@@ -425,7 +433,7 @@ namespace ValveResourceFormat.Renderer.World
                     light.IsDirty = false;
                 }
 
-                if (light.BarnFaces is null)
+                if (!light.IsVisible)
                 {
                     continue;
                 }
@@ -466,7 +474,7 @@ namespace ValveResourceFormat.Renderer.World
                     continue;
                 }
 
-                if (light.BarnFaces is null)
+                if (!light.IsVisible)
                 {
                     continue;
                 }
@@ -556,10 +564,10 @@ namespace ValveResourceFormat.Renderer.World
             BarnLightCookieAtlas?.Delete();
             BarnLightCookieAtlas = null;
 
-            BarnLightCookiePaths = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            BarnLightCookiePaths.Clear();
             var cookieTextures = new List<RenderTexture>();
 
-            foreach (var light in BarnLights!)
+            foreach (var light in BarnLights)
             {
                 if (light.CookieTexturePath != null && BarnLightCookiePaths.TryAdd(light.CookieTexturePath, cookieTextures.Count + 1))
                 {

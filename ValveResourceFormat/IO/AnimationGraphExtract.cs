@@ -2,6 +2,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using ValveKeyValue;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.ResourceTypes.ModelData.Attachments;
 using ValveResourceFormat.Serialization.KeyValues;
@@ -23,15 +24,14 @@ public class AnimationGraphExtract : IDisposable
     private Dictionary<long, KVObject>? compiledNodeIndexMap;
     private Dictionary<long, long>? nodeIndexToIdMap;
     private Dictionary<string, Attachment>? modelAttachments;
-    private Dictionary<string, string[]>? modelBoneNamesCache;
-    private Dictionary<string, string[]>? modelIKChainNamesCache;
-    private Dictionary<string, string[]>? modelFootNamesCache;
-    private Dictionary<string, LookAtChainInfo[]>? modelLookAtChainInfoCache;
+    private string[]? modelBoneNamesCache;
+    private string[]? modelIKChainNamesCache;
+    private string[]? modelFootNamesCache;
+    private LookAtChainInfo[]? modelLookAtChainInfoCache;
+    private Dictionary<string, List<string>>? modelIKChainBonesCache;
     private List<KVObject>? footPinningItems;
     private KVObject? scriptManager;
 
-    // cached values derived from m_modelName property so we only load the resource once
-    private string? modelNameCache;
     private Resource? modelResourceCache;
     private bool modelResourceLoaded;
 
@@ -42,11 +42,10 @@ public class AnimationGraphExtract : IDisposable
             if (!modelResourceLoaded)
             {
                 modelResourceLoaded = true;
-                modelNameCache ??= Graph.GetStringProperty("m_modelName");
-
-                if (!string.IsNullOrEmpty(modelNameCache))
+                var modelName = Graph.GetStringProperty("m_modelName");
+                if (!string.IsNullOrEmpty(modelName))
                 {
-                    modelResourceCache = fileLoader.LoadFileCompiled(modelNameCache);
+                    modelResourceCache = fileLoader.LoadFileCompiled(modelName);
                 }
             }
             return modelResourceCache;
@@ -55,7 +54,6 @@ public class AnimationGraphExtract : IDisposable
 
     private Model? ModelData => ModelResource?.DataBlock as Model;
 
-    // helper enum & mappings to reduce duplication when converting nodes/properties
     private enum PropAction
     {
         Copy,
@@ -64,7 +62,6 @@ public class AnimationGraphExtract : IDisposable
         InputConnection,
         BlendDuration,
         BlendCurve,
-        SequenceName,
         TagIndex,
         TagBehavior,
         Skip
@@ -102,16 +99,26 @@ public class AnimationGraphExtract : IDisposable
             ["CBoneMask"] = new(StringComparer.Ordinal)
             {
                 ["m_hBlendParameter"] = (PropAction.ParamRef, "m_blendParameter"),
-                ["m_nWeightListIndex"] = (PropAction.Skip, null),
-            },
-            ["CRagdoll"] = new(StringComparer.Ordinal)
-            {
-                ["m_nWeightListIndex"] = (PropAction.Skip, null),
             },
             ["CSequence"] = new(StringComparer.Ordinal)
             {
                 ["m_duration"] = (PropAction.Skip, null),
-                ["m_hSequence"] = (PropAction.Skip, null),
+            },
+            ["CStateMachine"] = new(StringComparer.Ordinal)
+            {
+                ["m_stateMachine"] = (PropAction.Skip, null),
+                ["m_stateData"] = (PropAction.Skip, null),
+                ["m_transitionData"] = (PropAction.Skip, null),
+            },
+            ["CChoice"] = new(StringComparer.Ordinal)
+            {
+                ["m_weights"] = (PropAction.Skip, null),
+                ["m_blendTimes"] = (PropAction.Skip, null),
+            },
+            ["CBlend"] = new(StringComparer.Ordinal)
+            {
+                ["m_targetValues"] = (PropAction.Skip, null),
+                ["m_sortedOrder"] = (PropAction.Skip, null),
             },
             ["CAdd"] = new(StringComparer.Ordinal)
             {
@@ -137,7 +144,6 @@ public class AnimationGraphExtract : IDisposable
             {
                 ["m_target"] = (PropAction.Copy, null),
                 ["m_paramIndex"] = (PropAction.ParamRef, "m_param"),
-                ["m_hSequence"] = (PropAction.SequenceName, "m_sequenceName"),
                 ["m_bResetChild"] = (PropAction.Rename, "m_bResetBase"),
                 ["m_bLockWhenWaning"] = (PropAction.Copy, null),
             },
@@ -165,6 +171,7 @@ public class AnimationGraphExtract : IDisposable
                 ["m_flTurnTimeMax"] = (PropAction.Copy, null),
                 ["m_flStepHeightMax"] = (PropAction.Copy, null),
                 ["m_flStepHeightMaxAngle"] = (PropAction.Copy, null),
+                ["m_hBasePoseCacheHandle"] = (PropAction.Skip, null),
             },
             ["CFootPinning"] = new(StringComparer.Ordinal)
             {
@@ -188,7 +195,174 @@ public class AnimationGraphExtract : IDisposable
                 ["m_eBlendMode"] = (PropAction.Copy, null),
                 ["m_blendSourceX"] = (PropAction.Copy, null),
                 ["m_blendSourceY"] = (PropAction.Copy, null),
-            }
+            },
+            ["CLookAt"] = new(StringComparer.Ordinal)
+            {
+                ["m_target"] = (PropAction.Copy, null),
+                ["m_paramIndex"] = (PropAction.ParamRef, "m_param"),
+                ["m_weightParamIndex"] = (PropAction.ParamRef, "m_weightParam"),
+                ["m_bResetChild"] = (PropAction.Rename, "m_bResetBase"),
+                ["m_bLockWhenWaning"] = (PropAction.Copy, null),
+            },
+            ["CHitReact"] = new(StringComparer.Ordinal)
+            {
+                ["m_networkMode"] = (PropAction.Copy, null),
+                ["m_triggerParam"] = (PropAction.ParamRef, null),
+                ["m_hitBoneParam"] = (PropAction.ParamRef, null),
+                ["m_hitOffsetParam"] = (PropAction.ParamRef, null),
+                ["m_hitDirectionParam"] = (PropAction.ParamRef, null),
+                ["m_hitStrengthParam"] = (PropAction.ParamRef, null),
+                ["m_flMinDelayBetweenHits"] = (PropAction.Copy, null),
+                ["m_bResetChild"] = (PropAction.Rename, "m_bResetBase"),
+            },
+            ["CSolveIKChain"] = new(StringComparer.Ordinal)
+            {
+                ["m_networkMode"] = (PropAction.Copy, null),
+                ["m_targetHandles"] = (PropAction.Skip, null),
+            },
+            ["CStanceOverride"] = new(StringComparer.Ordinal)
+            {
+                ["m_networkMode"] = (PropAction.Copy, null),
+                ["m_hParameter"] = (PropAction.ParamRef, "m_blendParamID"),
+                ["m_eMode"] = (PropAction.Copy, null),
+                ["m_footStanceInfo"] = (PropAction.Skip, null),
+            },
+            ["CStopAtGoal"] = new(StringComparer.Ordinal)
+            {
+                ["m_networkMode"] = (PropAction.Copy, null),
+                ["m_flOuterRadius"] = (PropAction.Copy, null),
+                ["m_flInnerRadius"] = (PropAction.Copy, null),
+                ["m_flMaxScale"] = (PropAction.Copy, null),
+                ["m_flMinScale"] = (PropAction.Copy, null),
+                ["m_damping"] = (PropAction.Copy, null),
+            },
+            ["CTargetWarp"] = new(StringComparer.Ordinal)
+            {
+                ["m_eAngleMode"] = (PropAction.Copy, null),
+                ["m_hTargetPositionParameter"] = (PropAction.ParamRef, "m_targetPositionParamID"),
+                ["m_hTargetUpVectorParameter"] = (PropAction.ParamRef, "m_targetUpVectorParamID"),
+                ["m_hTargetFacePositionParameter"] = (PropAction.ParamRef, "m_targetFacePositionParamID"),
+                ["m_hMoveHeadingParameter"] = (PropAction.ParamRef, "m_moveHeadingParamID"),
+                ["m_hDesiredMoveHeadingParameter"] = (PropAction.ParamRef, "m_desiredMoveHeadingParamID"),
+                ["m_eCorrectionMethod"] = (PropAction.Copy, null),
+                ["m_eTargetWarpTimingMethod"] = (PropAction.Copy, null),
+                ["m_bTargetFacePositionIsWorldSpace"] = (PropAction.Copy, null),
+                ["m_bTargetPositionIsWorldSpace"] = (PropAction.Copy, null),
+                ["m_bOnlyWarpWhenTagIsFound"] = (PropAction.Copy, null),
+                ["m_bWarpOrientationDuringTranslation"] = (PropAction.Copy, null),
+                ["m_bWarpAroundCenter"] = (PropAction.Copy, null),
+                ["m_flMaxAngle"] = (PropAction.Copy, null),
+                ["m_networkMode"] = (PropAction.Copy, null),
+            },
+            ["COrientationWarp"] = new(StringComparer.Ordinal)
+            {
+                ["m_eMode"] = (PropAction.Copy, null),
+                ["m_hTargetParam"] = (PropAction.ParamRef, "m_targetParamID"),
+                ["m_hTargetPositionParam"] = (PropAction.ParamRef, "m_targetPositionParamID"),
+                ["m_hFallbackTargetPositionParam"] = (PropAction.ParamRef, "m_fallbackTargetPositionParamID"),
+                ["m_eTargetOffsetMode"] = (PropAction.Copy, null),
+                ["m_flTargetOffset"] = (PropAction.Copy, null),
+                ["m_hTargetOffsetParam"] = (PropAction.ParamRef, "m_targetOffsetParamID"),
+                ["m_damping"] = (PropAction.Copy, null),
+                ["m_eRootMotionSource"] = (PropAction.Copy, null),
+                ["m_flMaxRootMotionScale"] = (PropAction.Copy, null),
+                ["m_bEnablePreferredRotationDirection"] = (PropAction.Copy, null),
+                ["m_ePreferredRotationDirection"] = (PropAction.Copy, null),
+                ["m_flPreferredRotationThreshold"] = (PropAction.Copy, null),
+                ["m_networkMode"] = (PropAction.Copy, null),
+            },
+            ["CPairedSequence"] = new(StringComparer.Ordinal)
+            {
+                ["m_sPairedSequenceRole"] = (PropAction.Rename, "m_sPairedRole"),
+                ["m_playbackSpeed"] = (PropAction.Rename, "m_flPlaybackSpeed"),
+                ["m_bLoop"] = (PropAction.Copy, null),
+                ["m_networkMode"] = (PropAction.Copy, null),
+            },
+            ["CFollowTarget"] = new(StringComparer.Ordinal)
+            {
+                ["m_networkMode"] = (PropAction.Copy, null),
+            },
+            ["CMotionMatching"] = new(StringComparer.Ordinal)
+            {
+                ["m_blendCurve"] = (PropAction.BlendCurve, null),
+                ["m_distanceScale_Damping"] = (PropAction.Copy, null),
+                ["m_nRandomSeed"] = (PropAction.Copy, null),
+                ["m_flSampleRate"] = (PropAction.Copy, null),
+                ["m_bSearchEveryTick"] = (PropAction.Copy, null),
+                ["m_flSearchInterval"] = (PropAction.Copy, null),
+                ["m_bSearchWhenClipEnds"] = (PropAction.Copy, null),
+                ["m_bSearchWhenGoalChanges"] = (PropAction.Copy, null),
+                ["m_flBlendTime"] = (PropAction.Copy, null),
+                ["m_flSelectionThreshold"] = (PropAction.Copy, null),
+                ["m_flReselectionTimeWindow"] = (PropAction.Copy, null),
+                ["m_bLockClipWhenWaning"] = (PropAction.Copy, null),
+                ["m_bEnableRotationCorrection"] = (PropAction.Copy, null),
+                ["m_bGoalAssist"] = (PropAction.Copy, null),
+                ["m_flGoalAssistDistance"] = (PropAction.Copy, null),
+                ["m_flGoalAssistTolerance"] = (PropAction.Copy, null),
+                ["m_bEnableDistanceScaling"] = (PropAction.Copy, null),
+                ["m_flDistanceScale_OuterRadius"] = (PropAction.Copy, null),
+                ["m_flDistanceScale_InnerRadius"] = (PropAction.Copy, null),
+                ["m_flDistanceScale_MaxScale"] = (PropAction.Copy, null),
+                ["m_flDistanceScale_MinScale"] = (PropAction.Copy, null),
+                ["m_networkMode"] = (PropAction.Copy, null),
+            },
+            ["CAimCamera"] = new(StringComparer.Ordinal)
+            {
+                ["m_hParameterPosition"] = (PropAction.ParamRef, "m_parameterNamePosition"),
+                ["m_hParameterOrientation"] = (PropAction.ParamRef, "m_parameterNameOrientation"),
+                ["m_hParameterPelvisOffset"] = (PropAction.ParamRef, "m_parameterNamePelvisOffset"),
+                ["m_hParameterCameraOnly"] = (PropAction.ParamRef, "m_parameterCameraOnly"),
+                ["m_hParameterCameraClearanceDistance"] = (PropAction.ParamRef, "m_parameterCameraClearanceDistance"),
+                ["m_hParameterWeaponDepenetrationDistance"] = (PropAction.ParamRef, "m_parameterWeaponDepenetrationDistance"),
+                ["m_hParameterWeaponDepenetrationDelta"] = (PropAction.ParamRef, "m_parameterWeaponDepenetrationDelta"),
+                ["m_networkMode"] = (PropAction.Copy, null),
+            },
+            ["CJumpHelper"] = new(StringComparer.Ordinal)
+            {
+                ["m_hTargetParam"] = (PropAction.ParamRef, "m_targetParamID"),
+                ["m_flJumpStartCycle"] = (PropAction.Copy, null),
+                ["m_flOriginalJumpDuration"] = (PropAction.Skip, null),
+                ["m_flOriginalJumpMovement"] = (PropAction.Skip, null),
+                ["m_bScaleSpeed"] = (PropAction.Copy, null),
+                ["m_playbackSpeed"] = (PropAction.Copy, null),
+                ["m_bLoop"] = (PropAction.Copy, null),
+                ["m_eCorrectionMethod"] = (PropAction.Copy, null),
+                ["m_duration"] = (PropAction.Skip, null),
+            },
+            ["CLeanMatrix"] = new(StringComparer.Ordinal)
+            {
+                ["m_paramIndex"] = (PropAction.ParamRef, "m_param"),
+                ["m_verticalAxis"] = (PropAction.Rename, "m_verticalAxisDirection"),
+                ["m_horizontalAxis"] = (PropAction.Rename, "m_horizontalAxisDirection"),
+                ["m_damping"] = (PropAction.Copy, null),
+                ["m_blendSource"] = (PropAction.Copy, null),
+                ["m_flMaxValue"] = (PropAction.Copy, null),
+                ["m_frameCorners"] = (PropAction.Skip, null),
+                ["m_poses"] = (PropAction.Skip, null),
+                ["m_nSequenceMaxFrame"] = (PropAction.Skip, null),
+            },
+            ["CFootLock"] = new(StringComparer.Ordinal)
+            {
+                ["m_hipShiftDamping"] = (PropAction.Copy, null),
+                ["m_rootHeightDamping"] = (PropAction.Copy, null),
+                ["m_flStrideCurveScale"] = (PropAction.Copy, null),
+                ["m_flStrideCurveLimitScale"] = (PropAction.Copy, null),
+                ["m_flStepHeightIncreaseScale"] = (PropAction.Copy, null),
+                ["m_flStepHeightDecreaseScale"] = (PropAction.Copy, null),
+                ["m_flHipShiftScale"] = (PropAction.Copy, null),
+                ["m_flBlendTime"] = (PropAction.Copy, null),
+                ["m_flMaxRootHeightOffset"] = (PropAction.Copy, null),
+                ["m_flMinRootHeightOffset"] = (PropAction.Copy, null),
+                ["m_flTiltPlanePitchSpringStrength"] = (PropAction.Copy, null),
+                ["m_flTiltPlaneRollSpringStrength"] = (PropAction.Copy, null),
+                ["m_bApplyFootRotationLimits"] = (PropAction.Copy, null),
+                ["m_bApplyHipShift"] = (PropAction.Rename, "m_bEnableHipShift"),
+                ["m_bModulateStepHeight"] = (PropAction.Copy, null),
+                ["m_bResetChild"] = (PropAction.Copy, null),
+                ["m_bEnableVerticalCurvedPaths"] = (PropAction.Copy, null),
+                ["m_bEnableRootHeightDamping"] = (PropAction.Copy, null),
+            },
         };
 
     private static readonly HashSet<string> NameToSNameClasses = new(StringComparer.Ordinal)
@@ -207,8 +381,7 @@ public class AnimationGraphExtract : IDisposable
         KVObject node,
         KVObject compiledNode,
         string key,
-        KVValue value,
-        Lazy<KVObject> subCollection,
+        KVObject value,
         List<long> outConnections,
         PropAction action,
         string? outputKey)
@@ -217,60 +390,40 @@ public class AnimationGraphExtract : IDisposable
         switch (action)
         {
             case PropAction.Copy:
-                node.AddProperty(destKey, value);
-                break;
             case PropAction.Rename:
-                node.AddProperty(destKey, value);
+                node.Add(destKey, value);
                 break;
             case PropAction.ParamRef:
-                {
-                    node.AddProperty(destKey, ExtractParameterID(subCollection.Value));
-                    break;
-                }
+                node.Add(destKey, ExtractParameterID(value));
+                break;
             case PropAction.InputConnection:
                 {
-                    var nodeIndex = subCollection.Value.GetIntegerProperty("m_nodeIndex");
+                    var nodeIndex = value.GetIntegerProperty("m_nodeIndex");
                     if (nodeIndexToIdMap?.TryGetValue(nodeIndex, out var nodeId) == true)
                     {
                         outConnections.Add(nodeId);
-                        var connection = MakeInputConnection(nodeId);
-                        node.AddProperty("m_inputConnection", connection);
+                        node.Add("m_inputConnection", MakeInputConnection(nodeId));
                     }
                     break;
                 }
             case PropAction.BlendDuration:
-                {
-                    var converted = ConvertBlendDuration(subCollection.Value);
-                    node.AddProperty(destKey, converted);
-                    break;
-                }
+                node.Add(destKey, ConvertBlendDuration(value));
+                break;
             case PropAction.BlendCurve:
-                {
-                    node.AddProperty(destKey, MakeBlendCurve(subCollection.Value));
-                    break;
-                }
-            case PropAction.SequenceName:
-                {
-                    var sequenceIndex = compiledNode.GetIntegerProperty("m_hSequence");
-                    var sequenceName = GetSequenceName(sequenceIndex);
-                    node.AddProperty(destKey, sequenceName);
-                    break;
-                }
+                node.Add(destKey, MakeBlendCurve(value));
+                break;
             case PropAction.TagIndex:
                 {
                     var tagIndex = compiledNode.GetIntegerProperty("m_nTagIndex");
-                    node.AddProperty("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
-                    if (tagIndex != -1 && !node.Properties.ContainsKey("m_selectionSource"))
+                    node.Add("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
+                    if (tagIndex != -1 && !node.ContainsKey("m_selectionSource"))
                     {
-                        node.AddProperty("m_selectionSource", "SelectionSource_Tag");
+                        node.Add("m_selectionSource", "SelectionSource_Tag");
                     }
                     break;
                 }
             case PropAction.TagBehavior:
-                node.AddProperty("m_tagBehavior", value);
-                break;
-            case PropAction.Skip:
-                // intentionally ignore this property
+                node.Add("m_tagBehavior", value);
                 break;
         }
     }
@@ -309,7 +462,7 @@ public class AnimationGraphExtract : IDisposable
         var contentFile = new ContentFile
         {
             Data = Encoding.UTF8.GetBytes(isUncompiledAnimationGraph
-                ? resourceData.GetKV3File().ToString()
+                ? resourceData.Data.ToKV3String()
                 : ToEditableAnimGraphVersion19()),
             FileName = outputFileName ?? "animgraph",
         };
@@ -320,96 +473,79 @@ public class AnimationGraphExtract : IDisposable
     /// <summary>
     /// Gets or sets the animation tags.
     /// </summary>
-    public KVObject[] Tags { get; set; } = [];
+    public IReadOnlyList<KVObject> Tags { get; set; } = [];
 
     /// <summary>
     /// Gets or sets the animation parameters.
     /// </summary>
-    public KVObject[] Parameters { get; set; } = [];
+    public IReadOnlyList<KVObject> Parameters { get; set; } = [];
 
     /// <summary>
     /// Builds the mapping from compiled node indices to their actual node IDs.
     /// </summary>
-    private void BuildNodeIdMap(KVObject[] compiledNodes)
+    private void BuildNodeIdMap(IReadOnlyList<KVObject> compiledNodes)
     {
         compiledNodeIndexMap = [];
         nodeIndexToIdMap = [];
 
         var assignedNodeIds = new HashSet<long>();
-        for (var i = 0; i < compiledNodes.Length; i++)
+        var idCursor = GeneratedNodeIdMin;
+        for (var i = 0; i < compiledNodes.Count; i++)
         {
             var compiledNode = compiledNodes[i];
-            var nodePath = compiledNode.GetSubCollection("m_nodePath");
-            if (nodePath is null)
-            {
-                var newNodeId = GenerateNewNodeId(assignedNodeIds);
-                assignedNodeIds.Add(newNodeId);
-                compiledNodeIndexMap[newNodeId] = compiledNode;
-                nodeIndexToIdMap[i] = newNodeId;
-                continue;
-            }
+            var nodeId = TryFindExistingNodeId(compiledNode, assignedNodeIds)
+                ?? GenerateNewNodeId(assignedNodeIds, ref idCursor);
 
-            var path = nodePath.GetArray("m_path");
-            var count = nodePath.GetIntegerProperty("m_nCount");
-
-            if (count <= 0 || path is null || path.Length == 0)
-            {
-                var newNodeId = GenerateNewNodeId(assignedNodeIds);
-                assignedNodeIds.Add(newNodeId);
-                compiledNodeIndexMap[newNodeId] = compiledNode;
-                nodeIndexToIdMap[i] = newNodeId;
-                continue;
-            }
-
-            long? foundId = null;
-            for (var j = (int)count - 1; j >= 0; j--)
-            {
-                var id = path[j].GetIntegerProperty("m_id");
-                if (id != uint.MaxValue)
-                {
-                    foundId = id;
-                    break;
-                }
-            }
-
-            if (foundId.HasValue)
-            {
-                var nodeId = foundId.Value;
-
-                if (assignedNodeIds.Contains(nodeId))
-                {
-                    nodeId = GenerateNewNodeId(assignedNodeIds);
-                }
-
-                assignedNodeIds.Add(nodeId);
-                compiledNodeIndexMap[nodeId] = compiledNode;
-                nodeIndexToIdMap[i] = nodeId;
-            }
-            else
-            {
-                var newNodeId = GenerateNewNodeId(assignedNodeIds);
-                assignedNodeIds.Add(newNodeId);
-                compiledNodeIndexMap[newNodeId] = compiledNode;
-                nodeIndexToIdMap[i] = newNodeId;
-            }
+            assignedNodeIds.Add(nodeId);
+            compiledNodeIndexMap[nodeId] = compiledNode;
+            nodeIndexToIdMap[i] = nodeId;
         }
     }
 
-    private static long GenerateNewNodeId(HashSet<long> assignedNodeIds)
+    private static long? TryFindExistingNodeId(KVObject compiledNode, HashSet<long> assignedNodeIds)
     {
-        const long MinId = 100_000_000L;
-        const long MaxId = 999_999_999L;
-
-        for (var candidate = MinId; candidate <= MaxId; candidate++)
+        var nodePath = compiledNode.GetSubCollection("m_nodePath");
+        if (nodePath is null)
         {
-            if (!assignedNodeIds.Contains(candidate))
-            {
-                return candidate;
-            }
+            return null;
         }
 
-        // As a last resort (should never happen) just return MinId.
-        return MinId;
+        var path = nodePath.GetArray("m_path");
+        var count = nodePath.GetIntegerProperty("m_nCount");
+        if (count <= 0 || path is null || path.Count == 0)
+        {
+            return null;
+        }
+
+        for (var j = (int)count - 1; j >= 0; j--)
+        {
+            var id = path[j].GetIntegerProperty("m_id");
+            if (id != uint.MaxValue)
+            {
+                return assignedNodeIds.Contains(id) ? null : id;
+            }
+        }
+        return null;
+    }
+
+    private const long GeneratedNodeIdMin = 100_000_000L;
+    private const long GeneratedNodeIdMax = 999_999_999L;
+
+    private static long GenerateNewNodeId(HashSet<long> assignedNodeIds, ref long cursor)
+    {
+        if (cursor < GeneratedNodeIdMin)
+        {
+            cursor = GeneratedNodeIdMin;
+        }
+        while (cursor <= GeneratedNodeIdMax && assignedNodeIds.Contains(cursor))
+        {
+            cursor++;
+        }
+        if (cursor > GeneratedNodeIdMax)
+        {
+            throw new InvalidOperationException("Exhausted the generated node id range.");
+        }
+        return cursor++;
     }
 
     private sealed class LayoutNode(long id)
@@ -466,25 +602,7 @@ public class AnimationGraphExtract : IDisposable
         foreach (var (nodeId, node) in createdNodes)
         {
             var pos = layoutNodes[nodeId].Position;
-            node.AddProperty("m_vecPosition", MakeVector2(pos.X, pos.Y));
-        }
-    }
-
-    private void LoadModelData()
-    {
-        if (modelAttachments != null)
-        {
-            return;
-        }
-
-        var modelData = ModelData;
-        if (modelData != null)
-        {
-            modelAttachments = modelData.Attachments;
-        }
-        else
-        {
-            modelAttachments = [];
+            node.Add("m_vecPosition", MakeVector2(pos.X, pos.Y));
         }
     }
 
@@ -514,7 +632,7 @@ public class AnimationGraphExtract : IDisposable
         // not exactly the same keys as model attachment.
         var influenceIndices = compiledAttachment.GetArray<int>("m_influenceIndices");
         var influenceRotations = compiledAttachment.GetArray("m_influenceRotations").Select(v => v.ToQuaternion()).ToArray();
-        var influenceOffsets = compiledAttachment.GetArray("m_influenceOffsets", v => v.ToVector3());
+        var influenceOffsets = compiledAttachment.GetArray("m_influenceOffsets").Select(v => v.ToVector3()).ToArray();
         var influenceWeights = compiledAttachment.GetArray<double>("m_influenceWeights");
 
         var influenceCount = compiledAttachment.GetInt32Property("m_numInfluences");
@@ -564,42 +682,26 @@ public class AnimationGraphExtract : IDisposable
 
     private string[] LoadBoneNamesFromModel()
     {
-        var modelName = Graph.GetStringProperty("m_modelName");
-        if (string.IsNullOrEmpty(modelName))
+        if (modelBoneNamesCache is not null)
         {
-            return [];
+            return modelBoneNamesCache;
         }
-        if (modelBoneNamesCache?.TryGetValue(modelName, out var cached) == true)
-        {
-            return cached;
-        }
-        var boneNames = new List<string>();
         try
         {
-            var modelData = ModelData;
-            if (modelData != null)
-            {
-                var skeleton = modelData.Skeleton;
-                foreach (var bone in skeleton.Bones)
-                {
-                    boneNames.Add(bone.Name);
-                }
-            }
+            modelBoneNamesCache = ModelData?.Skeleton.Bones.Select(b => b.Name).ToArray() ?? [];
         }
         catch (Exception)
         {
-            return [];
+            modelBoneNamesCache = [];
         }
-        modelBoneNamesCache ??= [];
-        modelBoneNamesCache[modelName] = [.. boneNames];
-        return [.. boneNames];
+        return modelBoneNamesCache;
     }
     private static string GetNameByIndex(string[] names, int index)
     {
         return index >= 0 && index < names.Length ? names[index] : string.Empty;
     }
 
-    private static KVObject[]? GetIKChainsFromModel(Model? modelData)
+    private static IReadOnlyList<KVObject>? GetIKChainsFromModel(Model? modelData)
     {
         if (modelData is null)
         {
@@ -622,87 +724,70 @@ public class AnimationGraphExtract : IDisposable
     }
     private string[] LoadIKChainNamesFromModel()
     {
-        var modelName = Graph.GetStringProperty("m_modelName");
-        if (string.IsNullOrEmpty(modelName))
+        if (modelIKChainNamesCache is not null)
         {
-            return [];
+            return modelIKChainNamesCache;
         }
-        if (modelIKChainNamesCache?.TryGetValue(modelName, out var cached) == true)
-        {
-            return cached;
-        }
-        var ikChainNames = new List<string>();
         try
         {
-            var ikChains = GetIKChainsFromModel(ModelData);
-            if (ikChains is not null)
-            {
-                foreach (var chain in ikChains)
-                {
-                    var name = chain.GetStringProperty("m_Name");
-                    if (!string.IsNullOrEmpty(name))
-                    {
-                        ikChainNames.Add(name);
-                    }
-                }
-            }
+            modelIKChainNamesCache = GetIKChainsFromModel(ModelData)?
+                .Select(c => c.GetStringProperty("m_Name"))
+                .Where(n => !string.IsNullOrEmpty(n))
+                .ToArray() ?? [];
         }
         catch (Exception)
         {
-            return [];
+            modelIKChainNamesCache = [];
         }
-        modelIKChainNamesCache ??= [];
-        modelIKChainNamesCache[modelName] = [.. ikChainNames];
-        return [.. ikChainNames];
+        return modelIKChainNamesCache;
     }
 
     private Dictionary<string, List<string>> LoadIKChainBonesFromModel()
     {
-        var chainBones = new Dictionary<string, List<string>>();
-        var modelName = Graph.GetStringProperty("m_modelName");
-        if (string.IsNullOrEmpty(modelName))
+        if (modelIKChainBonesCache is not null)
         {
-            return chainBones;
+            return modelIKChainBonesCache;
         }
-
+        var chainBones = new Dictionary<string, List<string>>();
         try
         {
             var ikChains = GetIKChainsFromModel(ModelData);
-            if (ikChains is not null)
+            if (ikChains is null)
             {
-                foreach (var chain in ikChains)
-                {
-                    var name = chain.GetStringProperty("m_Name");
-                    if (string.IsNullOrEmpty(name))
-                    {
-                        continue;
-                    }
+                return chainBones;
+            }
 
-                    var boneList = new List<string>();
-                    if (chain.ContainsKey("m_Joints"))
+            foreach (var chain in ikChains)
+            {
+                var name = chain.GetStringProperty("m_Name");
+                if (string.IsNullOrEmpty(name))
+                {
+                    continue;
+                }
+
+                var boneList = new List<string>();
+                if (chain.ContainsKey("m_Joints"))
+                {
+                    foreach (var joint in chain.GetArray("m_Joints"))
                     {
-                        var joints = chain.GetArray("m_Joints");
-                        foreach (var joint in joints)
+                        if (joint.ContainsKey("m_Bone"))
                         {
-                            if (joint.ContainsKey("m_Bone"))
+                            var boneName = joint.GetSubCollection("m_Bone").GetStringProperty("m_Name");
+                            if (!string.IsNullOrEmpty(boneName))
                             {
-                                var bone = joint.GetSubCollection("m_Bone");
-                                var boneName = bone.GetStringProperty("m_Name");
-                                if (!string.IsNullOrEmpty(boneName))
-                                {
-                                    boneList.Add(boneName);
-                                }
+                                boneList.Add(boneName);
                             }
                         }
                     }
-                    chainBones[name] = boneList;
                 }
+                chainBones[name] = boneList;
             }
         }
         catch (Exception)
         {
-            return chainBones;
+            chainBones.Clear();
         }
+        modelIKChainBonesCache = chainBones;
         return chainBones;
     }
 
@@ -717,15 +802,11 @@ public class AnimationGraphExtract : IDisposable
             return string.Empty;
         }
 
-        var chainBones = LoadIKChainBonesFromModel();
-        foreach (var (chainName, bones) in chainBones)
+        foreach (var (chainName, bones) in LoadIKChainBonesFromModel())
         {
-            if (bones.Count == 3)
+            if (bones.Count == 3 && bones[0] == fixedBoneName && bones[1] == middleBoneName && bones[2] == endBoneName)
             {
-                if (bones[0] == fixedBoneName && bones[1] == middleBoneName && bones[2] == endBoneName)
-                {
-                    return chainName;
-                }
+                return chainName;
             }
         }
         return string.Empty;
@@ -738,47 +819,51 @@ public class AnimationGraphExtract : IDisposable
     {
         return GetNameByIndex(LoadFootNamesFromModel(), footIndex);
     }
+
+    private void AddFeetProperty(KVObject target, KVObject compiledSource)
+    {
+        if (!compiledSource.ContainsKey("m_footIndices"))
+        {
+            return;
+        }
+
+        var footIndices = compiledSource.GetIntegerArray("m_footIndices");
+        var feetArray = KVObject.Array();
+        foreach (var footIndex in footIndices)
+        {
+            var footName = GetFootName((int)footIndex);
+            feetArray.Add(footName);
+        }
+        target.Add("m_feet", feetArray);
+    }
+
     private string[] LoadFootNamesFromModel()
     {
-        var modelName = Graph.GetStringProperty("m_modelName");
-        if (string.IsNullOrEmpty(modelName))
+        if (modelFootNamesCache is not null)
         {
-            return [];
-        }
-        if (modelFootNamesCache?.TryGetValue(modelName, out var cached) == true)
-        {
-            return cached;
+            return modelFootNamesCache;
         }
         var footNames = new List<string>();
         try
         {
-            var modelData = ModelData;
-            if (modelData is not null)
+            var keyvalues = ModelData?.KeyValues;
+            if (keyvalues?.ContainsKey("FeetSettings") == true)
             {
-                var keyvalues = modelData.KeyValues;
-                if (keyvalues.ContainsKey("FeetSettings"))
+                foreach (var (footKey, _) in keyvalues.GetSubCollection("FeetSettings").Children)
                 {
-                    var feetSettings = keyvalues.GetSubCollection("FeetSettings");
-
-                    foreach (var (footKey, _) in feetSettings.Properties)
+                    if (!string.IsNullOrEmpty(footKey) && footKey != "_class")
                     {
-                        if (!string.IsNullOrEmpty(footKey) && footKey != "_class")
-                        {
-                            footNames.Add(footKey);
-                        }
+                        footNames.Add(footKey);
                     }
                 }
             }
         }
         catch (Exception)
         {
-            return [];
+            footNames.Clear();
         }
-
-        modelFootNamesCache ??= [];
-        modelFootNamesCache[modelName] = [.. footNames];
-
-        return [.. footNames];
+        modelFootNamesCache = [.. footNames];
+        return modelFootNamesCache;
     }
 
     private sealed class LookAtChainInfo
@@ -795,9 +880,9 @@ public class AnimationGraphExtract : IDisposable
             return [];
         }
         var compiledBonesArray = compiledBones.GetArray("m_bones");
-        var boneNames = new string[compiledBonesArray.Length];
+        var boneNames = new string[compiledBonesArray.Count];
 
-        for (var i = 0; i < compiledBonesArray.Length; i++)
+        for (var i = 0; i < compiledBonesArray.Count; i++)
         {
             var boneIndex = (int)compiledBonesArray[i].GetIntegerProperty("m_index");
             boneNames[i] = GetBoneName(boneIndex);
@@ -806,62 +891,42 @@ public class AnimationGraphExtract : IDisposable
     }
     private LookAtChainInfo[] LoadLookAtChainInfoFromModel()
     {
-        var modelName = Graph.GetStringProperty("m_modelName");
-        if (string.IsNullOrEmpty(modelName))
+        if (modelLookAtChainInfoCache is not null)
         {
-            return [];
-        }
-        if (modelLookAtChainInfoCache?.TryGetValue(modelName, out var cached) == true)
-        {
-            return cached;
+            return modelLookAtChainInfoCache;
         }
         var lookAtChains = new List<LookAtChainInfo>();
         try
         {
-            var modelData = ModelData;
-            if (modelData is not null)
+            var keyvalues = ModelData?.KeyValues;
+            if (keyvalues?.ContainsKey("LookAtList") == true)
             {
-                var keyvalues = modelData.KeyValues;
-                if (keyvalues.ContainsKey("LookAtList"))
+                foreach (var (_, chainEntryValue) in keyvalues.GetSubCollection("LookAtList").Children)
                 {
-                    var lookAtList = keyvalues.GetSubCollection("LookAtList");
-                    foreach (var chainEntry in lookAtList.Properties)
+                    if (chainEntryValue.ValueType != KVValueType.Collection)
                     {
-                        if (chainEntry.Value.Value is not KVObject chainData)
-                        {
-                            continue;
-                        }
-                        var chain = new LookAtChainInfo
-                        {
-                            Name = chainData.GetStringProperty("name")
-                        };
-                        if (chainData.ContainsKey("bones"))
-                        {
-                            var bones = chainData.GetArray("bones");
-                            var boneNames = new List<string>();
-                            var boneWeights = new List<float>();
-
-                            foreach (var bone in bones)
-                            {
-                                boneNames.Add(bone.GetStringProperty("name"));
-                                boneWeights.Add(bone.GetFloatProperty("weight"));
-                            }
-
-                            chain.BoneNames = [.. boneNames];
-                            chain.BoneWeights = [.. boneWeights];
-                        }
-                        lookAtChains.Add(chain);
+                        continue;
                     }
+                    var chain = new LookAtChainInfo
+                    {
+                        Name = chainEntryValue.GetStringProperty("name"),
+                    };
+                    if (chainEntryValue.ContainsKey("bones"))
+                    {
+                        var bones = chainEntryValue.GetArray("bones");
+                        chain.BoneNames = bones.Select(b => b.GetStringProperty("name")).ToArray();
+                        chain.BoneWeights = bones.Select(b => b.GetFloatProperty("weight")).ToArray();
+                    }
+                    lookAtChains.Add(chain);
                 }
             }
         }
         catch (Exception)
         {
-            return [];
+            lookAtChains.Clear();
         }
-        modelLookAtChainInfoCache ??= [];
-        modelLookAtChainInfoCache[modelName] = [.. lookAtChains];
-        return [.. lookAtChains];
+        modelLookAtChainInfoCache = [.. lookAtChains];
+        return modelLookAtChainInfoCache;
     }
     private string FindMatchingLookAtChainName(KVObject compiledBones)
     {
@@ -875,31 +940,20 @@ public class AnimationGraphExtract : IDisposable
             return string.Empty;
         }
         var compiledBoneNames = GetBoneNamesFromIndices(compiledBones);
+
         foreach (var chain in lookAtChains)
         {
-            if (chain.BoneNames.Length == compiledBoneNames.Length)
+            if (chain.BoneNames.SequenceEqual(compiledBoneNames))
             {
-                var match = true;
-                for (var i = 0; i < chain.BoneNames.Length; i++)
-                {
-                    if (chain.BoneNames[i] != compiledBoneNames[i])
-                    {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match)
-                {
-                    return chain.Name;
-                }
+                return chain.Name;
             }
         }
+
+        // Fall back to unordered set equality
+        var compiledSet = new HashSet<string>(compiledBoneNames);
         foreach (var chain in lookAtChains)
         {
-            var chainSet = new HashSet<string>(chain.BoneNames);
-            var compiledSet = new HashSet<string>(compiledBoneNames);
-
-            if (chainSet.SetEquals(compiledSet))
+            if (compiledSet.SetEquals(chain.BoneNames))
             {
                 return chain.Name;
             }
@@ -909,10 +963,10 @@ public class AnimationGraphExtract : IDisposable
     /// <summary>
     /// Converts the compiled animation graph to editable version 19 format.
     /// </summary>
-    /// <returns>The animation graph as a <see cref="KV3File"/> string in version 19 format.</returns>
+    /// <returns>The animation graph as a KV3 string in version 19 format.</returns>
     public string ToEditableAnimGraphVersion19()
     {
-        LoadModelData();
+        modelAttachments = ModelData?.Attachments ?? [];
 
         var data = Graph.GetSubCollection("m_pSharedData");
         var compiledNodes = data.GetArray("m_nodes");
@@ -922,11 +976,11 @@ public class AnimationGraphExtract : IDisposable
         var paramListUpdater = data.GetSubCollection("m_pParamListUpdater");
         scriptManager = data.GetSubCollection("m_scriptManager");
 
-        if (data.GetArray("m_managers") is KVObject[] managers)
+        if (data.GetArray("m_managers") is { } managers)
         {
-            tagManager = managers.FirstOrDefault(m => m.GetProperty<string>("_class") == "CAnimTagManagerUpdater");
-            paramListUpdater = managers.FirstOrDefault(m => m.GetProperty<string>("_class") == "CAnimParameterListUpdater");
-            scriptManager = managers.FirstOrDefault(m => m.GetProperty<string>("_class") == "CAnimScriptManager");
+            tagManager = managers.FirstOrDefault(m => m.GetStringProperty("_class") == "CAnimTagManagerUpdater");
+            paramListUpdater = managers.FirstOrDefault(m => m.GetStringProperty("_class") == "CAnimParameterListUpdater");
+            scriptManager = managers.FirstOrDefault(m => m.GetStringProperty("_class") == "CAnimScriptManager");
         }
 
         if (tagManager is null || paramListUpdater is null)
@@ -939,7 +993,7 @@ public class AnimationGraphExtract : IDisposable
 
         var clipDataManager = tagManager.ContainsKey("sequence_tag_spans")
             ? ConvertClipDataManager(tagManager.GetArray("sequence_tag_spans"))
-            : MakeNode("CAnimClipDataManager", ("m_itemTable", new KVObject(null, isArray: false, 0)));
+            : MakeNode("CAnimClipDataManager", ("m_itemTable", KVObject.Null()));
 
         var nodeManager = MakeListNode("CAnimNodeManager", "m_nodes");
         var componentList = new List<KVObject>();
@@ -959,7 +1013,7 @@ public class AnimationGraphExtract : IDisposable
         var layoutNodes = new Dictionary<long, LayoutNode>();
         var nodeOutConnections = new Dictionary<long, List<long>>();
 
-        for (var i = 0; i < compiledNodes.Length; i++)
+        for (var i = 0; i < compiledNodes.Count; i++)
         {
             var compiledNode = compiledNodes[i];
 
@@ -970,7 +1024,7 @@ public class AnimationGraphExtract : IDisposable
 
             var outConnections = new List<long>();
             var nodeData = ConvertToUncompiled(compiledNode, outConnections);
-            nodeData.AddProperty("m_nNodeID", MakeNodeIdObjectValue(nodeId));
+            nodeData.Add("m_nNodeID", MakeNodeIdObjectValue(nodeId));
 
             createdNodes[nodeId] = nodeData;
             layoutNodes[nodeId] = new LayoutNode(nodeId);
@@ -993,16 +1047,13 @@ public class AnimationGraphExtract : IDisposable
 
         foreach (var (nodeId, nodeData) in createdNodes)
         {
-            var nodeManagerItem = new KVObject(null, 2);
-            nodeManagerItem.AddProperty("key", MakeNodeIdObjectValue(nodeId));
-            nodeManagerItem.AddProperty("value", nodeData);
-            nodeManager.Children.AddItem(nodeManagerItem);
+            nodeManager.Children.Add(MakeNodeManagerEntry(nodeId, nodeData));
         }
 
-        var localParameters = KVValue.MakeArray(Parameters);
-        var localTags = KVValue.MakeArray(Tags);
+        var localParameters = MakeArray(Parameters);
+        var localTags = MakeArray(Tags);
         var componentManager = MakeNode("CAnimComponentManager");
-        componentManager.AddProperty("m_components", KVValue.MakeArray(componentList.ToArray()));
+        componentManager.Add("m_components", MakeArray(componentList));
 
         var kv = MakeNode(
             "CAnimationGraph",
@@ -1016,66 +1067,42 @@ public class AnimationGraphExtract : IDisposable
                 // ("m_referencedAnimGraphs", referencedAnimGraphs),
                 // ("m_pSettingsManager", settingsManager),
                 ("m_clipDataManager", clipDataManager),
-                ("m_modelName", Graph.GetProperty<string>("m_modelName")),
+                ("m_modelName", Graph.GetStringProperty("m_modelName")),
             ]);
 
-        return new KV3File(kv, format: KV3IDLookup.Get("animgraph19")).ToString();
+        return kv.ToKV3String(format: KV3IDLookup.Get("animgraph19"));
     }
 
     private Dictionary<int, string> LoadWeightListNamesFromModel()
     {
         var weightListNames = new Dictionary<int, string>();
-        var modelName = Graph.GetStringProperty("m_modelName");
-
-        if (string.IsNullOrEmpty(modelName))
-        {
-            weightListNames[0] = "default";
-            return weightListNames;
-        }
-
         try
         {
-            var modelResource = ModelResource;
-            if (modelResource is not null)
+            var localBoneMaskArray = ModelResource is not null
+                ? GetAseqDataFromResource(ModelResource)?.GetArray("m_localBoneMaskArray")
+                : null;
+            if (localBoneMaskArray is { Count: > 0 })
             {
-                var aseqData = GetAseqDataFromResource(modelResource);
-                if (aseqData is not null)
+                for (var i = 0; i < localBoneMaskArray.Count; i++)
                 {
-                    var localBoneMaskArray = aseqData.GetArray("m_localBoneMaskArray");
-                    if (localBoneMaskArray is not null && localBoneMaskArray.Length > 0)
-                    {
-                        for (var i = 0; i < localBoneMaskArray.Length; i++)
-                        {
-                            var boneMask = localBoneMaskArray[i];
-                            var weightListName = boneMask.GetStringProperty("m_sName");
-                            weightListNames[i] = !string.IsNullOrEmpty(weightListName)
-                                ? weightListName
-                                : i == 0 ? "default" : $"weightlist_{i}";
-                        }
-                    }
+                    var weightListName = localBoneMaskArray[i].GetStringProperty("m_sName");
+                    weightListNames[i] = !string.IsNullOrEmpty(weightListName)
+                        ? weightListName
+                        : i == 0 ? "default" : $"weightlist_{i}";
                 }
             }
         }
         catch
         {
-            // If loading fails, ensure we have a default entry
         }
 
-        if (!weightListNames.ContainsKey(0))
-        {
-            weightListNames[0] = "default";
-        }
-
+        weightListNames.TryAdd(0, "default");
         return weightListNames;
     }
+
     private Dictionary<int, string> LoadSequenceNamesFromModel()
     {
         var sequenceNames = new Dictionary<int, string>();
-        var modelName = Graph.GetStringProperty("m_modelName");
-        if (string.IsNullOrEmpty(modelName))
-        {
-            return sequenceNames;
-        }
         try
         {
             var modelResource = ModelResource;
@@ -1083,33 +1110,26 @@ public class AnimationGraphExtract : IDisposable
             {
                 return sequenceNames;
             }
+
             var index = 0;
-            var aseqData = GetAseqDataFromResource(modelResource);
-            if (aseqData is not null)
+            var localSequenceNameArray = GetAseqDataFromResource(modelResource)?.GetArray<string>("m_localSequenceNameArray");
+            if (localSequenceNameArray is not null)
             {
-                var localSequenceNameArray = aseqData.GetArray<string>("m_localSequenceNameArray");
-                if (localSequenceNameArray is not null)
+                foreach (var sequenceName in localSequenceNameArray)
                 {
-                    for (var i = 0; i < localSequenceNameArray.Length; i++)
+                    if (!string.IsNullOrEmpty(sequenceName))
                     {
-                        var sequenceName = localSequenceNameArray[i];
-                        if (!string.IsNullOrEmpty(sequenceName))
-                        {
-                            sequenceNames[index] = sequenceName;
-                            index++;
-                        }
+                        sequenceNames[index++] = sequenceName;
                     }
                 }
             }
             if (modelResource.DataBlock is Model modelData)
             {
-                var referencedAnimations = modelData.GetReferencedAnimations(fileLoader);
-                foreach (var animation in referencedAnimations)
+                foreach (var animation in modelData.GetReferencedAnimations(fileLoader))
                 {
                     if (!string.IsNullOrEmpty(animation.Name))
                     {
-                        sequenceNames[index] = animation.Name;
-                        index++;
+                        sequenceNames[index++] = animation.Name;
                     }
                 }
             }
@@ -1153,28 +1173,28 @@ public class AnimationGraphExtract : IDisposable
             : null;
     }
 
-    private KVObject ConvertClipDataManager(KVObject[] sequenceTagSpans)
+    private KVObject ConvertClipDataManager(IReadOnlyList<KVObject> sequenceTagSpans)
     {
         var clipDataManager = MakeNode("CAnimClipDataManager");
-        var itemTable = new KVObject(null, isArray: false, 0);
+        var itemTable = new KVObject();
 
         foreach (var sequenceSpan in sequenceTagSpans)
         {
             var sequenceName = sequenceSpan.GetStringProperty("m_sSequenceName");
             var compiledTagSpans = sequenceSpan.GetArray("m_tags");
 
-            if (string.IsNullOrEmpty(sequenceName) || compiledTagSpans.Length == 0)
+            if (string.IsNullOrEmpty(sequenceName) || compiledTagSpans.Count == 0)
             {
                 continue;
             }
 
             var clipData = MakeNode("CAnimClipData");
-            clipData.AddProperty("m_clipName", sequenceName);
-            clipData.AddProperty("m_tagSpans", ConvertTagSpansArray(compiledTagSpans));
-            itemTable.AddProperty(sequenceName, clipData);
+            clipData.Add("m_clipName", sequenceName);
+            clipData.Add("m_tagSpans", ConvertTagSpansArray(compiledTagSpans));
+            itemTable.Add(sequenceName, clipData);
         }
 
-        clipDataManager.AddProperty("m_itemTable", itemTable);
+        clipDataManager.Add("m_itemTable", itemTable);
         return clipDataManager;
     }
 
@@ -1185,86 +1205,77 @@ public class AnimationGraphExtract : IDisposable
             return string.Empty;
         }
 
-        var directionalSuffixes = new string[]
-        {
-        "_n", "_nw", "_w", "_sw", "_s", "_se", "_e", "_ne",
-        "_N", "_NW", "_W", "_SW", "_S", "_SE", "_E", "_NE"
-        };
+        string[] directionalSuffixes =
+        [
+            "_n", "_nw", "_w", "_sw", "_s", "_se", "_e", "_ne",
+            "_N", "_NW", "_W", "_SW", "_S", "_SE", "_E", "_NE",
+        ];
+
         foreach (var seq in sequenceNames)
         {
             foreach (var suffix in directionalSuffixes)
             {
-                if (seq.EndsWith(suffix, StringComparison.Ordinal))
+                if (!seq.EndsWith(suffix, StringComparison.Ordinal))
                 {
-                    var candidatePrefix = seq[..^suffix.Length];
+                    continue;
+                }
 
-                    if (sequenceNames.All(s => s.StartsWith(candidatePrefix, StringComparison.Ordinal)))
-                    {
-                        var allMatch = true;
-                        foreach (var otherSeq in sequenceNames)
-                        {
-                            var remaining = otherSeq[candidatePrefix.Length..];
-                            if (!directionalSuffixes.Contains(remaining))
-                            {
-                                allMatch = false;
-                                break;
-                            }
-                        }
-                        if (allMatch)
-                        {
-                            return candidatePrefix;
-                        }
-                    }
+                var candidatePrefix = seq[..^suffix.Length];
+                if (sequenceNames.All(s => s.StartsWith(candidatePrefix, StringComparison.Ordinal)
+                    && directionalSuffixes.Contains(s[candidatePrefix.Length..])))
+                {
+                    return candidatePrefix;
                 }
             }
         }
         return string.Empty;
     }
-    private static KVValue MakeNodeIdObjectValue(long nodeId)
+    private static KVObject MakeNodeIdObjectValue(long nodeId)
     {
-        var nodeIdObject = new KVObject("fakeIndentKey", 1);
-        nodeIdObject.AddProperty("m_id", unchecked((uint)nodeId));
-        return new KVValue(nodeIdObject);
+        var nodeIdObject = new KVObject();
+        nodeIdObject.Add("m_id", unchecked((uint)nodeId));
+        return nodeIdObject;
     }
 
-    private static KVValue MakeInputConnection(long nodeId)
+    private static KVObject MakeInputConnection(long nodeId)
     {
         var nodeIdObject = MakeNodeIdObjectValue(nodeId);
-        var inputConnection = new KVObject("fakeIndentKey", 2);
+        var inputConnection = new KVObject();
 
-        inputConnection.AddProperty("m_nodeID", nodeIdObject);
-        inputConnection.AddProperty("m_outputID", nodeIdObject);
+        inputConnection.Add("m_nodeID", nodeIdObject);
+        inputConnection.Add("m_outputID", nodeIdObject);
 
-        return new KVValue(inputConnection);
+        return inputConnection;
+    }
+
+    private static KVObject MakeNodeManagerEntry(long nodeId, KVObject nodeData)
+    {
+        var entry = new KVObject();
+        entry.Add("key", MakeNodeIdObjectValue(nodeId));
+        entry.Add("value", nodeData);
+        return entry;
     }
 
     private static void AddInputConnection(KVObject node, long childNodeId)
     {
         var inputConnection = MakeInputConnection(childNodeId);
-        node.AddProperty("m_inputConnection", inputConnection);
+        node.Add("m_inputConnection", inputConnection);
     }
 
-    private static KVValue MakeVector2(float x, float y)
+    private static KVObject MakeVector2(float x, float y)
     {
-        var values = new object[] { x, y };
-        return KVValue.MakeArray(values.Select(v => new KVValue(ValveKeyValue.KVValueType.FloatingPoint, v)).ToArray());
+        return MakeArray([(KVObject)x, (KVObject)y]);
     }
 
     private static KVObject MakeBlendCurve(KVObject? compiledCurve)
     {
         var blendCurve = MakeNode("CBlendCurve");
-        blendCurve.AddProperty("m_flControlPoint1",
-            compiledCurve?.ContainsKey("m_flControlPoint1") == true
-                ? compiledCurve.GetFloatProperty("m_flControlPoint1")
-                : 0.0f);
-        blendCurve.AddProperty("m_flControlPoint2",
-            compiledCurve?.ContainsKey("m_flControlPoint2") == true
-                ? compiledCurve.GetFloatProperty("m_flControlPoint2")
-                : 1.0f);
+        blendCurve.Add("m_flControlPoint1", compiledCurve?.GetFloatProperty("m_flControlPoint1", 0.0f) ?? 0.0f);
+        blendCurve.Add("m_flControlPoint2", compiledCurve?.GetFloatProperty("m_flControlPoint2", 1.0f) ?? 1.0f);
         return blendCurve;
     }
 
-    private KVValue ConvertTagSpansArray(KVObject[] compiledTagSpans)
+    private KVObject ConvertTagSpansArray(IReadOnlyList<KVObject> compiledTagSpans)
     {
         var tagSpans = new List<KVObject>();
         foreach (var compiledTagSpan in compiledTagSpans)
@@ -1275,43 +1286,112 @@ public class AnimationGraphExtract : IDisposable
             var duration = endCycle - startCycle;
 
             var tagSpan = MakeNode("CAnimTagSpan");
-            tagSpan.AddProperty("m_id", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
-            tagSpan.AddProperty("m_fStartCycle", startCycle);
-            tagSpan.AddProperty("m_fDuration", duration);
+            tagSpan.Add("m_id", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
+            tagSpan.Add("m_fStartCycle", startCycle);
+            tagSpan.Add("m_fDuration", duration);
             tagSpans.Add(tagSpan);
         }
-        return KVValue.MakeArray(tagSpans.ToArray());
+        return MakeArray(tagSpans);
     }
 
-    private KVValue ExtractParameterID(KVObject paramHandle, bool requireFloat = false)
+    private KVObject ExtractParameterID(KVObject paramHandle, bool requireFloat = false)
     {
         var paramType = paramHandle.GetStringProperty("m_type");
         var paramIndex = paramHandle.GetIntegerProperty("m_index");
         return ParameterIDFromIndex(paramType, paramIndex, requireFloat);
     }
 
+    private KVObject ConvertParamSpans(KVObject? compiledParamSpans)
+    {
+        if (compiledParamSpans?.ContainsKey("m_spans") != true)
+        {
+            return KVObject.Array();
+        }
+
+        var paramSpans = new List<KVObject>();
+        foreach (var compiledSpan in compiledParamSpans.GetArray("m_spans"))
+        {
+            var paramSpan = MakeNode("CAnimParamSpan");
+            CopyIfPresent(compiledSpan, paramSpan, "m_samples");
+            paramSpan.Add("m_id", compiledSpan.ContainsKey("m_hParam")
+                ? ExtractParameterID(compiledSpan.GetSubCollection("m_hParam"))
+                : MakeNodeIdObjectValue(-1));
+            CopyIfPresent(compiledSpan, paramSpan, "m_flStartCycle");
+            CopyIfPresent(compiledSpan, paramSpan, "m_flEndCycle");
+            paramSpans.Add(paramSpan);
+        }
+        return MakeArray(paramSpans);
+    }
+
     private long GetTagIdFromIndex(long tagIndex)
     {
-        return tagIndex >= 0 && tagIndex < Tags.Length
-            ? Tags[tagIndex].GetSubCollection("m_tagID").GetIntegerProperty("m_id")
+        return tagIndex >= 0 && tagIndex < Tags.Count
+            ? Tags[(int)tagIndex].GetSubCollection("m_tagID").GetIntegerProperty("m_id")
             : -1L;
     }
 
-    private KVValue ConvertTagIndicesArray(long[] tagIndices)
+    private KVObject ConvertTagIndicesArray(long[] tagIndices)
     {
         var tagIds = tagIndices.Select(tagIndex =>
-            MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)).Value as KVObject ?? new KVObject("tag", 0)
+            MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex))
         ).ToArray();
-        return KVValue.MakeArray(tagIds);
+        return MakeArray(tagIds);
     }
 
     private static KVObject MakeDefaultDamping()
     {
         var damping = MakeNode("CAnimInputDamping");
-        damping.AddProperty("m_speedFunction", "NoDamping");
-        damping.AddProperty("m_fSpeedScale", 1.0f);
+        damping.Add("m_speedFunction", "NoDamping");
+        damping.Add("m_fSpeedScale", 1.0f);
         return damping;
     }
+
+    private static void CopyIfPresent(KVObject source, KVObject target, string key, string? destKey = null)
+    {
+        if (source.ContainsKey(key))
+        {
+            target.Add(destKey ?? key, source[key]);
+        }
+    }
+
+    private static void CopyBoolIfPresent(KVObject source, KVObject target, string key, string? destKey = null)
+    {
+        if (source.ContainsKey(key))
+        {
+            target.Add(destKey ?? key, source.GetIntegerProperty(key) > 0);
+        }
+    }
+
+    private static void AddIfNotEmpty(KVObject target, string key, string value)
+    {
+        if (!string.IsNullOrEmpty(value))
+        {
+            target.Add(key, value);
+        }
+    }
+
+    private string? TryGetScriptCode(long scriptIndex, string expectedScriptType)
+    {
+        if (scriptIndex < 0 || scriptManager is null)
+        {
+            return null;
+        }
+        var scriptInfoArray = scriptManager.GetArray("m_scriptInfo");
+        if (scriptIndex >= scriptInfoArray.Count)
+        {
+            return null;
+        }
+        var scriptInfo = scriptInfoArray[(int)scriptIndex];
+        if (scriptInfo.GetStringProperty("m_eScriptType") != expectedScriptType)
+        {
+            return null;
+        }
+        var scriptCode = scriptInfo.GetStringProperty("m_code");
+        return string.IsNullOrEmpty(scriptCode) ? null : scriptCode;
+    }
+
+    private string? TryGetFuseGeneralScriptCode(long scriptIndex)
+        => TryGetScriptCode(scriptIndex, "ANIMSCRIPT_FUSE_GENERAL");
 
     private bool TryAddInputConnectionFromRef(KVObject node, KVObject childRef, string? propertyName = null)
     {
@@ -1320,7 +1400,7 @@ public class AnimationGraphExtract : IDisposable
         {
             if (propertyName != null)
             {
-                node.AddProperty(propertyName, MakeInputConnection(childNodeId));
+                node.Add(propertyName, MakeInputConnection(childNodeId));
             }
             else
             {
@@ -1331,25 +1411,28 @@ public class AnimationGraphExtract : IDisposable
         return false;
     }
 
+    private void AddFloatOrVectorParamPair(KVObject target, KVObject paramInHandle, KVObject paramOutHandle)
+    {
+        var isVector = paramInHandle.GetStringProperty("m_type") == "ANIMPARAM_VECTOR"
+            || paramOutHandle.GetStringProperty("m_type") == "ANIMPARAM_VECTOR";
+        target.Add("m_valueType", isVector ? "VectorParameter" : "FloatParameter");
+
+        var noneId = MakeNodeIdObjectValue(-1);
+        target.Add("m_floatParamIn", isVector ? noneId : ExtractParameterID(paramInHandle));
+        target.Add("m_floatParamOut", isVector ? noneId : ExtractParameterID(paramOutHandle));
+        target.Add("m_vectorParamIn", isVector ? ExtractParameterID(paramInHandle) : noneId);
+        target.Add("m_vectorParamOut", isVector ? ExtractParameterID(paramOutHandle) : noneId);
+    }
+
     private KVObject ConvertBlendDuration(KVObject compiledBlendDuration)
     {
-        var constValue = compiledBlendDuration.GetFloatProperty("m_constValue");
-        var paramRef = compiledBlendDuration.GetSubCollection("m_hParam");
-        var paramType = paramRef.GetStringProperty("m_type");
-        var paramIndex = paramRef.GetIntegerProperty("m_index");
+        var paramIdValue = ExtractParameterID(compiledBlendDuration.GetSubCollection("m_hParam"), requireFloat: true);
+        var isConstant = paramIdValue.GetIntegerProperty("m_id") == uint.MaxValue;
 
         var blendDuration = MakeNode("CFloatAnimValue");
-        blendDuration.AddProperty("m_flConstValue", constValue);
-
-        var paramIdValue = ParameterIDFromIndex(paramType, paramIndex, requireFloat: true);
-        blendDuration.AddProperty("m_paramID", paramIdValue);
-
-        var paramIdObject = (KVObject)paramIdValue.Value!;
-        var paramId = paramIdObject.GetIntegerProperty("m_id");
-        var source = paramId == uint.MaxValue ? "Constant" : "Parameter";
-
-        blendDuration.AddProperty("m_eSource", source);
-
+        blendDuration.Add("m_flConstValue", compiledBlendDuration.GetFloatProperty("m_constValue"));
+        blendDuration.Add("m_paramID", paramIdValue);
+        blendDuration.Add("m_eSource", isConstant ? "Constant" : "Parameter");
         return blendDuration;
     }
 
@@ -1369,14 +1452,14 @@ public class AnimationGraphExtract : IDisposable
             ? name
             : $"sequence_{sequenceIndex}";
     }
-    private KVObject[] ConvertStateMachine(KVObject compiledStateMachine, KVObject[]? stateDataArray, KVObject[]? transitionDataArray, bool isComponent = false)
+    private KVObject[] ConvertStateMachine(KVObject compiledStateMachine, IReadOnlyList<KVObject>? stateDataArray, IReadOnlyList<KVObject>? transitionDataArray, bool isComponent = false)
     {
         var compiledStates = compiledStateMachine.GetArray("m_states");
         var compiledTransitions = compiledStateMachine.GetArray("m_transitions");
-        var states = new KVObject[compiledStates.Length];
+        var states = new KVObject[compiledStates.Count];
 
         var startStateIndex = -1;
-        for (var i = 0; i < compiledStates.Length; i++)
+        for (var i = 0; i < compiledStates.Count; i++)
         {
             if (compiledStates[i].GetIntegerProperty("m_bIsStartState") > 0)
             {
@@ -1385,10 +1468,10 @@ public class AnimationGraphExtract : IDisposable
             }
         }
 
-        for (var i = 0; i < compiledStates.Length; i++)
+        for (var i = 0; i < compiledStates.Count; i++)
         {
             var compiledState = compiledStates[i];
-            var stateData = stateDataArray != null && i < stateDataArray.Length ? stateDataArray[i] : null;
+            var stateData = stateDataArray != null && i < stateDataArray.Count ? stateDataArray[i] : null;
 
             var stateNodeType = isComponent ? "CAnimComponentState" : "CAnimNodeState";
             var stateNode = MakeNode(stateNodeType);
@@ -1403,17 +1486,17 @@ public class AnimationGraphExtract : IDisposable
             }
             else
             {
-                var positionFromStart = i > startStateIndex ? i - startStateIndex : i + (compiledStates.Length - startStateIndex);
+                var positionFromStart = i > startStateIndex ? i - startStateIndex : i + (compiledStates.Count - startStateIndex);
                 stateX = 150.0f * positionFromStart + random.Next(-30, 31);
                 stateY = 40.0f + random.Next(-10, 11);
             }
 
-            stateNode.AddProperty("m_position", MakeVector2(stateX, stateY));
-            stateNode.AddProperty("m_name", compiledState.GetStringProperty("m_name"));
-            stateNode.AddProperty("m_stateID", compiledState.GetSubCollection("m_stateID"));
-            stateNode.AddProperty("m_bIsStartState", compiledState.GetIntegerProperty("m_bIsStartState") > 0);
-            stateNode.AddProperty("m_bIsEndtState", compiledState.GetIntegerProperty("m_bIsEndState") > 0);
-            stateNode.AddProperty("m_bIsPassthrough", compiledState.GetIntegerProperty("m_bIsPassthrough") > 0);
+            stateNode.Add("m_position", MakeVector2(stateX, stateY));
+            stateNode.Add("m_name", compiledState.GetStringProperty("m_name"));
+            stateNode.Add("m_stateID", compiledState.GetSubCollection("m_stateID"));
+            stateNode.Add("m_bIsStartState", compiledState.GetIntegerProperty("m_bIsStartState") > 0);
+            stateNode.Add("m_bIsEndtState", compiledState.GetIntegerProperty("m_bIsEndState") > 0);
+            stateNode.Add("m_bIsPassthrough", compiledState.GetIntegerProperty("m_bIsPassthrough") > 0);
 
             if (compiledState.ContainsKey("m_transitionIndices"))
             {
@@ -1423,47 +1506,42 @@ public class AnimationGraphExtract : IDisposable
                 for (var transitionIndex = 0; transitionIndex < transitionIndices.Length; transitionIndex++)
                 {
                     var globalTransitionIndex = transitionIndices[transitionIndex];
-                    if (globalTransitionIndex < 0 || globalTransitionIndex >= compiledTransitions.Length)
+                    if (globalTransitionIndex < 0 || globalTransitionIndex >= compiledTransitions.Count)
                     {
                         continue;
                     }
 
-                    var compiledTransition = compiledTransitions[globalTransitionIndex];
-                    var transitionData = transitionDataArray != null && globalTransitionIndex < transitionDataArray.Length
-                        ? transitionDataArray[globalTransitionIndex]
+                    var compiledTransition = compiledTransitions[(int)globalTransitionIndex];
+                    var transitionData = transitionDataArray != null && globalTransitionIndex < transitionDataArray.Count
+                        ? transitionDataArray[(int)globalTransitionIndex]
                         : null;
 
                     var transitionNodeType = isComponent ? "CAnimComponentStateTransition" : "CAnimNodeStateTransition";
                     var transitionNode = MakeNode(transitionNodeType);
                     var srcStateIndex = compiledTransition.GetIntegerProperty("m_srcStateIndex");
                     var destStateIndex = compiledTransition.GetIntegerProperty("m_destStateIndex");
-                    var srcStateID = compiledStates[srcStateIndex].GetSubCollection("m_stateID");
-                    var destStateID = compiledStates[destStateIndex].GetSubCollection("m_stateID");
+                    var srcStateID = compiledStates[(int)srcStateIndex].GetSubCollection("m_stateID");
+                    var destStateID = compiledStates[(int)destStateIndex].GetSubCollection("m_stateID");
 
-                    transitionNode.AddProperty("m_srcState", srcStateID);
-                    transitionNode.AddProperty("m_destState", destStateID);
-                    transitionNode.AddProperty("m_bDisabled", compiledTransition.GetIntegerProperty("m_bDisabled") > 0);
+                    transitionNode.Add("m_srcState", srcStateID);
+                    transitionNode.Add("m_destState", destStateID);
+                    transitionNode.Add("m_bDisabled", compiledTransition.GetIntegerProperty("m_bDisabled") > 0);
 
                     var conditionList = MakeNode("CConditionContainer");
                     var conditions = new List<KVObject>();
 
                     if (compiledState.ContainsKey("m_hScript"))
                     {
-                        var scriptHandle = compiledState.GetSubCollection("m_hScript");
-                        var scriptIndex = scriptHandle.GetIntegerProperty("m_id");
-
-                        if (scriptIndex >= 0 && scriptManager != null)
+                        var scriptIndex = compiledState.GetSubCollection("m_hScript").GetIntegerProperty("m_id");
+                        var scriptConditions = CreateConditionsFromScript(scriptIndex, transitionIndex);
+                        if (scriptConditions != null)
                         {
-                            var scriptConditions = CreateConditionsFromScript(scriptIndex, transitionIndex);
-                            if (scriptConditions != null)
-                            {
-                                conditions.AddRange(scriptConditions);
-                            }
+                            conditions.AddRange(scriptConditions);
                         }
                     }
 
-                    conditionList.AddProperty("m_conditions", KVValue.MakeArray(conditions.ToArray()));
-                    transitionNode.AddProperty("m_conditionList", conditionList);
+                    conditionList.Add("m_conditions", MakeArray(conditions));
+                    transitionNode.Add("m_conditionList", conditionList);
 
                     if (!isComponent)
                     {
@@ -1475,61 +1553,41 @@ public class AnimationGraphExtract : IDisposable
 
                         if (transitionData is not null)
                         {
-                            transitionNode.AddProperty("m_bReset", transitionData.GetIntegerProperty("m_bReset") > 0);
+                            transitionNode.Add("m_bReset", transitionData.GetIntegerProperty("m_bReset") > 0);
 
                             if (transitionData.ContainsKey("m_resetCycleOption"))
                             {
-                                var resetOption = transitionData.GetIntegerProperty("m_resetCycleOption");
-                                var resetOptionStr = resetOption switch
+                                transitionNode.Add("m_resetCycleOption", transitionData.GetIntegerProperty("m_resetCycleOption") switch
                                 {
-                                    0 => "Beginning",
                                     1 => "SameCycleAsSource",
                                     2 => "InverseSourceCycle",
                                     3 => "FixedValue",
                                     4 => "SameTimeAsSource",
                                     _ => "Beginning",
-                                };
-
-                                transitionNode.AddProperty("m_resetCycleOption", resetOptionStr);
+                                });
                             }
 
                             if (transitionData.ContainsKey("m_blendDuration"))
                             {
-                                var blendDuration = transitionData.GetSubCollection("m_blendDuration");
-
-                                if (blendDuration is not null)
-                                {
-                                    var convertedBlendDuration = ConvertBlendDuration(blendDuration);
-                                    transitionNode.AddProperty("m_blendDuration", convertedBlendDuration);
-                                }
+                                transitionNode.Add("m_blendDuration",
+                                    ConvertBlendDuration(transitionData.GetSubCollection("m_blendDuration")));
                             }
 
                             if (transitionData.ContainsKey("m_resetCycleValue"))
                             {
-                                var resetcycleValue = transitionData.GetSubCollection("m_resetCycleValue");
-
-                                if (resetcycleValue is not null)
-                                {
-                                    var convertedfixedcycleValue = ConvertBlendDuration(resetcycleValue);
-                                    transitionNode.AddProperty("m_flFixedCycleValue", convertedfixedcycleValue);
-                                }
+                                transitionNode.Add("m_flFixedCycleValue",
+                                    ConvertBlendDuration(transitionData.GetSubCollection("m_resetCycleValue")));
                             }
 
-                            if (transitionData.ContainsKey("m_curve"))
-                            {
-                                transitionNode.AddProperty("m_blendCurve", MakeBlendCurve(transitionData.GetSubCollection("m_curve")));
-                            }
-                            else
-                            {
-                                transitionNode.AddProperty("m_blendCurve", MakeBlendCurve(null));
-                            }
+                            transitionNode.Add("m_blendCurve",
+                                MakeBlendCurve(transitionData.ContainsKey("m_curve") ? transitionData.GetSubCollection("m_curve") : null));
                         }
                     }
 
                     transitions.Add(transitionNode);
                 }
 
-                stateNode.AddProperty("m_transitions", KVValue.MakeArray(transitions.ToArray()));
+                stateNode.Add("m_transitions", MakeArray(transitions));
             }
 
             if (compiledState.ContainsKey("m_actions"))
@@ -1550,70 +1608,53 @@ public class AnimationGraphExtract : IDisposable
 
                         if (compiledActionData.ContainsKey("m_hScript"))
                         {
-                            var scriptHandle = compiledActionData.GetSubCollection("m_hScript");
-                            var scriptIndex = scriptHandle.GetIntegerProperty("m_id");
-
-                            if (scriptIndex >= 0 && scriptManager != null)
+                            var scriptCode = TryGetFuseGeneralScriptCode(compiledActionData.GetSubCollection("m_hScript").GetIntegerProperty("m_id"));
+                            if (scriptCode != null)
                             {
-                                var scriptInfoArray = scriptManager.GetArray("m_scriptInfo");
-                                if (scriptIndex < scriptInfoArray.Length)
-                                {
-                                    var scriptInfo = scriptInfoArray[scriptIndex];
-                                    var scriptType = scriptInfo.GetStringProperty("m_eScriptType");
-                                    var scriptCode = scriptInfo.GetStringProperty("m_code");
-
-                                    if (scriptType == "ANIMSCRIPT_FUSE_GENERAL" && !string.IsNullOrEmpty(scriptCode))
-                                    {
-                                        actionData.AddProperty("m_expression", scriptCode);
-                                    }
-                                }
+                                actionData.Add("m_expression", scriptCode);
                             }
                         }
 
                         if (compiledActionData.ContainsKey("m_nTagIndex"))
                         {
-                            var tagIndex = compiledActionData.GetIntegerProperty("m_nTagIndex");
-                            actionData.AddProperty("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
+                            actionData.Add("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(compiledActionData.GetIntegerProperty("m_nTagIndex"))));
                         }
 
                         if (compiledActionData.ContainsKey("m_hParam"))
                         {
-                            actionData.AddProperty("m_param", ExtractParameterID(compiledActionData.GetSubCollection("m_hParam")));
+                            actionData.Add("m_param", ExtractParameterID(compiledActionData.GetSubCollection("m_hParam")));
                         }
 
-                        if (compiledActionData.ContainsKey("m_value"))
-                        {
-                            actionData.AddProperty("m_value", compiledActionData.GetSubCollection("m_value"));
-                        }
+                        CopyIfPresent(compiledActionData, actionData, "m_value");
 
-                        foreach (var (key, value) in compiledActionData.Properties)
+                        foreach (var (childKey, childValue) in compiledActionData.Children)
                         {
-                            if (key is "_class" or "m_nTagIndex" or "m_hParam" or "m_value" or "m_hScript" or "m_eScriptType" or "m_code")
+                            if (childKey is "_class" or "m_nTagIndex" or "m_hParam" or "m_value" or "m_hScript" or "m_eScriptType" or "m_code")
                             {
                                 continue;
                             }
 
-                            actionData.AddProperty(key, value);
+                            actionData.Add(childKey, childValue);
                         }
 
-                        action.AddProperty("m_pAction", actionData);
+                        action.Add("m_pAction", actionData);
                     }
 
                     if (compiledAction.ContainsKey("m_eBehavior"))
                     {
-                        action.AddProperty("m_eBehavior", compiledAction.GetProperty<string>("m_eBehavior"));
+                        action.Add("m_eBehavior", compiledAction.GetStringProperty("m_eBehavior"));
                     }
 
                     actions.Add(action);
                 }
 
-                stateNode.AddProperty("m_actions", KVValue.MakeArray(actions.ToArray()));
+                stateNode.Add("m_actions", MakeArray(actions));
             }
 
             if (!isComponent && stateData is not null)
             {
                 TryAddInputConnectionFromRef(stateNode, stateData.GetSubCollection("m_pChild"));
-                stateNode.AddProperty("m_bIsRootMotionExclusive", stateData.GetIntegerProperty("m_bExclusiveRootMotion") > 0);
+                stateNode.Add("m_bIsRootMotionExclusive", stateData.GetIntegerProperty("m_bExclusiveRootMotion") > 0);
             }
 
             states[i] = stateNode;
@@ -1625,34 +1666,14 @@ public class AnimationGraphExtract : IDisposable
 
     private KVObject[]? CreateConditionsFromScript(long scriptIndex, int transitionIndex)
     {
-        if (scriptManager == null || !scriptManager.ContainsKey("m_scriptInfo"))
-        {
-            return null;
-        }
-
-        var scriptInfoArray = scriptManager.GetArray("m_scriptInfo");
-        if (scriptIndex < 0 || scriptIndex >= scriptInfoArray.Length)
-        {
-            return null;
-        }
-
-        var scriptInfo = scriptInfoArray[scriptIndex];
-        var scriptCode = scriptInfo.GetStringProperty("m_code");
-        var scriptType = scriptInfo.GetStringProperty("m_eScriptType");
-
-        if (scriptType != "ANIMSCRIPT_FUSE_STATEMACHINE" || string.IsNullOrEmpty(scriptCode))
+        var scriptCode = TryGetScriptCode(scriptIndex, "ANIMSCRIPT_FUSE_STATEMACHINE");
+        if (scriptCode is null)
         {
             return null;
         }
 
         var conditions = ParseConditionScript(scriptCode, transitionIndex);
-
-        if (conditions == null || conditions.Count == 0)
-        {
-            return null;
-        }
-
-        return [.. conditions];
+        return conditions is { Count: > 0 } ? [.. conditions] : null;
     }
 
     private List<KVObject>? ParseConditionScript(string scriptCode, int targetTransitionIndex)
@@ -1818,21 +1839,21 @@ public class AnimationGraphExtract : IDisposable
         }
 
         var paramCondition = MakeNode("CParameterCondition");
-        paramCondition.AddProperty("m_paramID", MakeNodeIdObjectValue(paramId));
-        paramCondition.AddProperty("m_comparisonOp", comparisonOp);
-        paramCondition.AddProperty("m_comparisonString", "");
+        paramCondition.Add("m_paramID", MakeNodeIdObjectValue(paramId));
+        paramCondition.Add("m_comparisonOp", comparisonOp);
+        paramCondition.Add("m_comparisonString", "");
 
-        var comparisonValue = new KVObject(null, 2);
-        comparisonValue.AddProperty("m_nType", componentType);
+        var comparisonValue = new KVObject();
+        comparisonValue.Add("m_nType", componentType);
 
-        var componentArray = new KVObject(null, isArray: true, componentValues.Length);
+        var componentArray = KVObject.Array();
         for (var i = 0; i < componentValues.Length; i++)
         {
-            componentArray.AddItem(new KVValue(ValveKeyValue.KVValueType.FloatingPoint, componentValues[i]));
+            componentArray.Add((float)componentValues[i]);
         }
 
-        comparisonValue.AddProperty("m_data", componentArray);
-        paramCondition.AddProperty("m_comparisonValue", comparisonValue);
+        comparisonValue.Add("m_data", componentArray);
+        paramCondition.Add("m_comparisonValue", comparisonValue);
 
         return paramCondition;
     }
@@ -1975,7 +1996,7 @@ public class AnimationGraphExtract : IDisposable
             return null;
         }
 
-        orCondition.AddProperty("m_conditions", KVValue.MakeArray(subConditions.ToArray()));
+        orCondition.Add("m_conditions", MakeArray(subConditions));
         return orCondition;
     }
 
@@ -2029,7 +2050,7 @@ public class AnimationGraphExtract : IDisposable
             return null;
         }
 
-        stateStatusCondition.AddProperty("m_comparisonOp", OperatorToComparisonOp(comparisonOperator));
+        stateStatusCondition.Add("m_comparisonOp", OperatorToComparisonOp(comparisonOperator));
 
         var sourceValue = leftSide switch
         {
@@ -2040,7 +2061,7 @@ public class AnimationGraphExtract : IDisposable
             _ => "SourceStateBlendWeight"
         };
 
-        stateStatusCondition.AddProperty("m_sourceValue", sourceValue);
+        stateStatusCondition.Add("m_sourceValue", sourceValue);
 
         if (rightSide != null)
         {
@@ -2055,10 +2076,10 @@ public class AnimationGraphExtract : IDisposable
                     _ => "SourceStateBlendWeight"
                 };
 
-                stateStatusCondition.AddProperty("m_comparisonValueType", "StateComparisonValue_StateValue");
-                stateStatusCondition.AddProperty("m_comparisonStateValue", comparisonStateValue);
-                stateStatusCondition.AddProperty("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
-                stateStatusCondition.AddProperty("m_comparisonFixedValue", 0.0f);
+                stateStatusCondition.Add("m_comparisonValueType", "StateComparisonValue_StateValue");
+                stateStatusCondition.Add("m_comparisonStateValue", comparisonStateValue);
+                stateStatusCondition.Add("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
+                stateStatusCondition.Add("m_comparisonFixedValue", 0.0f);
             }
             else if (rightSide.All(c => char.IsLetterOrDigit(c) || c == '_') && !rightSide.Contains('.', StringComparison.Ordinal))
             {
@@ -2066,10 +2087,10 @@ public class AnimationGraphExtract : IDisposable
             }
             else if (float.TryParse(rightSide, CultureInfo.InvariantCulture, out var floatValue))
             {
-                stateStatusCondition.AddProperty("m_comparisonValueType", "StateComparisonValue_FixedValue");
-                stateStatusCondition.AddProperty("m_comparisonFixedValue", floatValue);
-                stateStatusCondition.AddProperty("m_comparisonStateValue", sourceValue);
-                stateStatusCondition.AddProperty("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
+                stateStatusCondition.Add("m_comparisonValueType", "StateComparisonValue_FixedValue");
+                stateStatusCondition.Add("m_comparisonFixedValue", floatValue);
+                stateStatusCondition.Add("m_comparisonStateValue", sourceValue);
+                stateStatusCondition.Add("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
             }
             else
             {
@@ -2101,8 +2122,8 @@ public class AnimationGraphExtract : IDisposable
 
         var tagCondition = MakeNode("CTagCondition");
         var tagId = FindTagIdByName(tagName);
-        tagCondition.AddProperty("m_tagID", MakeNodeIdObjectValue(tagId));
-        tagCondition.AddProperty("m_comparisonValue", isTagActive);
+        tagCondition.Add("m_tagID", MakeNodeIdObjectValue(tagId));
+        tagCondition.Add("m_comparisonValue", isTagActive);
         return tagCondition;
     }
 
@@ -2144,16 +2165,16 @@ public class AnimationGraphExtract : IDisposable
 
         if (op != null && rightSide != null && float.TryParse(rightSide, CultureInfo.InvariantCulture, out var value))
         {
-            timeCondition.AddProperty("m_option",
+            timeCondition.Add("m_option",
                 op == "<=" && value != 0.0f || op == "==" && value != 0.0f
                     ? "FinishedConditionOption_OnAlmostFinished"
                     : "FinishedConditionOption_OnFinished");
-            timeCondition.AddProperty("m_bIsFinished", op != ">=" || value <= 0.0f);
+            timeCondition.Add("m_bIsFinished", op != ">=" || value <= 0.0f);
         }
         else
         {
-            timeCondition.AddProperty("m_option", "FinishedConditionOption_OnFinished");
-            timeCondition.AddProperty("m_bIsFinished", true);
+            timeCondition.Add("m_option", "FinishedConditionOption_OnFinished");
+            timeCondition.Add("m_bIsFinished", true);
         }
         return timeCondition;
     }
@@ -2165,8 +2186,8 @@ public class AnimationGraphExtract : IDisposable
         if (foundOp != null && rightSide != null)
         {
             var timeCondition = MakeNode("CTimeCondition");
-            timeCondition.AddProperty("m_comparisonOp", OperatorToComparisonOp(foundOp));
-            timeCondition.AddProperty("m_comparisonString", rightSide);
+            timeCondition.Add("m_comparisonOp", OperatorToComparisonOp(foundOp));
+            timeCondition.Add("m_comparisonString", rightSide);
             return timeCondition;
         }
         return null;
@@ -2179,20 +2200,20 @@ public class AnimationGraphExtract : IDisposable
         if (foundOp != null && rightSide != null)
         {
             var cycleCondition = MakeNode("CCycleCondition");
-            cycleCondition.AddProperty("m_comparisonOp", OperatorToComparisonOp(foundOp));
-            cycleCondition.AddProperty("m_comparisonString", rightSide);
+            cycleCondition.Add("m_comparisonOp", OperatorToComparisonOp(foundOp));
+            cycleCondition.Add("m_comparisonString", rightSide);
 
             if (float.TryParse(rightSide, CultureInfo.InvariantCulture, out var floatValue))
             {
-                cycleCondition.AddProperty("m_comparisonValue", floatValue);
+                cycleCondition.Add("m_comparisonValue", floatValue);
             }
             else
             {
-                cycleCondition.AddProperty("m_comparisonValue", 0.0f);
+                cycleCondition.Add("m_comparisonValue", 0.0f);
             }
 
-            cycleCondition.AddProperty("m_comparisonValueType", "COMPARISONVALUETYPE_FIXEDVALUE");
-            cycleCondition.AddProperty("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
+            cycleCondition.Add("m_comparisonValueType", "COMPARISONVALUETYPE_FIXEDVALUE");
+            cycleCondition.Add("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
             return cycleCondition;
         }
         return null;
@@ -2223,66 +2244,66 @@ public class AnimationGraphExtract : IDisposable
         }
 
         var paramCondition = MakeNode("CParameterCondition");
-        paramCondition.AddProperty("m_paramID", MakeNodeIdObjectValue(paramId));
-        paramCondition.AddProperty("m_comparisonOp", OperatorToComparisonOp(foundOp));
+        paramCondition.Add("m_paramID", MakeNodeIdObjectValue(paramId));
+        paramCondition.Add("m_comparisonOp", OperatorToComparisonOp(foundOp));
 
-        var comparisonValue = new KVObject(null, 2);
+        var comparisonValue = new KVObject();
 
         if (paramClass == "CEnumAnimParameter")
         {
-            comparisonValue.AddProperty("m_nType", 2);
+            comparisonValue.Add("m_nType", 2);
 
             if (int.TryParse(rightSide, out var intValue))
             {
-                comparisonValue.AddProperty("m_data", intValue);
+                comparisonValue.Add("m_data", intValue);
 
                 if (foundParam.ContainsKey("m_enumOptions"))
                 {
                     var enumOptions = foundParam.GetArray<string>("m_enumOptions");
                     if (intValue >= 0 && intValue < enumOptions.Length)
                     {
-                        paramCondition.AddProperty("m_comparisonString", enumOptions[intValue]);
+                        paramCondition.Add("m_comparisonString", enumOptions[intValue]);
                     }
                 }
             }
         }
         else if (paramClass == "CFloatAnimParameter")
         {
-            comparisonValue.AddProperty("m_nType", 4);
+            comparisonValue.Add("m_nType", 4);
 
             if (float.TryParse(rightSide, CultureInfo.InvariantCulture, out var floatValue))
             {
-                comparisonValue.AddProperty("m_data", floatValue);
+                comparisonValue.Add("m_data", floatValue);
             }
         }
         else if (paramClass == "CIntAnimParameter")
         {
-            comparisonValue.AddProperty("m_nType", 3);
+            comparisonValue.Add("m_nType", 3);
 
             if (int.TryParse(rightSide, out var intValue))
             {
-                comparisonValue.AddProperty("m_data", intValue);
+                comparisonValue.Add("m_data", intValue);
             }
         }
         else if (paramClass == "CBoolAnimParameter")
         {
-            comparisonValue.AddProperty("m_nType", 1);
+            comparisonValue.Add("m_nType", 1);
 
             var boolValue = rightSide == "1" || rightSide.Equals("true", StringComparison.OrdinalIgnoreCase);
-            comparisonValue.AddProperty("m_data", boolValue);
-            paramCondition.AddProperty("m_comparisonString", boolValue ? "True" : "False");
+            comparisonValue.Add("m_data", boolValue);
+            paramCondition.Add("m_comparisonString", boolValue ? "True" : "False");
         }
         else
         {
-            comparisonValue.AddProperty("m_nType", 4);
+            comparisonValue.Add("m_nType", 4);
 
             if (float.TryParse(rightSide, CultureInfo.InvariantCulture, out var floatValue))
             {
-                comparisonValue.AddProperty("m_data", floatValue);
+                comparisonValue.Add("m_data", floatValue);
             }
         }
 
-        paramCondition.AddProperty("m_comparisonValue", comparisonValue);
+        paramCondition.Add("m_comparisonValue", comparisonValue);
         return paramCondition;
     }
 
@@ -2294,19 +2315,19 @@ public class AnimationGraphExtract : IDisposable
 
         if (foundParam != null)
         {
-            stateStatusCondition.AddProperty("m_comparisonValueType", "StateComparisonValue_Parameter");
-            stateStatusCondition.AddProperty("m_comparisonParamID", MakeNodeIdObjectValue(paramId));
-            stateStatusCondition.AddProperty("m_comparisonStateValue", sourceValue);
-            stateStatusCondition.AddProperty("m_comparisonFixedValue", 0.0f);
+            stateStatusCondition.Add("m_comparisonValueType", "StateComparisonValue_Parameter");
+            stateStatusCondition.Add("m_comparisonParamID", MakeNodeIdObjectValue(paramId));
+            stateStatusCondition.Add("m_comparisonStateValue", sourceValue);
+            stateStatusCondition.Add("m_comparisonFixedValue", 0.0f);
         }
         else
         {
             if (float.TryParse(paramName, CultureInfo.InvariantCulture, out var floatValue))
             {
-                stateStatusCondition.AddProperty("m_comparisonValueType", "StateComparisonValue_FixedValue");
-                stateStatusCondition.AddProperty("m_comparisonFixedValue", floatValue);
-                stateStatusCondition.AddProperty("m_comparisonStateValue", sourceValue);
-                stateStatusCondition.AddProperty("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
+                stateStatusCondition.Add("m_comparisonValueType", "StateComparisonValue_FixedValue");
+                stateStatusCondition.Add("m_comparisonFixedValue", floatValue);
+                stateStatusCondition.Add("m_comparisonStateValue", sourceValue);
+                stateStatusCondition.Add("m_comparisonParamID", MakeNodeIdObjectValue(uint.MaxValue));
             }
         }
 
@@ -2315,91 +2336,68 @@ public class AnimationGraphExtract : IDisposable
 
     private (KVObject? param, long paramId, string? paramClass) FindParameterByName(string paramName)
     {
-        // Try exact match, then with underscores replaced by spaces
-        var namesToTry = new[] { paramName, paramName.Replace('_', ' ') };
+        string[] namesToTry = [paramName, paramName.Replace('_', ' ')];
 
-        // Try case-sensitive first, then case-insensitive
         foreach (var comparison in new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase })
         {
             foreach (var nameToTry in namesToTry)
             {
-                for (var i = 0; i < Parameters.Length; i++)
+                foreach (var param in Parameters)
                 {
-                    var param = Parameters[i];
-                    var currentParamName = param.GetStringProperty("m_name");
-
-                    if (string.Equals(currentParamName, nameToTry, comparison))
+                    if (string.Equals(param.GetStringProperty("m_name"), nameToTry, comparison))
                     {
-                        var paramId = param.GetSubCollection("m_id").GetIntegerProperty("m_id");
-                        var currentParamClass = param.GetStringProperty("_class");
-                        return (param, paramId, currentParamClass);
+                        return (param, GetParameterId(param), param.GetStringProperty("_class"));
                     }
                 }
             }
         }
 
-        // Try stripping component suffix (e.g., "param.x" -> "param")
-        if (paramName.Contains('.', StringComparison.Ordinal))
-        {
-            return FindParameterByName(paramName[..paramName.IndexOf('.', StringComparison.Ordinal)]);
-        }
-
-        return (null, -1, null);
+        // Recurse after stripping a component suffix like "param.x" -> "param"
+        var dotIndex = paramName.IndexOf('.', StringComparison.Ordinal);
+        return dotIndex != -1 ? FindParameterByName(paramName[..dotIndex]) : (null, -1, null);
     }
 
     private long FindTagIdByName(string tagName)
     {
-        // Strip "TAG_" prefix if present
+        static long TagIdOf(KVObject tag) => tag.GetSubCollection("m_tagID").GetIntegerProperty("m_id");
+
         var strippedName = tagName.StartsWith("TAG_", StringComparison.Ordinal)
             ? tagName["TAG_".Length..]
             : tagName;
 
-        // Generate name variations to try
         var namesToTry = new[]
         {
-            tagName,                                    // Original
-            strippedName,                               // Without TAG_ prefix
-            tagName.Replace('_', ' '),                  // Underscores to spaces
-            strippedName.Replace('_', ' '),             // Prefix stripped + spaces
-            tagName.Replace(' ', '_'),                  // Spaces to underscores
-        }.Distinct().ToList();
+            tagName,
+            strippedName,
+            tagName.Replace('_', ' '),
+            strippedName.Replace('_', ' '),
+            tagName.Replace(' ', '_'),
+        }.Distinct().ToArray();
 
-        // Try exact matches first (case-sensitive)
-        foreach (var nameVariant in namesToTry)
+        foreach (var comparison in new[] { StringComparison.Ordinal, StringComparison.OrdinalIgnoreCase })
         {
-            for (var i = 0; i < Tags.Length; i++)
+            foreach (var nameVariant in namesToTry)
             {
-                var currentTagName = Tags[i].GetStringProperty("m_name");
-                if (currentTagName == nameVariant)
+                foreach (var tag in Tags)
                 {
-                    return Tags[i].GetSubCollection("m_tagID").GetIntegerProperty("m_id");
+                    if (string.Equals(tag.GetStringProperty("m_name"), nameVariant, comparison))
+                    {
+                        return TagIdOf(tag);
+                    }
                 }
             }
         }
 
-        // Try case-insensitive matches
-        foreach (var nameVariant in namesToTry)
-        {
-            for (var i = 0; i < Tags.Length; i++)
-            {
-                var currentTagName = Tags[i].GetStringProperty("m_name");
-                if (string.Equals(currentTagName, nameVariant, StringComparison.OrdinalIgnoreCase))
-                {
-                    return Tags[i].GetSubCollection("m_tagID").GetIntegerProperty("m_id");
-                }
-            }
-        }
-
-        // Try fuzzy alphanumeric-only match as last resort
+        // Fuzzy alphanumeric-only match as last resort
         var cleanInput = new string([.. strippedName.Where(char.IsLetterOrDigit)]).ToLowerInvariant();
-        for (var i = 0; i < Tags.Length; i++)
+        foreach (var tag in Tags)
         {
-            var currentTagName = Tags[i].GetStringProperty("m_name");
-            var cleanCurrent = new string([.. currentTagName.Where(char.IsLetterOrDigit)]).ToLowerInvariant();
-
-            if (cleanCurrent == cleanInput || cleanCurrent.Contains(cleanInput, StringComparison.Ordinal) || cleanInput.Contains(cleanCurrent, StringComparison.Ordinal))
+            var cleanCurrent = new string([.. tag.GetStringProperty("m_name").Where(char.IsLetterOrDigit)]).ToLowerInvariant();
+            if (cleanCurrent == cleanInput
+                || cleanCurrent.Contains(cleanInput, StringComparison.Ordinal)
+                || cleanInput.Contains(cleanCurrent, StringComparison.Ordinal))
             {
-                return Tags[i].GetSubCollection("m_tagID").GetIntegerProperty("m_id");
+                return TagIdOf(tag);
             }
         }
 
@@ -2531,14 +2529,14 @@ public class AnimationGraphExtract : IDisposable
         var newClassName = className.Replace("Updater", string.Empty, StringComparison.Ordinal);
         var component = MakeNode(newClassName);
 
-        component.AddProperty("m_group", "");
-        component.AddProperty("m_id", compiledComponent.GetSubCollection("m_id"));
-        component.AddProperty("m_bStartEnabled", compiledComponent.GetIntegerProperty("m_bStartEnabled") > 0);
-        component.AddProperty("m_nPriority", 100);
+        component.Add("m_group", "");
+        component.Add("m_id", compiledComponent.GetSubCollection("m_id"));
+        component.Add("m_bStartEnabled", compiledComponent.GetIntegerProperty("m_bStartEnabled") > 0);
+        component.Add("m_nPriority", 100);
 
         if (compiledComponent.ContainsKey("m_networkMode"))
         {
-            component.AddProperty("m_networkMode", compiledComponent.GetProperty<string>("m_networkMode"));
+            component.Add("m_networkMode", compiledComponent.GetStringProperty("m_networkMode"));
         }
 
         if (className == "CActionComponentUpdater")
@@ -2552,61 +2550,48 @@ public class AnimationGraphExtract : IDisposable
                     var newActionClassName = actionClassName.Replace("Updater", string.Empty, StringComparison.Ordinal);
                     var newAction = MakeNode(newActionClassName);
 
-                    foreach (var (actionKey, actionValue) in action.Properties)
+                    foreach (var (actionChildKey, actionChildValue) in action.Children)
                     {
-                        if (actionKey == "_class")
+                        if (actionChildKey == "_class")
                         {
                             continue;
                         }
 
-                        if (actionKey == "m_nTagIndex")
+                        if (actionChildKey == "m_nTagIndex")
                         {
                             var tagIndex = action.GetIntegerProperty("m_nTagIndex");
-                            newAction.AddProperty("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
+                            newAction.Add("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
                             continue;
                         }
 
-                        if (actionKey == "m_hParam")
+                        if (actionChildKey == "m_hParam")
                         {
-                            newAction.AddProperty("m_param", ExtractParameterID((KVObject)actionValue.Value!));
+                            newAction.Add("m_param", ExtractParameterID(actionChildValue));
                             continue;
                         }
 
-                        if (actionKey == "m_hScript")
+                        if (actionChildKey == "m_hScript")
                         {
-                            var scriptHandle = (KVObject)actionValue.Value!;
-                            var scriptIndex = scriptHandle.GetIntegerProperty("m_id");
-
-                            if (scriptIndex >= 0 && scriptManager != null)
+                            var scriptCode = TryGetFuseGeneralScriptCode(actionChildValue.GetIntegerProperty("m_id"));
+                            if (scriptCode != null)
                             {
-                                var scriptInfoArray = scriptManager.GetArray("m_scriptInfo");
-                                if (scriptIndex < scriptInfoArray.Length)
-                                {
-                                    var scriptInfo = scriptInfoArray[scriptIndex];
-                                    var scriptType = scriptInfo.GetStringProperty("m_eScriptType");
-                                    var scriptCode = scriptInfo.GetStringProperty("m_code");
-
-                                    if (scriptType == "ANIMSCRIPT_FUSE_GENERAL" && !string.IsNullOrEmpty(scriptCode))
-                                    {
-                                        newAction.AddProperty("m_expression", scriptCode);
-                                    }
-                                }
+                                newAction.Add("m_expression", scriptCode);
                             }
                             continue;
                         }
 
-                        if (actionKey is "m_eScriptType" or "m_code")
+                        if (actionChildKey is "m_eScriptType" or "m_code")
                         {
                             continue;
                         }
 
-                        newAction.AddProperty(actionKey, actionValue);
+                        newAction.Add(actionChildKey, actionChildValue);
                     }
 
                     return newAction;
                 });
 
-                component.AddProperty("m_actions", KVValue.MakeArray(convertedActions));
+                component.Add("m_actions", MakeArray(convertedActions));
             }
 
             return component;
@@ -2614,24 +2599,24 @@ public class AnimationGraphExtract : IDisposable
 
         if (className == "CLookComponentUpdater")
         {
-            component.AddProperty("m_bNetworkLookTarget", compiledComponent.GetIntegerProperty("m_bNetworkLookTarget") > 0);
-            component.AddProperty("m_lookHeadingID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookHeading")));
-            component.AddProperty("m_lookHeadingVelocityID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookHeadingVelocity")));
-            component.AddProperty("m_lookPitchID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookPitch")));
-            component.AddProperty("m_lookDirectionID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookDirection")));
-            component.AddProperty("m_lookTargetID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookTarget")));
-            component.AddProperty("m_lookTargetWorldSpaceID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookTargetWorldSpace")));
+            component.Add("m_bNetworkLookTarget", compiledComponent.GetIntegerProperty("m_bNetworkLookTarget") > 0);
+            component.Add("m_lookHeadingID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookHeading")));
+            component.Add("m_lookHeadingVelocityID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookHeadingVelocity")));
+            component.Add("m_lookPitchID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookPitch")));
+            component.Add("m_lookDirectionID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookDirection")));
+            component.Add("m_lookTargetID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookTarget")));
+            component.Add("m_lookTargetWorldSpaceID", ExtractParameterID(compiledComponent.GetSubCollection("m_hLookTargetWorldSpace")));
             return component;
         }
 
         if (className == "CSlopeComponentUpdater")
         {
-            component.AddProperty("m_slopeAngleID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeAngle")));
-            component.AddProperty("m_slopeAngleFrontID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeAngleFront")));
-            component.AddProperty("m_slopeAngleSideID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeAngleSide")));
-            component.AddProperty("m_slopeHeadingID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeHeading")));
-            component.AddProperty("m_slopeNormalID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeNormal")));
-            component.AddProperty("m_slopeNormal_WorldSpaceID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeNormal_WorldSpace")));
+            component.Add("m_slopeAngleID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeAngle")));
+            component.Add("m_slopeAngleFrontID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeAngleFront")));
+            component.Add("m_slopeAngleSideID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeAngleSide")));
+            component.Add("m_slopeHeadingID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeHeading")));
+            component.Add("m_slopeNormalID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeNormal")));
+            component.Add("m_slopeNormal_WorldSpaceID", ExtractParameterID(compiledComponent.GetSubCollection("m_hSlopeNormal_WorldSpace")));
             return component;
         }
 
@@ -2654,78 +2639,51 @@ public class AnimationGraphExtract : IDisposable
                     }
 
                     var weightListNode = MakeNode("CRigidBodyWeightList", ("m_name", weightListName));
-                    var weightsArray = new KVObject(null, isArray: true, weightArray.Length);
+                    var weightsArray = KVObject.Array();
 
                     for (var i = 0; i < weightArray.Length; i++)
                     {
-                        var weightDefinition = new KVObject(null, 2);
+                        var weightDefinition = new KVObject();
                         var boneName = i < boneNames.Length ? boneNames[i] : $"bone_{i}";
 
-                        weightDefinition.AddProperty("m_name", boneName);
-                        weightDefinition.AddProperty("m_flWeight", weightArray[i]);
-                        weightsArray.AddItem(weightDefinition);
+                        weightDefinition.Add("m_name", boneName);
+                        weightDefinition.Add("m_flWeight", weightArray[i]);
+                        weightsArray.Add(weightDefinition);
                     }
 
-                    weightListNode.AddProperty("m_weights", weightsArray);
+                    weightListNode.Add("m_weights", weightsArray);
                     convertedWeightLists.Add(weightListNode);
                 }
 
-                component.AddProperty("m_weightLists", KVValue.MakeArray(convertedWeightLists.ToArray()));
+                component.Add("m_weightLists", MakeArray(convertedWeightLists));
             }
 
-            component.AddProperty("m_flSpringFrequencyMin", compiledComponent.GetFloatProperty("m_flSpringFrequencyMin"));
-            component.AddProperty("m_flSpringFrequencyMax", compiledComponent.GetFloatProperty("m_flSpringFrequencyMax"));
-
-            if (compiledComponent.ContainsKey("m_flMaxStretch"))
-            {
-                component.AddProperty("m_flMaxStretch", compiledComponent.GetFloatProperty("m_flMaxStretch"));
-            }
-
-            if (compiledComponent.ContainsKey("m_bSolidCollisionAtZeroWeight"))
-            {
-                component.AddProperty("m_bSolidCollisionAtZeroWeight", compiledComponent.GetIntegerProperty("m_bSolidCollisionAtZeroWeight") > 0);
-            }
+            component.Add("m_flSpringFrequencyMin", compiledComponent.GetFloatProperty("m_flSpringFrequencyMin"));
+            component.Add("m_flSpringFrequencyMax", compiledComponent.GetFloatProperty("m_flSpringFrequencyMax"));
+            CopyIfPresent(compiledComponent, component, "m_flMaxStretch");
+            CopyBoolIfPresent(compiledComponent, component, "m_bSolidCollisionAtZeroWeight");
 
             return component;
         }
 
         if (className == "CDampedValueComponentUpdater")
         {
-            component.AddProperty("m_name", compiledComponent.GetProperty<string>("m_name"));
+            component.Add("m_name", compiledComponent.GetStringProperty("m_name"));
 
             if (compiledComponent.ContainsKey("m_items"))
             {
                 var items = compiledComponent.GetArray("m_items");
                 var convertedItems = items.Select(item =>
                 {
-                    var newItem = new KVObject(null, 6);
-                    var paramIn = item.GetSubCollection("m_hParamIn");
-                    var paramOut = item.GetSubCollection("m_hParamOut");
-                    var paramInType = paramIn.GetStringProperty("m_type");
-
-                    var valueType = paramInType == "ANIMPARAM_VECTOR" ? "VectorParameter" : "FloatParameter";
-                    newItem.AddProperty("m_valueType", valueType);
-
-                    if (valueType == "FloatParameter")
-                    {
-                        newItem.AddProperty("m_floatParamIn", ExtractParameterID(paramIn));
-                        newItem.AddProperty("m_floatParamOut", ExtractParameterID(paramOut));
-                        newItem.AddProperty("m_vectorParamIn", MakeNodeIdObjectValue(-1));
-                        newItem.AddProperty("m_vectorParamOut", MakeNodeIdObjectValue(-1));
-                    }
-                    else
-                    {
-                        newItem.AddProperty("m_floatParamIn", MakeNodeIdObjectValue(-1));
-                        newItem.AddProperty("m_floatParamOut", MakeNodeIdObjectValue(-1));
-                        newItem.AddProperty("m_vectorParamIn", ExtractParameterID(paramIn));
-                        newItem.AddProperty("m_vectorParamOut", ExtractParameterID(paramOut));
-                    }
-
-                    newItem.AddProperty("m_damping", item.GetSubCollection("m_damping"));
+                    var newItem = new KVObject();
+                    AddFloatOrVectorParamPair(newItem,
+                        item.GetSubCollection("m_hParamIn"),
+                        item.GetSubCollection("m_hParamOut"));
+                    newItem.Add("m_damping", item.GetSubCollection("m_damping"));
                     return newItem;
                 });
 
-                component.AddProperty("m_items", KVValue.MakeArray(convertedItems.ToArray()));
+                component.Add("m_items", MakeArray(convertedItems));
             }
 
             return component;
@@ -2750,7 +2708,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (compiledComponent.ContainsKey(paramName))
                 {
-                    component.AddProperty(paramName, ExtractParameterID(compiledComponent.GetSubCollection(paramName)));
+                    component.Add(paramName, ExtractParameterID(compiledComponent.GetSubCollection(paramName)));
                 }
             }
 
@@ -2759,7 +2717,7 @@ public class AnimationGraphExtract : IDisposable
 
         if (className == "CRemapValueComponentUpdater")
         {
-            component.AddProperty("m_name", compiledComponent.GetProperty<string>("m_name"));
+            component.Add("m_name", compiledComponent.GetStringProperty("m_name"));
 
             if (compiledComponent.ContainsKey("m_items"))
             {
@@ -2768,103 +2726,68 @@ public class AnimationGraphExtract : IDisposable
 
                 foreach (var item in items)
                 {
-                    var newItem = new KVObject(null, 12);
+                    var newItem = new KVObject();
+                    AddFloatOrVectorParamPair(newItem,
+                        item.GetSubCollection("m_hParamIn"),
+                        item.GetSubCollection("m_hParamOut"));
 
-                    var paramInHandle = item.GetSubCollection("m_hParamIn");
-                    var paramOutHandle = item.GetSubCollection("m_hParamOut");
+                    newItem.Add("m_flMinInputValue", item.GetFloatProperty("m_flMinInputValue"));
+                    newItem.Add("m_flMaxInputValue", item.GetFloatProperty("m_flMaxInputValue"));
+                    newItem.Add("m_flMinOutputValue", item.GetFloatProperty("m_flMinOutputValue"));
+                    newItem.Add("m_flMaxOutputValue", item.GetFloatProperty("m_flMaxOutputValue"));
 
-                    var paramInType = paramInHandle.GetStringProperty("m_type");
-                    var paramOutType = paramOutHandle.GetStringProperty("m_type");
-
-                    var valueType = (paramInType == "ANIMPARAM_VECTOR" || paramOutType == "ANIMPARAM_VECTOR")
-                        ? "VectorParameter"
-                        : "FloatParameter";
-
-                    newItem.AddProperty("m_valueType", valueType);
-
-                    if (valueType == "FloatParameter")
-                    {
-                        newItem.AddProperty("m_floatParamIn", ExtractParameterID(paramInHandle));
-                        newItem.AddProperty("m_floatParamOut", ExtractParameterID(paramOutHandle));
-                        newItem.AddProperty("m_vectorParamIn", MakeNodeIdObjectValue(-1));
-                        newItem.AddProperty("m_vectorParamOut", MakeNodeIdObjectValue(-1));
-                    }
-                    else
-                    {
-                        newItem.AddProperty("m_floatParamIn", MakeNodeIdObjectValue(-1));
-                        newItem.AddProperty("m_floatParamOut", MakeNodeIdObjectValue(-1));
-                        newItem.AddProperty("m_vectorParamIn", ExtractParameterID(paramInHandle));
-                        newItem.AddProperty("m_vectorParamOut", ExtractParameterID(paramOutHandle));
-                    }
-
-                    newItem.AddProperty("m_flMinInputValue", item.GetFloatProperty("m_flMinInputValue"));
-                    newItem.AddProperty("m_flMaxInputValue", item.GetFloatProperty("m_flMaxInputValue"));
-                    newItem.AddProperty("m_flMinOutputValue", item.GetFloatProperty("m_flMinOutputValue"));
-                    newItem.AddProperty("m_flMaxOutputValue", item.GetFloatProperty("m_flMaxOutputValue"));
-
-                    newItem.AddProperty("m_floatParamNameIn", "");
-                    newItem.AddProperty("m_floatParamNameOut", "");
-                    newItem.AddProperty("m_vectorParamNameIn", "");
-                    newItem.AddProperty("m_vectorParamNameOut", "");
+                    newItem.Add("m_floatParamNameIn", "");
+                    newItem.Add("m_floatParamNameOut", "");
+                    newItem.Add("m_vectorParamNameIn", "");
+                    newItem.Add("m_vectorParamNameOut", "");
 
                     convertedItems.Add(newItem);
                 }
-                component.AddProperty("m_items", KVValue.MakeArray(convertedItems.ToArray()));
+                component.Add("m_items", MakeArray(convertedItems));
             }
             return component;
         }
 
         if (className == "CAnimScriptComponentUpdater")
         {
-            component.AddProperty("m_sName", compiledComponent.GetProperty<string>("m_name"));
-            component.AddProperty("m_scriptFilename", "");
+            component.Add("m_sName", compiledComponent.GetStringProperty("m_name"));
+            component.Add("m_scriptFilename", "");
 
             return component;
         }
 
         if (className == "CCPPScriptComponentUpdater")
         {
-            component.AddProperty("m_sName", compiledComponent.GetProperty<string>("m_name"));
-            if (compiledComponent.ContainsKey("m_scriptsToRun"))
-            {
-                var scriptsArray = compiledComponent.GetArray("m_scriptsToRun");
-                var convertedScripts = new List<KVValue>();
-                foreach (var script in scriptsArray)
-                {
-                    var scriptName = script.GetStringProperty("") ?? string.Empty;
-                    convertedScripts.Add(new KVValue(ValveKeyValue.KVValueType.String, scriptName));
-                }
-                component.AddProperty("m_scriptsToRun", KVValue.MakeArray(convertedScripts.ToArray()));
-            }
-            else
-            {
-                component.AddProperty("m_scriptsToRun", KVValue.MakeArray(Array.Empty<KVValue>()));
-            }
+            component.Add("m_sName", compiledComponent.GetStringProperty("m_name"));
+            var scripts = compiledComponent.ContainsKey("m_scriptsToRun")
+                ? compiledComponent.GetArray("m_scriptsToRun").Select(s => (KVObject)(s.GetStringProperty("") ?? string.Empty)).ToArray()
+                : [];
+            component.Add("m_scriptsToRun", MakeArray(scripts));
             return component;
         }
 
         if (className == "CStateMachineComponentUpdater")
         {
-            component.AddProperty("m_sName", compiledComponent.GetProperty<string>("m_name"));
+            component.Add("m_sName", compiledComponent.GetStringProperty("m_name"));
 
             if (compiledComponent.ContainsKey("m_stateMachine"))
             {
                 var compiledStateMachine = compiledComponent.GetSubCollection("m_stateMachine");
                 var states = ConvertStateMachine(compiledStateMachine, null, null, isComponent: true);
-                component.AddProperty("m_states", KVValue.MakeArray(states));
+                component.Add("m_states", MakeArray(states));
             }
 
             return component;
         }
 
-        foreach (var (key, value) in compiledComponent.Properties)
+        foreach (var (childKey, childValue) in compiledComponent.Children)
         {
-            if (key is "_class" or "m_paramHandles" or "m_name" or "m_id" or "m_bStartEnabled" or "m_networkMode")
+            if (childKey is "_class" or "m_paramHandles" or "m_name" or "m_id" or "m_bStartEnabled" or "m_networkMode")
             {
                 continue;
             }
 
-            if (key == "m_motors")
+            if (childKey == "m_motors")
             {
                 var motors = compiledComponent.GetArray("m_motors");
                 var convertedMotors = motors.Select(motor =>
@@ -2873,181 +2796,140 @@ public class AnimationGraphExtract : IDisposable
                     var newMotorClassName = motorClassName.Replace("Updater", string.Empty, StringComparison.Ordinal);
                     var newMotor = MakeNode(newMotorClassName);
 
-                    foreach (var (motorKey, motorValue) in motor.Properties)
+                    foreach (var (motorChildKey, motorChildValue) in motor.Children)
                     {
-                        if (motorKey == "_class")
+                        if (motorChildKey == "_class")
                         {
                             continue;
                         }
 
-                        if (motorKey.EndsWith("Param", StringComparison.Ordinal) && motorValue.Value is KVObject paramRef)
+                        if (motorChildKey.EndsWith("Param", StringComparison.Ordinal) && motorChildValue.ValueType == KVValueType.Collection)
                         {
-                            var newKey = motorKey.StartsWith("m_h", StringComparison.Ordinal)
-                                ? "m_" + motorKey["m_h".Length..]
-                                : motorKey;
-                            newMotor.AddProperty(newKey, ExtractParameterID(paramRef));
+                            var newKey = motorChildKey.StartsWith("m_h", StringComparison.Ordinal)
+                                ? "m_" + motorChildKey["m_h".Length..]
+                                : motorChildKey;
+                            newMotor.Add(newKey, ExtractParameterID(motorChildValue));
                             continue;
                         }
 
-                        newMotor.AddProperty(motorKey, motorValue);
+                        newMotor.Add(motorChildKey, motorChildValue);
                     }
 
                     return newMotor;
                 });
 
-                component.AddProperty(key, KVValue.MakeArray(convertedMotors));
+                component.Add(childKey, MakeArray(convertedMotors));
                 continue;
             }
 
-            component.AddProperty(key, value);
+            component.Add(childKey, childValue);
         }
 
         if (compiledComponent.ContainsKey("m_paramHandles"))
         {
-            var paramHandles = compiledComponent.GetArray("m_paramHandles");
-            var paramIDs = paramHandles.Select(handle =>
-            {
-                var paramRef = (KVObject)handle;
-                var paramType = paramRef.GetStringProperty("m_type");
-                var paramIndex = paramRef.GetIntegerProperty("m_index");
-                return ParameterIDFromIndex(paramType, paramIndex);
-            });
-
-            component.AddProperty("m_paramIDs", KVValue.MakeArray(paramIDs));
+            var paramIDs = compiledComponent.GetArray("m_paramHandles").Select(h => ExtractParameterID(h));
+            component.Add("m_paramIDs", MakeArray(paramIDs));
         }
 
         return component;
+    }
+
+    private static IEnumerable<KVObject> EnumerateMotionNodeChildren(KVObject node)
+    {
+        var className = node.GetStringProperty("_class");
+
+        if (className == "CMotionNodeBlend1D" && node.ContainsKey("m_blendItems"))
+        {
+            foreach (var blendItem in node.GetArray("m_blendItems"))
+            {
+                if (blendItem.ContainsKey("m_pChild"))
+                {
+                    yield return blendItem.GetSubCollection("m_pChild");
+                }
+            }
+        }
+        else if (className == "CMotionNode" && node.ContainsKey("m_pChild"))
+        {
+            yield return node.GetSubCollection("m_pChild");
+        }
     }
 
     private List<KVObject> ConvertMotionNodeHierarchy(KVObject rootNode, List<long> motionParamIds)
     {
         var nodes = new List<KVObject>();
         var idMap = new Dictionary<long, long>();
-        var processedNodeIds = new HashSet<long>();
-        var nodesToProcess = new Queue<KVObject>();
-        nodesToProcess.Enqueue(rootNode);
+        var assignedIds = new HashSet<long>();
+        var idCursor = GeneratedNodeIdMin;
 
-        while (nodesToProcess.Count > 0)
+        // Pass 1: assign IDs in BFS order
         {
-            var currentNode = nodesToProcess.Dequeue();
-            var compiledNodeId = currentNode.GetSubCollection("m_id").GetIntegerProperty("m_id");
+            var seen = new HashSet<long>();
+            var queue = new Queue<KVObject>();
+            queue.Enqueue(rootNode);
 
-            if (processedNodeIds.Contains(compiledNodeId))
+            while (queue.Count > 0)
             {
-                continue;
-            }
-
-            processedNodeIds.Add(compiledNodeId);
-
-            var newId = GenerateNewNodeId([.. idMap.Values]);
-            idMap[compiledNodeId] = newId;
-
-            var className = currentNode.GetStringProperty("_class");
-
-            if (className == "CMotionNodeBlend1D")
-            {
-                if (currentNode.ContainsKey("m_blendItems"))
+                var currentNode = queue.Dequeue();
+                var compiledNodeId = currentNode.GetSubCollection("m_id").GetIntegerProperty("m_id");
+                if (!seen.Add(compiledNodeId))
                 {
-                    var blendItems = currentNode.GetArray("m_blendItems");
-                    foreach (var blendItem in blendItems)
-                    {
-                        if (blendItem.ContainsKey("m_pChild"))
-                        {
-                            var childNode = blendItem.GetSubCollection("m_pChild");
-                            nodesToProcess.Enqueue(childNode);
-                        }
-                    }
+                    continue;
                 }
-            }
-            else if (className == "CMotionNodeSequence")
-            {
-            }
-            else if (className == "CMotionNode")
-            {
-                if (currentNode.ContainsKey("m_pChild"))
+
+                var newId = GenerateNewNodeId(assignedIds, ref idCursor);
+                assignedIds.Add(newId);
+                idMap[compiledNodeId] = newId;
+
+                foreach (var child in EnumerateMotionNodeChildren(currentNode))
                 {
-                    var childNode = currentNode.GetSubCollection("m_pChild");
-                    nodesToProcess.Enqueue(childNode);
+                    queue.Enqueue(child);
                 }
             }
         }
 
-        processedNodeIds.Clear();
-        nodesToProcess.Enqueue(rootNode);
-
-        while (nodesToProcess.Count > 0)
+        // Pass 2: convert nodes in BFS order
         {
-            var currentNode = nodesToProcess.Dequeue();
-            var compiledNodeId = currentNode.GetSubCollection("m_id").GetIntegerProperty("m_id");
+            var seen = new HashSet<long>();
+            var queue = new Queue<KVObject>();
+            queue.Enqueue(rootNode);
 
-            if (processedNodeIds.Contains(compiledNodeId))
+            while (queue.Count > 0)
             {
-                continue;
-            }
-
-            processedNodeIds.Add(compiledNodeId);
-
-            var newNodeId = idMap[compiledNodeId];
-
-            var uncompiledNode = ConvertMotionNode(currentNode, motionParamIds, idMap);
-            uncompiledNode.AddProperty("m_nNodeID", MakeNodeIdObjectValue(newNodeId));
-
-            var nodeItem = new KVObject(null, 2);
-            nodeItem.AddProperty("key", MakeNodeIdObjectValue(newNodeId));
-            nodeItem.AddProperty("value", uncompiledNode);
-            nodes.Add(nodeItem);
-
-            var className = currentNode.GetStringProperty("_class");
-
-            if (className == "CMotionNodeBlend1D")
-            {
-                if (currentNode.ContainsKey("m_blendItems"))
+                var currentNode = queue.Dequeue();
+                var compiledNodeId = currentNode.GetSubCollection("m_id").GetIntegerProperty("m_id");
+                if (!seen.Add(compiledNodeId))
                 {
-                    var blendItems = currentNode.GetArray("m_blendItems");
-                    foreach (var blendItem in blendItems)
-                    {
-                        if (blendItem.ContainsKey("m_pChild"))
-                        {
-                            var childNode = blendItem.GetSubCollection("m_pChild");
-                            nodesToProcess.Enqueue(childNode);
-                        }
-                    }
+                    continue;
                 }
-            }
-            else if (className == "CMotionNodeSequence")
-            {
-            }
-            else if (className == "CMotionNode")
-            {
-                if (currentNode.ContainsKey("m_pChild"))
+
+                var newNodeId = idMap[compiledNodeId];
+                var uncompiledNode = ConvertMotionNode(currentNode, motionParamIds, idMap);
+                uncompiledNode.Add("m_nNodeID", MakeNodeIdObjectValue(newNodeId));
+                nodes.Add(MakeNodeManagerEntry(newNodeId, uncompiledNode));
+
+                foreach (var child in EnumerateMotionNodeChildren(currentNode))
                 {
-                    var childNode = currentNode.GetSubCollection("m_pChild");
-                    nodesToProcess.Enqueue(childNode);
+                    queue.Enqueue(child);
                 }
             }
         }
 
         var rootNodeId = rootNode.GetSubCollection("m_id").GetIntegerProperty("m_id");
         var rootNodeNewId = idMap[rootNodeId];
-        var rootAnimNodeId = GenerateNewNodeId([.. idMap.Values]);
+        var rootAnimNodeId = GenerateNewNodeId(assignedIds, ref idCursor);
 
         var rootAnimNode = MakeNode("CRootAnimNode");
-        rootAnimNode.AddProperty("m_sName", "Unnamed");
-        rootAnimNode.AddProperty("m_nNodeID", MakeNodeIdObjectValue(rootAnimNodeId));
-        rootAnimNode.AddProperty("m_networkMode", "ServerAuthoritative");
+        rootAnimNode.Add("m_sName", "Unnamed");
+        rootAnimNode.Add("m_nNodeID", MakeNodeIdObjectValue(rootAnimNodeId));
+        rootAnimNode.Add("m_networkMode", "ServerAuthoritative");
 
         var random = new Random((int)rootAnimNodeId);
         var posX = 400 + random.Next(0, 200);
         var posY = 50 + random.Next(0, 100);
-        rootAnimNode.AddProperty("m_vecPosition", MakeVector2(posX, posY));
+        rootAnimNode.Add("m_vecPosition", MakeVector2(posX, posY));
 
-        var inputConnection = MakeInputConnection(rootNodeNewId);
-        rootAnimNode.AddProperty("m_inputConnection", inputConnection);
-
-        var rootAnimNodeItem = new KVObject(null, 2);
-        rootAnimNodeItem.AddProperty("key", MakeNodeIdObjectValue(rootAnimNodeId));
-        rootAnimNodeItem.AddProperty("value", rootAnimNode);
-        nodes.Add(rootAnimNodeItem);
+        rootAnimNode.Add("m_inputConnection", MakeInputConnection(rootNodeNewId));
+        nodes.Add(MakeNodeManagerEntry(rootAnimNodeId, rootAnimNode));
 
         return nodes;
     }
@@ -3055,38 +2937,24 @@ public class AnimationGraphExtract : IDisposable
     private KVObject CreateSequenceMotionNode(KVObject compiledMotionNode, float posX, float posY)
     {
         var sequenceNode = MakeNode("CSequenceAnimNode");
-        sequenceNode.AddProperty("m_sName", compiledMotionNode.GetStringProperty("m_name") ?? "Unnamed");
-        sequenceNode.AddProperty("m_vecPosition", MakeVector2(posX, posY));
-
-        if (compiledMotionNode.ContainsKey("m_hSequence"))
-        {
-            var sequenceIndex = compiledMotionNode.GetIntegerProperty("m_hSequence");
-            var sequenceName = GetSequenceName(sequenceIndex);
-            sequenceNode.AddProperty("m_sequenceName", sequenceName);
-        }
-        else
-        {
-            sequenceNode.AddProperty("m_sequenceName", "");
-        }
-
-        var playbackSpeed = compiledMotionNode.ContainsKey("m_flPlaybackSpeed")
-            ? compiledMotionNode.GetFloatProperty("m_flPlaybackSpeed")
-            : 1.0f;
-        sequenceNode.AddProperty("m_playbackSpeed", playbackSpeed);
-
-        sequenceNode.AddProperty("m_bLoop", compiledMotionNode.GetIntegerProperty("m_bLoop") > 0);
-        sequenceNode.AddProperty("m_tagSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
-        sequenceNode.AddProperty("m_paramSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
-        sequenceNode.AddProperty("m_networkMode", "ServerAuthoritative");
-
+        sequenceNode.Add("m_sName", compiledMotionNode.GetStringProperty("m_name") ?? "Unnamed");
+        sequenceNode.Add("m_vecPosition", MakeVector2(posX, posY));
+        sequenceNode.Add("m_sequenceName", compiledMotionNode.ContainsKey("m_hSequence")
+            ? GetSequenceName(compiledMotionNode.GetIntegerProperty("m_hSequence"))
+            : "");
+        sequenceNode.Add("m_playbackSpeed", compiledMotionNode.GetFloatProperty("m_flPlaybackSpeed", 1.0f));
+        sequenceNode.Add("m_bLoop", compiledMotionNode.GetIntegerProperty("m_bLoop") > 0);
+        sequenceNode.Add("m_tagSpans", KVObject.Array());
+        sequenceNode.Add("m_paramSpans", KVObject.Array());
+        sequenceNode.Add("m_networkMode", "ServerAuthoritative");
         return sequenceNode;
     }
 
     private static KVObject CreateBlendMotionNode(KVObject compiledMotionNode, List<long> motionParamIds, Dictionary<long, long> idMap, float posX, float posY)
     {
         var blendNode = MakeNode("CBlendAnimNode");
-        blendNode.AddProperty("m_sName", compiledMotionNode.GetStringProperty("m_name") ?? "Unnamed");
-        blendNode.AddProperty("m_vecPosition", MakeVector2(posX, posY));
+        blendNode.Add("m_sName", compiledMotionNode.GetStringProperty("m_name") ?? "Unnamed");
+        blendNode.Add("m_vecPosition", MakeVector2(posX, posY));
 
         if (compiledMotionNode.ContainsKey("m_blendItems"))
         {
@@ -3096,8 +2964,8 @@ public class AnimationGraphExtract : IDisposable
             foreach (var blendItem in blendItems)
             {
                 var blendChild = MakeNode("CBlendNodeChild");
-                blendChild.AddProperty("m_name", "Unnamed");
-                blendChild.AddProperty("m_blendValue", blendItem.GetFloatProperty("m_flKeyValue"));
+                blendChild.Add("m_name", "Unnamed");
+                blendChild.Add("m_blendValue", blendItem.GetFloatProperty("m_flKeyValue"));
 
                 if (blendItem.ContainsKey("m_pChild"))
                 {
@@ -3105,44 +2973,32 @@ public class AnimationGraphExtract : IDisposable
                     var childCompiledId = childNode.GetSubCollection("m_id").GetIntegerProperty("m_id");
                     var childNewId = idMap[childCompiledId];
                     var inputConnection = MakeInputConnection(childNewId);
-                    blendChild.AddProperty("m_inputConnection", inputConnection);
+                    blendChild.Add("m_inputConnection", inputConnection);
                 }
 
                 children.Add(blendChild);
             }
 
-            blendNode.AddProperty("m_children", KVValue.MakeArray(children.ToArray()));
+            blendNode.Add("m_children", MakeArray(children));
         }
 
-        blendNode.AddProperty("m_blendValueSource", "Parameter");
+        blendNode.Add("m_blendValueSource", "Parameter");
 
-        if (compiledMotionNode.ContainsKey("m_nParamIndex"))
-        {
-            var paramIndex = (int)compiledMotionNode.GetIntegerProperty("m_nParamIndex");
+        var paramIndex = compiledMotionNode.ContainsKey("m_nParamIndex")
+            ? (int)compiledMotionNode.GetIntegerProperty("m_nParamIndex")
+            : -1;
+        var motionParamId = paramIndex >= 0 && paramIndex < motionParamIds.Count
+            ? motionParamIds[paramIndex]
+            : -1L;
+        blendNode.Add("m_param", MakeNodeIdObjectValue(motionParamId));
 
-            if (paramIndex >= 0 && paramIndex < motionParamIds.Count)
-            {
-                var motionParamId = motionParamIds[paramIndex];
-                var paramIdValue = MakeNodeIdObjectValue(motionParamId);
-                blendNode.AddProperty("m_param", paramIdValue);
-            }
-            else
-            {
-                blendNode.AddProperty("m_param", MakeNodeIdObjectValue(-1));
-            }
-        }
-        else
-        {
-            blendNode.AddProperty("m_param", MakeNodeIdObjectValue(-1));
-        }
-
-        blendNode.AddProperty("m_blendKeyType", "BlendKey_UserValue");
-        blendNode.AddProperty("m_bLockBlendOnReset", false);
-        blendNode.AddProperty("m_bSyncCycles", true);
-        blendNode.AddProperty("m_bLoop", true);
-        blendNode.AddProperty("m_bLockWhenWaning", true);
-        blendNode.AddProperty("m_damping", MakeDefaultDamping());
-        blendNode.AddProperty("m_networkMode", "ServerAuthoritative");
+        blendNode.Add("m_blendKeyType", "BlendKey_UserValue");
+        blendNode.Add("m_bLockBlendOnReset", false);
+        blendNode.Add("m_bSyncCycles", true);
+        blendNode.Add("m_bLoop", true);
+        blendNode.Add("m_bLockWhenWaning", true);
+        blendNode.Add("m_damping", MakeDefaultDamping());
+        blendNode.Add("m_networkMode", "ServerAuthoritative");
 
         return blendNode;
     }
@@ -3173,14 +3029,14 @@ public class AnimationGraphExtract : IDisposable
 
         // Default fallback
         var defaultNode = MakeNode("CSequenceAnimNode");
-        defaultNode.AddProperty("m_sName", compiledMotionNode.GetStringProperty("m_name") ?? "Unnamed");
-        defaultNode.AddProperty("m_vecPosition", MakeVector2(posX, posY));
-        defaultNode.AddProperty("m_sequenceName", "");
-        defaultNode.AddProperty("m_playbackSpeed", 1.0f);
-        defaultNode.AddProperty("m_bLoop", false);
-        defaultNode.AddProperty("m_tagSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
-        defaultNode.AddProperty("m_paramSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
-        defaultNode.AddProperty("m_networkMode", "ServerAuthoritative");
+        defaultNode.Add("m_sName", compiledMotionNode.GetStringProperty("m_name") ?? "Unnamed");
+        defaultNode.Add("m_vecPosition", MakeVector2(posX, posY));
+        defaultNode.Add("m_sequenceName", "");
+        defaultNode.Add("m_playbackSpeed", 1.0f);
+        defaultNode.Add("m_bLoop", false);
+        defaultNode.Add("m_tagSpans", KVObject.Array());
+        defaultNode.Add("m_paramSpans", KVObject.Array());
+        defaultNode.Add("m_networkMode", "ServerAuthoritative");
 
         return defaultNode;
     }
@@ -3188,7 +3044,7 @@ public class AnimationGraphExtract : IDisposable
     private KVObject ConvertToUncompiled(KVObject compiledNode, List<long> outConnections)
     {
         footPinningItems = [];
-        var className = compiledNode.GetProperty<string>("_class");
+        var className = compiledNode.GetStringProperty("_class");
         className = className.Replace("UpdateNode", string.Empty, StringComparison.Ordinal);
 
         var newClass = className + "AnimNode";
@@ -3206,7 +3062,7 @@ public class AnimationGraphExtract : IDisposable
             outConnections.AddRange(inputNodeIds);
         }
 
-        foreach (var (key, value) in compiledNode.Properties)
+        foreach (var (key, value) in compiledNode.Children)
         {
             if (key is "_class" or "m_nodePath")
             {
@@ -3214,36 +3070,25 @@ public class AnimationGraphExtract : IDisposable
             }
 
             var newKey = key;
-            var subCollection = new Lazy<KVObject>(() => (KVObject)value.Value!);
 
-            // preserve earlier semantics: always convert blend-time fields
-            if (key == "m_flBlendTime")
+            if (PropertyMappings.TryGetValue(className, out var classMap) && classMap.TryGetValue(key, out var mapEntry))
             {
-                var converted = ConvertBlendDuration(subCollection.Value);
-                node.AddProperty("m_blendDuration", converted);
+                if (mapEntry.Action == PropAction.Skip)
+                {
+                    continue;
+                }
+                HandleMappedProperty(node, compiledNode, key, value, outConnections, mapEntry.Action, mapEntry.OutputKey);
                 continue;
             }
 
-            // first see whether a mapping exists for this class/key combination
-            if (PropertyMappings.TryGetValue(className, out var classMap) && classMap.TryGetValue(key, out var mapEntry))
-            {
-                if (mapEntry.Action != PropAction.Skip)
-                {
-                    HandleMappedProperty(node, compiledNode, key, value, subCollection, outConnections, mapEntry.Action, mapEntry.OutputKey);
-                    continue;
-                }
-                // Skip action: fall through to handle in manual code below
-            }
-
-            // fallback name->sName conversion for the long list of classes
             if (key == "m_name" && NameToSNameClasses.Contains(className))
             {
                 newKey = "m_sName";
             }
 
-            if (key is "m_pChildNode" or "m_pChild1" or "m_pChild2" or "m_pChild" && value.Value is KVObject childRef)
+            if (key is "m_pChildNode" or "m_pChild1" or "m_pChild2" or "m_pChild" && value.ValueType == KVValueType.Collection)
             {
-                var nodeIndex = childRef.GetIntegerProperty("m_nodeIndex");
+                var nodeIndex = value.GetIntegerProperty("m_nodeIndex");
                 if (nodeIndexToIdMap?.TryGetValue(nodeIndex, out var nodeId) == true)
                 {
                     outConnections.Add(nodeId);
@@ -3263,7 +3108,7 @@ public class AnimationGraphExtract : IDisposable
                     if (connectionKey != key)
                     {
                         var connection = MakeInputConnection(nodeId);
-                        node.AddProperty(connectionKey, connection);
+                        node.Add(connectionKey, connection);
                         continue;
                     }
                 }
@@ -3273,67 +3118,31 @@ public class AnimationGraphExtract : IDisposable
             {
                 var sequenceIndex = compiledNode.GetIntegerProperty("m_hSequence");
                 var sequenceName = GetSequenceName(sequenceIndex);
-                node.AddProperty("m_sequenceName", sequenceName);
+                node.Add("m_sequenceName", sequenceName);
                 continue;
             }
 
-            if (className == "CRoot")
-            {
-                if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-            }
-            else if (className == "CSelector")
+            if (className == "CSelector")
             {
                 if (key == "m_hParameter")
                 {
-                    var paramRef = subCollection.Value;
+                    var paramRef = value;
                     var paramType = paramRef.GetStringProperty("m_type");
                     var paramIndex = paramRef.GetIntegerProperty("m_index");
                     var tagIndex = compiledNode.GetIntegerProperty("m_nTagIndex");
-                    if (tagIndex != -1 && (paramIndex == 255 || paramType == "ANIMPARAM_UNKNOWN"))
+
+                    if (paramIndex == 255 || (tagIndex != -1 && paramType == "ANIMPARAM_UNKNOWN"))
                     {
                         continue;
                     }
-                    else if (paramIndex != 255)
+
+                    if (!node.ContainsKey("m_selectionSource"))
                     {
-                        var source = paramType["ANIMPARAM_".Length..];
-                        source = char.ToUpperInvariant(source[0]) + source[1..].ToLowerInvariant();
-                        var selectionSource = paramType switch
-                        {
-                            "ANIMPARAM_BOOL" => "SelectionSource_Bool",
-                            "ANIMPARAM_ENUM" => "SelectionSource_Enum",
-                            _ => "SelectionSource_Bool",
-                        };
-                        if (!node.Properties.ContainsKey("m_selectionSource"))
-                        {
-                            node.AddProperty("m_selectionSource", selectionSource);
-                        }
-                        node.AddProperty($"m_{source.ToLowerInvariant()}ParamID", ParameterIDFromIndex(paramType, paramIndex));
+                        node.Add("m_selectionSource",
+                            paramType == "ANIMPARAM_ENUM" ? "SelectionSource_Enum" : "SelectionSource_Bool");
                     }
-                    continue;
-                }
-
-
-            }
-            else if (className == "CStateMachine")
-            {
-                if (key is "m_stateMachine" or "m_stateData" or "m_transitionData")
-                {
-                    continue;
-                }
-            }
-            else if (className == "CSequence")
-            {
-                if (key is "m_duration" or "m_hSequence")
-                {
-                    continue;
-                }
-                else if (key == "m_name")
-                {
-                    node.AddProperty("m_sName", value);
+                    var source = paramType["ANIMPARAM_".Length..].ToLowerInvariant();
+                    node.Add($"m_{source}ParamID", ParameterIDFromIndex(paramType, paramIndex));
                     continue;
                 }
             }
@@ -3349,42 +3158,25 @@ public class AnimationGraphExtract : IDisposable
                         var newInputs = weights.Zip(blendTimes, inputNodeIds).Select((choice, index) =>
                         {
                             var (weight, blendTime, nodeId) = choice;
-                            var choiceNode = new KVObject(null, 4);
+                            var choiceNode = new KVObject();
                             AddInputConnection(choiceNode, nodeId);
-                            choiceNode.AddProperty("m_name", (index + 1).ToString(CultureInfo.InvariantCulture));
-                            choiceNode.AddProperty("m_weight", weight);
-                            choiceNode.AddProperty("m_blendTime", blendTime);
+                            choiceNode.Add("m_name", (index + 1).ToString(CultureInfo.InvariantCulture));
+                            choiceNode.Add("m_weight", weight);
+                            choiceNode.Add("m_blendTime", blendTime);
                             return choiceNode;
                         });
 
-                        node.AddProperty("m_children", KVValue.MakeArray(newInputs));
+                        node.Add("m_children", MakeArray(newInputs));
                     }
 
                     continue;
                 }
-
-                if (key is "m_weights" or "m_blendTimes")
-                {
-                    continue;
-                }
             }
-            else if (className == "CBoneMask")
+            else if (className is "CBoneMask" or "CRagdoll")
             {
                 if (key == "m_nWeightListIndex")
                 {
-                    var weightListIndex = compiledNode.GetIntegerProperty("m_nWeightListIndex");
-                    var weightListName = GetWeightListName(weightListIndex);
-                    node.AddProperty("m_weightListName", weightListName);
-                    continue;
-                }
-            }
-            else if (className == "CRagdoll")
-            {
-                if (key == "m_nWeightListIndex")
-                {
-                    var weightListIndex = compiledNode.GetIntegerProperty("m_nWeightListIndex");
-                    var weightListName = GetWeightListName(weightListIndex);
-                    node.AddProperty("m_weightListName", weightListName);
+                    node.Add("m_weightListName", GetWeightListName(compiledNode.GetIntegerProperty("m_nWeightListIndex")));
                     continue;
                 }
             }
@@ -3392,31 +3184,19 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_children")
                 {
-                    var targetValues = compiledNode.GetFloatArray("m_targetValues");
-
                     if (inputNodeIds is not null)
                     {
-                        var blendChildren = new List<KVObject>();
-
-                        for (var childIndex = 0; childIndex < inputNodeIds.Length; childIndex++)
+                        var targetValues = compiledNode.GetFloatArray("m_targetValues");
+                        var blendChildren = inputNodeIds.Select((nodeId, i) =>
                         {
-                            var nodeId = inputNodeIds[childIndex];
-                            var blendValue = childIndex < targetValues.Length ? targetValues[childIndex] : 0.0f;
                             var blendChild = MakeNode("CBlendNodeChild");
                             AddInputConnection(blendChild, nodeId);
-                            blendChild.AddProperty("m_name", "Unnamed");
-                            blendChild.AddProperty("m_blendValue", blendValue);
-                            blendChildren.Add(blendChild);
-                        }
-
-                        node.AddProperty("m_children", KVValue.MakeArray(blendChildren.ToArray()));
+                            blendChild.Add("m_name", "Unnamed");
+                            blendChild.Add("m_blendValue", i < targetValues.Length ? targetValues[i] : 0.0f);
+                            return blendChild;
+                        }).ToArray();
+                        node.Add("m_children", MakeArray(blendChildren));
                     }
-
-                    continue;
-                }
-
-                if (key is "m_targetValues" or "m_sortedOrder")
-                {
                     continue;
                 }
             }
@@ -3429,93 +3209,73 @@ public class AnimationGraphExtract : IDisposable
 
                     foreach (var item in items)
                     {
-                        var hasSequence = item.ContainsKey("m_hSequence") && item.GetIntegerProperty("m_hSequence") != -1;
-                        var hasChild = item.ContainsKey("m_pChild") &&
-                                       item.GetSubCollection("m_pChild")?.GetIntegerProperty("m_nodeIndex") != -1;
+                        var hasSequence = item.GetIntegerProperty("m_hSequence", -1) != -1;
+                        var hasChild = item.GetSubCollection("m_pChild")?.GetIntegerProperty("m_nodeIndex", -1) is > -1;
+                        var itemClass = !hasSequence && hasChild ? "CNodeBlend2DItem" : "CSequenceBlend2DItem";
 
-                        var itemClass = (hasSequence, hasChild) switch
-                        {
-                            (true, _) => "CSequenceBlend2DItem",
-                            (false, true) => "CNodeBlend2DItem",
-                            _ => "CSequenceBlend2DItem"
-                        };
+                        var convertedItem = new KVObject();
 
-                        var convertedItem = new KVObject(null, item.Properties.Count);
-
-                        foreach (var (itemKey, itemValue) in item.Properties)
+                        foreach (var (itemKey, itemValue) in item.Children)
                         {
                             if (itemKey == "m_hSequence")
                             {
                                 var sequenceIndex = item.GetIntegerProperty("m_hSequence");
                                 if (sequenceIndex != -1)
                                 {
-                                    var sequenceName = GetSequenceName(sequenceIndex);
-                                    convertedItem.AddProperty("m_sequenceName", sequenceName);
+                                    convertedItem.Add("m_sequenceName", GetSequenceName(sequenceIndex));
                                 }
                             }
                             else if (itemKey == "m_pChild")
                             {
-                                if (itemClass == "CNodeBlend2DItem")
+                                if (itemClass == "CNodeBlend2DItem"
+                                    && nodeIndexToIdMap?.TryGetValue(item.GetSubCollection("m_pChild").GetIntegerProperty("m_nodeIndex"), out var nodeId) == true)
                                 {
-                                    var itemChildRef = item.GetSubCollection("m_pChild");
-                                    var nodeIndex = itemChildRef.GetIntegerProperty("m_nodeIndex");
-                                    if (nodeIndexToIdMap?.TryGetValue(nodeIndex, out var nodeId) == true)
-                                    {
-                                        var connection = MakeInputConnection(nodeId);
-                                        convertedItem.AddProperty("m_inputConnection", connection);
-                                    }
+                                    convertedItem.Add("m_inputConnection", MakeInputConnection(nodeId));
                                 }
-                                continue;
                             }
                             else if (itemKey == "m_tags")
                             {
                                 try
                                 {
-                                    convertedItem.AddProperty("m_tagSpans", ConvertTagSpansArray(item.GetArray("m_tags")));
+                                    convertedItem.Add("m_tagSpans", ConvertTagSpansArray(item.GetArray("m_tags")));
                                 }
                                 catch
                                 {
-                                    convertedItem.AddProperty("m_tagSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
+                                    convertedItem.Add("m_tagSpans", KVObject.Array());
                                 }
-                                continue;
                             }
                             else if (itemKey == "m_vPos")
                             {
-                                convertedItem.AddProperty("m_blendValue", itemValue);
+                                convertedItem.Add("m_blendValue", itemValue);
                             }
                             else if (itemKey == "m_flDuration")
                             {
-                                var useCustomDuration = item.GetIntegerProperty("m_bUseCustomDuration") > 0;
-                                if (useCustomDuration)
+                                if (item.GetIntegerProperty("m_bUseCustomDuration") > 0)
                                 {
-                                    convertedItem.AddProperty("m_flCustomDuration", itemValue);
+                                    convertedItem.Add("m_flCustomDuration", itemValue);
                                 }
-                            }
-                            else if (itemKey == "m_bUseCustomDuration")
-                            {
-                                convertedItem.AddProperty(itemKey, itemValue);
                             }
                             else
                             {
-                                convertedItem.AddProperty(itemKey, itemValue);
+                                convertedItem.Add(itemKey, itemValue);
                             }
                         }
-                        convertedItem.AddProperty("_class", itemClass);
+                        convertedItem.Add("_class", itemClass);
                         convertedItems.Add(convertedItem);
                     }
 
-                    node.AddProperty("m_items", KVValue.MakeArray(convertedItems.ToArray()));
+                    node.Add("m_items", MakeArray(convertedItems));
                     continue;
                 }
                 if (key == "m_tags")
                 {
                     try
                     {
-                        node.AddProperty("m_tagSpans", ConvertTagSpansArray(compiledNode.GetArray("m_tags")));
+                        node.Add("m_tagSpans", ConvertTagSpansArray(compiledNode.GetArray("m_tags")));
                     }
                     catch
                     {
-                        node.AddProperty("m_tagSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
+                        node.Add("m_tagSpans", KVObject.Array());
                     }
                     continue;
                 }
@@ -3524,39 +3284,26 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_opFixedSettings")
                 {
-                    var opFixedSettings = subCollection.Value;
+                    var opFixedSettings = value;
 
-                    if (opFixedSettings.ContainsKey("m_eBlendMode"))
-                    {
-                        node.AddProperty("m_blendMode", opFixedSettings.GetProperty<string>("m_eBlendMode"));
-                    }
+                    CopyIfPresent(opFixedSettings, node, "m_eBlendMode", "m_blendMode");
 
                     if (opFixedSettings.ContainsKey("m_nBoneMaskIndex"))
                     {
                         var boneMaskIndex = opFixedSettings.GetIntegerProperty("m_nBoneMaskIndex");
-                        var boneMaskName = boneMaskIndex == -1 ? "" : GetWeightListName(boneMaskIndex);
-                        node.AddProperty("m_boneMaskName", boneMaskName);
+                        node.Add("m_boneMaskName", boneMaskIndex == -1 ? "" : GetWeightListName(boneMaskIndex));
                     }
 
-                    if (opFixedSettings.ContainsKey("m_damping"))
-                    {
-                        node.AddProperty("m_damping", opFixedSettings.GetSubCollection("m_damping"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flMaxYawAngle"))
-                    {
-                        node.AddProperty("m_fAngleIncrement", opFixedSettings.GetFloatProperty("m_flMaxYawAngle"));
-                    }
+                    CopyIfPresent(opFixedSettings, node, "m_damping");
+                    CopyIfPresent(opFixedSettings, node, "m_flMaxYawAngle", "m_fAngleIncrement");
 
                     if (opFixedSettings.ContainsKey("m_attachment"))
                     {
-                        var attachment = opFixedSettings.GetSubCollection("m_attachment");
-                        var attachmentName = FindMatchingAttachmentName(attachment);
-                        node.AddProperty("m_attachmentName", attachmentName);
+                        node.Add("m_attachmentName", FindMatchingAttachmentName(opFixedSettings.GetSubCollection("m_attachment")));
                     }
                     else
                     {
-                        node.AddProperty("m_attachmentName", "aim");
+                        node.Add("m_attachmentName", "aim");
                     }
                     continue;
                 }
@@ -3576,16 +3323,16 @@ public class AnimationGraphExtract : IDisposable
                         var prefix = ExtractCommonPrefix(sequenceNames);
                         if (!string.IsNullOrEmpty(prefix))
                         {
-                            node.AddProperty("m_animNamePrefix", prefix);
+                            node.Add("m_animNamePrefix", prefix);
                         }
                         else
                         {
-                            node.AddProperty("m_animNamePrefix", "");
+                            node.Add("m_animNamePrefix", "");
                         }
                     }
                     else
                     {
-                        node.AddProperty("m_animNamePrefix", "");
+                        node.Add("m_animNamePrefix", "");
                     }
                     continue;
                 }
@@ -3594,31 +3341,20 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_opFixedData")
                 {
-                    var opFixedData = subCollection.Value;
+                    var opFixedData = value;
 
                     if (opFixedData.ContainsKey("m_boneIndex"))
                     {
-                        var boneIndex = (int)opFixedData.GetIntegerProperty("m_boneIndex");
-                        var boneName = GetBoneName(boneIndex);
-                        node.AddProperty("m_boneName", boneName);
+                        node.Add("m_boneName", GetBoneName((int)opFixedData.GetIntegerProperty("m_boneIndex")));
                     }
 
                     if (opFixedData.ContainsKey("m_attachment"))
                     {
-                        var attachment = opFixedData.GetSubCollection("m_attachment");
-                        var attachmentName = FindMatchingAttachmentName(attachment);
-                        node.AddProperty("m_attachmentName", attachmentName);
+                        node.Add("m_attachmentName", FindMatchingAttachmentName(opFixedData.GetSubCollection("m_attachment")));
                     }
 
-                    if (opFixedData.ContainsKey("m_bMatchTranslation"))
-                    {
-                        node.AddProperty("m_bMatchTranslation", opFixedData.GetIntegerProperty("m_bMatchTranslation") > 0);
-                    }
-
-                    if (opFixedData.ContainsKey("m_bMatchRotation"))
-                    {
-                        node.AddProperty("m_bMatchRotation", opFixedData.GetIntegerProperty("m_bMatchRotation") > 0);
-                    }
+                    CopyBoolIfPresent(opFixedData, node, "m_bMatchTranslation");
+                    CopyBoolIfPresent(opFixedData, node, "m_bMatchRotation");
 
                     continue;
                 }
@@ -3627,25 +3363,20 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_clips")
                 {
-                    var clipIndices = compiledNode.GetIntegerArray("m_clips");
-                    var clipNames = clipIndices.Select(idx => GetSequenceName(idx)).ToArray();
-                    node.AddProperty("m_clips", KVValue.MakeArray(clipNames.Select(name => new KVValue(ValveKeyValue.KVValueType.String, name)).ToArray()));
+                    var clipNames = compiledNode.GetIntegerArray("m_clips").Select(idx => (KVObject)GetSequenceName(idx)).ToArray();
+                    node.Add("m_clips", MakeArray(clipNames));
                     continue;
                 }
-                else if (key == "m_hBasePoseCacheHandle")
+                if (!node.ContainsKey("m_baseClipName"))
                 {
-                    continue;
-                }
-                if (!node.Properties.ContainsKey("m_baseClipName"))
-                {
-                    node.AddProperty("m_baseClipName", "");
+                    node.Add("m_baseClipName", "");
                 }
             }
             else if (className == "CFootPinning")
             {
                 if (key == "m_poseOpFixedData")
                 {
-                    var poseOpFixedData = subCollection.Value;
+                    var poseOpFixedData = value;
                     if (poseOpFixedData.ContainsKey("m_footInfo"))
                     {
                         var footInfoArray = poseOpFixedData.GetArray("m_footInfo");
@@ -3653,111 +3384,54 @@ public class AnimationGraphExtract : IDisposable
 
                         foreach (var footInfo in footInfoArray)
                         {
-                            var convertedItem = new KVObject(null, 8);
+                            var convertedItem = new KVObject();
                             if (footInfo.ContainsKey("m_nFootIndex"))
                             {
-                                var footIndex = (int)footInfo.GetIntegerProperty("m_nFootIndex");
-                                var footName = GetFootName(footIndex);
-                                if (!string.IsNullOrEmpty(footName))
-                                {
-                                    convertedItem.AddProperty("m_footName", footName);
-                                }
+                                AddIfNotEmpty(convertedItem, "m_footName", GetFootName((int)footInfo.GetIntegerProperty("m_nFootIndex")));
                             }
                             if (footInfo.ContainsKey("m_nTargetBoneIndex"))
                             {
-                                var boneIndex = (int)footInfo.GetIntegerProperty("m_nTargetBoneIndex");
-                                var boneName = GetBoneName(boneIndex);
-                                if (!string.IsNullOrEmpty(boneName))
-                                {
-                                    convertedItem.AddProperty("m_targetBoneName", boneName);
-                                }
+                                AddIfNotEmpty(convertedItem, "m_targetBoneName", GetBoneName((int)footInfo.GetIntegerProperty("m_nTargetBoneIndex")));
                             }
                             if (footInfo.ContainsKey("m_ikChainIndex"))
                             {
-                                var ikChainIndex = (int)footInfo.GetIntegerProperty("m_ikChainIndex");
-                                var ikChainName = GetIKChainName(ikChainIndex);
-                                if (!string.IsNullOrEmpty(ikChainName))
-                                {
-                                    convertedItem.AddProperty("m_ikChainName", ikChainName);
-                                }
+                                AddIfNotEmpty(convertedItem, "m_ikChainName", GetIKChainName((int)footInfo.GetIntegerProperty("m_ikChainIndex")));
                             }
                             if (footInfo.ContainsKey("m_nTagIndex"))
                             {
-                                var tagIndex = footInfo.GetIntegerProperty("m_nTagIndex");
-                                convertedItem.AddProperty("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(tagIndex)));
+                                convertedItem.Add("m_tag", MakeNodeIdObjectValue(GetTagIdFromIndex(footInfo.GetIntegerProperty("m_nTagIndex"))));
                             }
-                            convertedItem.AddProperty("m_param", MakeNodeIdObjectValue(-1));
-                            if (footInfo.ContainsKey("m_flMaxRotationLeft"))
-                            {
-                                convertedItem.AddProperty("m_flMaxRotationLeft", footInfo.GetFloatProperty("m_flMaxRotationLeft"));
-                            }
-                            if (footInfo.ContainsKey("m_flMaxRotationRight"))
-                            {
-                                convertedItem.AddProperty("m_flMaxRotationRight", footInfo.GetFloatProperty("m_flMaxRotationRight"));
-                            }
+                            convertedItem.Add("m_param", MakeNodeIdObjectValue(-1));
+                            CopyIfPresent(footInfo, convertedItem, "m_flMaxRotationLeft");
+                            CopyIfPresent(footInfo, convertedItem, "m_flMaxRotationRight");
                             footPinningItems.Add(convertedItem);
                         }
                     }
-                    if (poseOpFixedData.ContainsKey("m_flBlendTime"))
-                    {
-                        node.AddProperty("m_flBlendTime", poseOpFixedData.GetFloatProperty("m_flBlendTime"));
-                    }
-                    if (poseOpFixedData.ContainsKey("m_flLockBreakDistance"))
-                    {
-                        node.AddProperty("m_flLockBreakDistance", poseOpFixedData.GetFloatProperty("m_flLockBreakDistance"));
-                    }
-                    if (poseOpFixedData.ContainsKey("m_flMaxLegTwist"))
-                    {
-                        node.AddProperty("m_flMaxLegTwist", poseOpFixedData.GetFloatProperty("m_flMaxLegTwist"));
-                    }
+                    CopyIfPresent(poseOpFixedData, node, "m_flBlendTime");
+                    CopyIfPresent(poseOpFixedData, node, "m_flLockBreakDistance");
+                    CopyIfPresent(poseOpFixedData, node, "m_flMaxLegTwist");
                     if (poseOpFixedData.ContainsKey("m_nHipBoneIndex"))
                     {
-                        var hipBoneIndex = (int)poseOpFixedData.GetIntegerProperty("m_nHipBoneIndex");
-                        var hipBoneName = GetBoneName(hipBoneIndex);
-                        if (!string.IsNullOrEmpty(hipBoneName))
-                        {
-                            node.AddProperty("m_hipBoneName", hipBoneName);
-                        }
+                        AddIfNotEmpty(node, "m_hipBoneName", GetBoneName((int)poseOpFixedData.GetIntegerProperty("m_nHipBoneIndex")));
                     }
-                    if (poseOpFixedData.ContainsKey("m_bApplyLegTwistLimits"))
-                    {
-                        node.AddProperty("m_bApplyLegTwistLimits", poseOpFixedData.GetIntegerProperty("m_bApplyLegTwistLimits") > 0);
-                    }
-                    if (poseOpFixedData.ContainsKey("m_bApplyFootRotationLimits"))
-                    {
-                        node.AddProperty("m_bApplyFootRotationLimits", poseOpFixedData.GetIntegerProperty("m_bApplyFootRotationLimits") > 0);
-                    }
-                    continue;
-                }
-                else if (key == "m_eTimingSource")
-                {
-                    node.AddProperty(key, value);
+                    CopyBoolIfPresent(poseOpFixedData, node, "m_bApplyLegTwistLimits");
+                    CopyBoolIfPresent(poseOpFixedData, node, "m_bApplyFootRotationLimits");
                     continue;
                 }
                 else if (key == "m_params")
                 {
                     var paramHandles = compiledNode.GetArray("m_params");
-                    var itemsArray = node.GetArray("m_items");
-                    var itemsList = itemsArray?.ToList() ?? [];
+                    var existingItems = node.GetArray("m_items");
+                    var itemsList = existingItems?.Count > 0
+                        ? existingItems.ToList()
+                        : footPinningItems ?? [];
 
-                    if (itemsList.Count == 0 && footPinningItems != null && footPinningItems.Count > 0)
+                    for (var i = 0; i < itemsList.Count && i < paramHandles.Count; i++)
                     {
-                        itemsList = footPinningItems;
+                        itemsList[i]["m_param"] = ExtractParameterID(paramHandles[i]);
                     }
 
-                    for (var i = 0; i < itemsList.Count; i++)
-                    {
-                        if (i < paramHandles.Length)
-                        {
-                            var paramHandle = paramHandles[i];
-                            var paramType = paramHandle.GetStringProperty("m_type");
-                            var paramIndex = paramHandle.GetIntegerProperty("m_index");
-                            var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                            itemsList[i].Properties["m_param"] = paramIdValue;
-                        }
-                    }
-
-                    node.AddProperty("m_items", KVValue.MakeArray(itemsList.ToArray()));
+                    node.Add("m_items", MakeArray(itemsList));
                     continue;
                 }
             }
@@ -3769,39 +3443,39 @@ public class AnimationGraphExtract : IDisposable
                     var convertedItems = new List<KVObject>();
                     foreach (var trigger in triggers)
                     {
-                        var convertedItem = new KVObject(null, 3);
+                        var convertedItem = new KVObject();
                         if (trigger.ContainsKey("m_nFootIndex"))
                         {
                             var footIndex = (int)trigger.GetIntegerProperty("m_nFootIndex");
                             var footName = GetFootName(footIndex);
                             if (!string.IsNullOrEmpty(footName))
                             {
-                                convertedItem.AddProperty("m_footName", footName);
+                                convertedItem.Add("m_footName", footName);
                             }
                         }
                         if (trigger.ContainsKey("m_triggerPhase"))
                         {
-                            convertedItem.AddProperty("m_triggerPhase", trigger.GetProperty<string>("m_triggerPhase"));
+                            convertedItem.Add("m_triggerPhase", trigger.GetStringProperty("m_triggerPhase"));
                         }
                         if (trigger.ContainsKey("m_tags"))
                         {
                             try
                             {
                                 var tagIndices = trigger.GetIntegerArray("m_tags");
-                                convertedItem.AddProperty("m_tags", ConvertTagIndicesArray(tagIndices));
+                                convertedItem.Add("m_tags", ConvertTagIndicesArray(tagIndices));
                             }
                             catch (InvalidCastException)
                             {
-                                convertedItem.AddProperty("m_tags", KVValue.MakeArray(Array.Empty<KVObject>()));
+                                convertedItem.Add("m_tags", KVObject.Array());
                             }
                         }
                         else
                         {
-                            convertedItem.AddProperty("m_tags", KVValue.MakeArray(Array.Empty<KVObject>()));
+                            convertedItem.Add("m_tags", KVObject.Array());
                         }
                         convertedItems.Add(convertedItem);
                     }
-                    node.AddProperty("m_items", KVValue.MakeArray(convertedItems.ToArray()));
+                    node.Add("m_items", MakeArray(convertedItems));
                     continue;
                 }
             }
@@ -3809,59 +3483,31 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_opFixedData")
                 {
-                    var opFixedData = subCollection.Value;
+                    var opFixedData = value;
                     if (opFixedData.ContainsKey("m_boneSettings"))
                     {
                         var boneSettingsArray = opFixedData.GetArray("m_boneSettings");
                         var convertedItems = new List<KVObject>();
                         foreach (var boneSetting in boneSettingsArray)
                         {
-                            var convertedItem = new KVObject(null, 7);
+                            var convertedItem = new KVObject();
                             if (boneSetting.ContainsKey("m_nBoneIndex"))
                             {
-                                var boneIndex = (int)boneSetting.GetIntegerProperty("m_nBoneIndex");
-                                var boneName = GetBoneName(boneIndex);
-                                if (!string.IsNullOrEmpty(boneName))
-                                {
-                                    convertedItem.AddProperty("m_boneName", boneName);
-                                }
+                                AddIfNotEmpty(convertedItem, "m_boneName", GetBoneName((int)boneSetting.GetIntegerProperty("m_nBoneIndex")));
                             }
-                            if (boneSetting.ContainsKey("m_flSpringStrength"))
-                            {
-                                convertedItem.AddProperty("m_flSpringStrength", boneSetting.GetFloatProperty("m_flSpringStrength"));
-                            }
+                            CopyIfPresent(boneSetting, convertedItem, "m_flSpringStrength");
                             if (boneSetting.ContainsKey("m_flMaxTimeStep"))
                             {
                                 var maxTimeStep = boneSetting.GetFloatProperty("m_flMaxTimeStep");
-                                if (maxTimeStep > 0)
-                                {
-                                    var simRateFPS = 1.0f / maxTimeStep;
-                                    convertedItem.AddProperty("m_flSimRateFPS", simRateFPS);
-                                }
-                                else
-                                {
-                                    convertedItem.AddProperty("m_flSimRateFPS", 90.0f);
-                                }
+                                convertedItem.Add("m_flSimRateFPS", maxTimeStep > 0 ? 1.0f / maxTimeStep : 90.0f);
                             }
-                            if (boneSetting.ContainsKey("m_flDamping"))
-                            {
-                                convertedItem.AddProperty("m_flDamping", boneSetting.GetFloatProperty("m_flDamping"));
-                            }
-                            if (boneSetting.ContainsKey("m_eSimSpace"))
-                            {
-                                convertedItem.AddProperty("m_eSimSpace", boneSetting.GetProperty<string>("m_eSimSpace"));
-                            }
-                            if (boneSetting.ContainsKey("m_vBoundsMaxLS"))
-                            {
-                                convertedItem.AddProperty("m_vBoundsMaxLS", boneSetting.GetSubCollection("m_vBoundsMaxLS"));
-                            }
-                            if (boneSetting.ContainsKey("m_vBoundsMinLS"))
-                            {
-                                convertedItem.AddProperty("m_vBoundsMinLS", boneSetting.GetSubCollection("m_vBoundsMinLS"));
-                            }
+                            CopyIfPresent(boneSetting, convertedItem, "m_flDamping");
+                            CopyIfPresent(boneSetting, convertedItem, "m_eSimSpace");
+                            CopyIfPresent(boneSetting, convertedItem, "m_vBoundsMaxLS");
+                            CopyIfPresent(boneSetting, convertedItem, "m_vBoundsMinLS");
                             convertedItems.Add(convertedItem);
                         }
-                        node.AddProperty("m_items", KVValue.MakeArray(convertedItems.ToArray()));
+                        node.Add("m_items", MakeArray(convertedItems));
                     }
                     continue;
                 }
@@ -3870,54 +3516,14 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_hSequence")
-                {
-                    var sequenceIndex = compiledNode.GetIntegerProperty("m_hSequence");
-                    var sequenceName = GetSequenceName(sequenceIndex);
-                    node.AddProperty("m_sequenceName", sequenceName);
-                    continue;
-                }
-                else if (key == "m_hTargetParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                    node.AddProperty("m_targetParamID", paramIdValue);
-                    continue;
-                }
-                else if (key == "m_flJumpStartCycle")
-                {
-                    node.AddProperty(key, value);
+                    node.Add("m_sName", value.ToString() ?? "Unnamed");
                     continue;
                 }
                 else if (key == "m_flJumpEndCycle")
                 {
-                    var jumpStart = compiledNode.GetFloatProperty("m_flJumpStartCycle");
-                    var jumpEnd = compiledNode.GetFloatProperty("m_flJumpEndCycle");
-                    var jumpDuration = jumpEnd - jumpStart;
-                    node.AddProperty("m_flJumpDuration", jumpDuration);
-                    continue;
-                }
-                else if (key == "m_flOriginalJumpDuration")
-                {
-                    continue;
-                }
-                else if (key == "m_flOriginalJumpMovement")
-                {
-                    continue;
-                }
-                else if (key == "m_bScaleSpeed" || key == "m_playbackSpeed" || key == "m_bLoop" || key == "m_eCorrectionMethod")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_duration")
-                {
+                    var jumpDuration = compiledNode.GetFloatProperty("m_flJumpEndCycle")
+                        - compiledNode.GetFloatProperty("m_flJumpStartCycle");
+                    node.Add("m_flJumpDuration", jumpDuration);
                     continue;
                 }
                 else if (key == "m_tags")
@@ -3925,11 +3531,11 @@ public class AnimationGraphExtract : IDisposable
                     try
                     {
                         var tagIndices = compiledNode.GetIntegerArray("m_tags");
-                        node.AddProperty("m_tagSpans", ConvertTagIndicesArray(tagIndices));
+                        node.Add("m_tagSpans", ConvertTagIndicesArray(tagIndices));
                     }
                     catch (InvalidCastException)
                     {
-                        node.AddProperty("m_tagSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
+                        node.Add("m_tagSpans", KVObject.Array());
                     }
                     continue;
                 }
@@ -3937,54 +3543,11 @@ public class AnimationGraphExtract : IDisposable
                 {
                     try
                     {
-                        var compiledParamSpans = compiledNode.GetSubCollection("m_paramSpans");
-
-                        if (compiledParamSpans is not null && compiledParamSpans.ContainsKey("m_spans"))
-                        {
-                            var compiledSpans = compiledParamSpans.GetArray("m_spans");
-                            var paramSpans = new List<KVObject>();
-
-                            foreach (var compiledSpan in compiledSpans)
-                            {
-                                var paramSpan = MakeNode("CAnimParamSpan");
-
-                                if (compiledSpan.ContainsKey("m_samples"))
-                                {
-                                    paramSpan.AddProperty("m_samples", compiledSpan.GetProperty<KVObject>("m_samples"));
-                                }
-
-                                if (compiledSpan.ContainsKey("m_hParam"))
-                                {
-                                    var paramHandle = compiledSpan.GetSubCollection("m_hParam");
-                                    var paramType = paramHandle.GetStringProperty("m_type");
-                                    var paramIndex = paramHandle.GetIntegerProperty("m_index");
-                                    var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                                    paramSpan.AddProperty("m_id", paramIdValue);
-                                }
-
-                                if (compiledSpan.ContainsKey("m_flStartCycle"))
-                                {
-                                    paramSpan.AddProperty("m_flStartCycle", compiledSpan.GetFloatProperty("m_flStartCycle"));
-                                }
-
-                                if (compiledSpan.ContainsKey("m_flEndCycle"))
-                                {
-                                    paramSpan.AddProperty("m_flEndCycle", compiledSpan.GetFloatProperty("m_flEndCycle"));
-                                }
-
-                                paramSpans.Add(paramSpan);
-                            }
-
-                            node.AddProperty("m_paramSpans", KVValue.MakeArray(paramSpans.ToArray()));
-                        }
-                        else
-                        {
-                            node.AddProperty("m_paramSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
-                        }
+                        node.Add("m_paramSpans", ConvertParamSpans(compiledNode.GetSubCollection("m_paramSpans")));
                     }
                     catch
                     {
-                        node.AddProperty("m_paramSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
+                        node.Add("m_paramSpans", KVObject.Array());
                     }
                     continue;
                 }
@@ -3993,621 +3556,238 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_hSequence")
-                {
-                    var sequenceIndex = compiledNode.GetIntegerProperty("m_hSequence");
-                    var sequenceName = GetSequenceName(sequenceIndex);
-                    node.AddProperty("m_sequenceName", sequenceName);
-                    continue;
-                }
-                else if (key == "m_paramIndex")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                    node.AddProperty("m_param", paramIdValue);
-                    continue;
-                }
-                else if (key == "m_verticalAxis")
-                {
-                    node.AddProperty("m_verticalAxisDirection", value);
-                    continue;
-                }
-                else if (key == "m_horizontalAxis")
-                {
-                    node.AddProperty("m_horizontalAxisDirection", value);
-                    continue;
-                }
-                else if (key == "m_damping")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_blendSource")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_flMaxValue")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_frameCorners" || key == "m_poses" || key == "m_nSequenceMaxFrame")
-                {
+                    node.Add("m_sName", value.ToString() ?? "Unnamed");
                     continue;
                 }
             }
             else if (className == "CLookAt")
             {
-                if (key == "m_name")
+                if (key == "m_opFixedSettings")
                 {
-                    node.AddProperty("m_sName", value);
-                    continue;
-                }
-                else if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_target")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_paramIndex")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                    node.AddProperty("m_param", paramIdValue);
-                    continue;
-                }
-                else if (key == "m_weightParamIndex")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                    node.AddProperty("m_weightParam", paramIdValue);
-                    continue;
-                }
-                else if (key == "m_opFixedSettings")
-                {
-                    var opFixedSettings = subCollection.Value;
-                    if (opFixedSettings.ContainsKey("m_bones"))
-                    {
-                        var lookAtChainName = FindMatchingLookAtChainName(opFixedSettings);
-                        node.AddProperty("m_lookatChainName", lookAtChainName);
-                    }
-                    else
-                    {
-                        node.AddProperty("m_lookatChainName", "");
-                    }
-                    if (opFixedSettings.ContainsKey("m_attachment"))
-                    {
-                        var attachment = opFixedSettings.GetSubCollection("m_attachment");
-                        var attachmentName = FindMatchingAttachmentName(attachment);
-                        node.AddProperty("m_attachmentName", attachmentName);
-                    }
-                    else
-                    {
-                        node.AddProperty("m_attachmentName", "aim");
-                    }
-                    if (opFixedSettings.ContainsKey("m_flYawLimit"))
-                    {
-                        node.AddProperty("m_flYawLimit", opFixedSettings.GetFloatProperty("m_flYawLimit"));
-                    }
-                    if (opFixedSettings.ContainsKey("m_flPitchLimit"))
-                    {
-                        node.AddProperty("m_flPitchLimit", opFixedSettings.GetFloatProperty("m_flPitchLimit"));
-                    }
-                    if (opFixedSettings.ContainsKey("m_flHysteresisInnerAngle"))
-                    {
-                        node.AddProperty("m_flHysteresisInnerAngle", opFixedSettings.GetFloatProperty("m_flHysteresisInnerAngle"));
-                    }
-                    if (opFixedSettings.ContainsKey("m_flHysteresisOuterAngle"))
-                    {
-                        node.AddProperty("m_flHysteresisOuterAngle", opFixedSettings.GetFloatProperty("m_flHysteresisOuterAngle"));
-                    }
-                    if (opFixedSettings.ContainsKey("m_bRotateYawForward"))
-                    {
-                        node.AddProperty("m_bRotateYawForward", opFixedSettings.GetIntegerProperty("m_bRotateYawForward") > 0);
-                    }
-                    if (opFixedSettings.ContainsKey("m_bMaintainUpDirection"))
-                    {
-                        node.AddProperty("m_bMaintainUpDirection", opFixedSettings.GetIntegerProperty("m_bMaintainUpDirection") > 0);
-                    }
-                    if (opFixedSettings.ContainsKey("m_bTargetIsPosition"))
-                    {
-                        node.AddProperty("m_bIsPosition", opFixedSettings.GetIntegerProperty("m_bTargetIsPosition") > 0);
-                    }
-                    if (opFixedSettings.ContainsKey("m_bUseHysteresis"))
-                    {
-                        node.AddProperty("m_bUseHysteresis", opFixedSettings.GetIntegerProperty("m_bUseHysteresis") > 0);
-                    }
-                    if (opFixedSettings.ContainsKey("m_damping"))
-                    {
-                        node.AddProperty("m_damping", opFixedSettings.GetSubCollection("m_damping"));
-                    }
-                    continue;
-                }
-                else if (key == "m_bResetChild")
-                {
-                    node.AddProperty("m_bResetBase", value);
-                    continue;
-                }
-                else if (key == "m_bLockWhenWaning")
-                {
-                    node.AddProperty(key, value);
+                    var opFixedSettings = value;
+                    node.Add("m_lookatChainName", opFixedSettings.ContainsKey("m_bones")
+                        ? FindMatchingLookAtChainName(opFixedSettings)
+                        : "");
+                    node.Add("m_attachmentName", opFixedSettings.ContainsKey("m_attachment")
+                        ? FindMatchingAttachmentName(opFixedSettings.GetSubCollection("m_attachment"))
+                        : "aim");
+                    CopyIfPresent(opFixedSettings, node, "m_flYawLimit");
+                    CopyIfPresent(opFixedSettings, node, "m_flPitchLimit");
+                    CopyIfPresent(opFixedSettings, node, "m_flHysteresisInnerAngle");
+                    CopyIfPresent(opFixedSettings, node, "m_flHysteresisOuterAngle");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bRotateYawForward");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bMaintainUpDirection");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bTargetIsPosition", "m_bIsPosition");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bUseHysteresis");
+                    CopyIfPresent(opFixedSettings, node, "m_damping");
                     continue;
                 }
             }
             else if (className == "CHitReact")
             {
-                if (key == "m_pChildNode")
+                if (key == "m_opFixedSettings")
                 {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_opFixedSettings")
-                {
-                    var opFixedSettings = subCollection.Value;
+                    var opFixedSettings = value;
                     if (opFixedSettings.ContainsKey("m_nWeightListIndex"))
                     {
-                        var weightListIndex = opFixedSettings.GetIntegerProperty("m_nWeightListIndex");
-                        var weightListName = GetWeightListName(weightListIndex);
-                        node.AddProperty("m_weightListName", weightListName);
+                        node.Add("m_weightListName", GetWeightListName(opFixedSettings.GetIntegerProperty("m_nWeightListIndex")));
                     }
                     if (opFixedSettings.ContainsKey("m_nHipBoneIndex"))
                     {
-                        var hipBoneIndex = (int)opFixedSettings.GetIntegerProperty("m_nHipBoneIndex");
-                        var hipBoneName = GetBoneName(hipBoneIndex);
-                        if (!string.IsNullOrEmpty(hipBoneName))
-                        {
-                            node.AddProperty("m_hipBoneName", hipBoneName);
-                        }
+                        AddIfNotEmpty(node, "m_hipBoneName", GetBoneName((int)opFixedSettings.GetIntegerProperty("m_nHipBoneIndex")));
                     }
-                    var settingsToCopy = new[]
-                    {
-                    "m_nEffectedBoneCount",
-                    "m_flMaxImpactForce",
-                    "m_flMinImpactForce",
-                    "m_flWhipImpactScale",
-                    "m_flCounterRotationScale",
-                    "m_flDistanceFadeScale",
-                    "m_flPropagationScale",
-                    "m_flWhipDelay",
-                    "m_flSpringStrength",
-                    "m_flWhipSpringStrength",
-                    "m_flMaxAngleRadians",
-                    "m_flHipBoneTranslationScale",
-                    "m_flHipDipSpringStrength",
-                    "m_flHipDipImpactScale",
-                    "m_flHipDipDelay"
-                };
-
+                    string[] settingsToCopy =
+                    [
+                        "m_nEffectedBoneCount",
+                        "m_flMaxImpactForce",
+                        "m_flMinImpactForce",
+                        "m_flWhipImpactScale",
+                        "m_flCounterRotationScale",
+                        "m_flDistanceFadeScale",
+                        "m_flPropagationScale",
+                        "m_flWhipDelay",
+                        "m_flSpringStrength",
+                        "m_flWhipSpringStrength",
+                        "m_flMaxAngleRadians",
+                        "m_flHipBoneTranslationScale",
+                        "m_flHipDipSpringStrength",
+                        "m_flHipDipImpactScale",
+                        "m_flHipDipDelay",
+                    ];
                     foreach (var settingKey in settingsToCopy)
                     {
-                        if (opFixedSettings.ContainsKey(settingKey))
-                        {
-                            node.AddProperty(settingKey, opFixedSettings.GetProperty<object>(settingKey));
-                        }
+                        CopyIfPresent(opFixedSettings, node, settingKey);
                     }
-                    continue;
-                }
-                else if (key == "m_triggerParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty(key, ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hitBoneParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty(key, ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hitOffsetParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty(key, ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hitDirectionParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty(key, ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hitStrengthParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty(key, ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_flMinDelayBetweenHits")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_bResetChild")
-                {
-                    node.AddProperty("m_bResetBase", value);
                     continue;
                 }
             }
             else if (className == "CSolveIKChain")
             {
-                if (key == "m_pChildNode")
+                if (key == "m_opFixedData")
                 {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_targetHandles")
-                {
-                    continue;
-                }
-                else if (key == "m_opFixedData")
-                {
-                    var opFixedData = subCollection.Value;
+                    var opFixedData = value;
                     var chainsToSolveData = opFixedData.GetArray("m_ChainsToSolveData");
                     var targetHandles = compiledNode.GetArray("m_targetHandles");
 
                     var ikChainsArray = new List<KVObject>();
 
-                    for (var i = 0; i < chainsToSolveData.Length; i++)
+                    for (var i = 0; i < chainsToSolveData.Count; i++)
                     {
                         var chainData = chainsToSolveData[i];
-                        var targetHandle = i < targetHandles.Length ? targetHandles[i] : null;
+                        var targetHandle = i < targetHandles.Count ? targetHandles[i] : null;
 
-                        var ikChain = new KVObject(null);
-                        ikChain.AddProperty("_class", "CSolveIKChainAnimNodeChainData");
+                        var ikChain = new KVObject();
+                        ikChain.Add("_class", "CSolveIKChainAnimNodeChainData");
 
                         if (chainData.ContainsKey("m_nChainIndex"))
                         {
-                            var chainIndex = (int)chainData.GetIntegerProperty("m_nChainIndex");
-                            var chainName = GetIKChainName(chainIndex);
-                            ikChain.AddProperty("m_IkChain", chainName);
+                            ikChain.Add("m_IkChain", GetIKChainName((int)chainData.GetIntegerProperty("m_nChainIndex")));
                         }
 
-                        ikChain.AddProperty("m_SolverSettingSource", "SOLVEIKCHAINANIMNODESETTINGSOURCE_Default");
+                        ikChain.Add("m_SolverSettingSource", "SOLVEIKCHAINANIMNODESETTINGSOURCE_Default");
 
                         if (chainData.ContainsKey("m_SolverSettings"))
                         {
                             var solverSettings = chainData.GetSubCollection("m_SolverSettings");
-                            var overrideSolverSettings = new KVObject(null);
-
-                            if (solverSettings.ContainsKey("m_SolverType"))
-                            {
-                                overrideSolverSettings.AddProperty("m_SolverType", solverSettings.GetProperty<string>("m_SolverType"));
-                            }
-
-                            ikChain.AddProperty("m_OverrideSolverSettings", overrideSolverSettings);
+                            var overrideSolverSettings = new KVObject();
+                            CopyIfPresent(solverSettings, overrideSolverSettings, "m_SolverType");
+                            ikChain.Add("m_OverrideSolverSettings", overrideSolverSettings);
                         }
 
-                        ikChain.AddProperty("m_TargetSettingSource", "SOLVEIKCHAINANIMNODESETTINGSOURCE_Default");
+                        ikChain.Add("m_TargetSettingSource", "SOLVEIKCHAINANIMNODESETTINGSOURCE_Default");
 
                         if (chainData.ContainsKey("m_TargetSettings"))
                         {
                             var targetSettings = chainData.GetSubCollection("m_TargetSettings");
-                            var overrideTargetSettings = new KVObject(null);
+                            var overrideTargetSettings = new KVObject();
 
-                            if (targetSettings.ContainsKey("m_TargetSource"))
-                            {
-                                overrideTargetSettings.AddProperty("m_TargetSource", targetSettings.GetProperty<string>("m_TargetSource"));
-                            }
+                            CopyIfPresent(targetSettings, overrideTargetSettings, "m_TargetSource");
 
                             if (targetSettings.ContainsKey("m_Bone"))
                             {
-                                var boneSettings = targetSettings.GetSubCollection("m_Bone");
-                                var boneNameObj = new KVObject(null);
-                                boneNameObj.AddProperty("m_Name", boneSettings.GetStringProperty("m_Name"));
-                                overrideTargetSettings.AddProperty("m_Bone", boneNameObj);
+                                var boneNameObj = new KVObject();
+                                boneNameObj.Add("m_Name", targetSettings.GetSubCollection("m_Bone").GetStringProperty("m_Name"));
+                                overrideTargetSettings.Add("m_Bone", boneNameObj);
                             }
 
                             if (targetHandle != null)
                             {
-                                var positionHandle = targetHandle.GetSubCollection("m_positionHandle");
-                                var positionParamType = positionHandle.GetStringProperty("m_type");
-                                var positionParamIndex = positionHandle.GetIntegerProperty("m_index");
-                                overrideTargetSettings.AddProperty("m_AnimgraphParameterNamePosition",
-                                    ParameterIDFromIndex(positionParamType, positionParamIndex));
-
-                                var orientationHandle = targetHandle.GetSubCollection("m_orientationHandle");
-                                var orientationParamType = orientationHandle.GetStringProperty("m_type");
-                                var orientationParamIndex = orientationHandle.GetIntegerProperty("m_index");
-                                overrideTargetSettings.AddProperty("m_AnimgraphParameterNameOrientation",
-                                    ParameterIDFromIndex(orientationParamType, orientationParamIndex));
+                                overrideTargetSettings.Add("m_AnimgraphParameterNamePosition",
+                                    ExtractParameterID(targetHandle.GetSubCollection("m_positionHandle")));
+                                overrideTargetSettings.Add("m_AnimgraphParameterNameOrientation",
+                                    ExtractParameterID(targetHandle.GetSubCollection("m_orientationHandle")));
                             }
                             else
                             {
-                                overrideTargetSettings.AddProperty("m_AnimgraphParameterNamePosition", MakeNodeIdObjectValue(-1));
-                                overrideTargetSettings.AddProperty("m_AnimgraphParameterNameOrientation", MakeNodeIdObjectValue(-1));
+                                overrideTargetSettings.Add("m_AnimgraphParameterNamePosition", MakeNodeIdObjectValue(-1));
+                                overrideTargetSettings.Add("m_AnimgraphParameterNameOrientation", MakeNodeIdObjectValue(-1));
                             }
 
-                            if (targetSettings.ContainsKey("m_TargetCoordSystem"))
-                            {
-                                overrideTargetSettings.AddProperty("m_TargetCoordSystem", targetSettings.GetProperty<string>("m_TargetCoordSystem"));
-                            }
+                            CopyIfPresent(targetSettings, overrideTargetSettings, "m_TargetCoordSystem");
 
-                            ikChain.AddProperty("m_OverrideTargetSettings", overrideTargetSettings);
+                            ikChain.Add("m_OverrideTargetSettings", overrideTargetSettings);
                         }
 
-                        if (chainData.ContainsKey("m_DebugSetting"))
-                        {
-                            ikChain.AddProperty("m_DebugSetting", chainData.GetProperty<string>("m_DebugSetting"));
-                        }
-
-                        if (chainData.ContainsKey("m_flDebugNormalizedValue"))
-                        {
-                            ikChain.AddProperty("m_flDebugNormalizedLength", chainData.GetFloatProperty("m_flDebugNormalizedValue"));
-                        }
-
-                        if (chainData.ContainsKey("m_vDebugOffset"))
-                        {
-                            ikChain.AddProperty("m_vDebugOffset", chainData.GetSubCollection("m_vDebugOffset"));
-                        }
+                        CopyIfPresent(chainData, ikChain, "m_DebugSetting");
+                        CopyIfPresent(chainData, ikChain, "m_flDebugNormalizedValue", "m_flDebugNormalizedLength");
+                        CopyIfPresent(chainData, ikChain, "m_vDebugOffset");
 
                         ikChainsArray.Add(ikChain);
                     }
 
-                    node.AddProperty("m_IkChains", KVValue.MakeArray(ikChainsArray.ToArray()));
+                    node.Add("m_IkChains", MakeArray(ikChainsArray));
 
-                    if (opFixedData.ContainsKey("m_bMatchTargetOrientation"))
-                    {
-                        node.AddProperty("m_bMatchTargetOrientation", opFixedData.GetIntegerProperty("m_bMatchTargetOrientation") > 0);
-                    }
+                    CopyBoolIfPresent(opFixedData, node, "m_bMatchTargetOrientation");
 
                     continue;
                 }
             }
             else if (className == "CStanceOverride")
             {
-                if (key == "m_pChildNode")
+                if (key == "m_pStanceSourceNode")
                 {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_pStanceSourceNode")
-                {
-                    var stanceSourceNodeId = subCollection.Value.GetIntegerProperty("m_nodeIndex");
-                    if (stanceSourceNodeId != -1)
+                    var stanceSourceNodeId = value.GetIntegerProperty("m_nodeIndex");
+                    if (stanceSourceNodeId != -1 && nodeIndexToIdMap?.TryGetValue(stanceSourceNodeId, out var mappedNodeId) == true)
                     {
-                        if (nodeIndexToIdMap?.TryGetValue(stanceSourceNodeId, out var mappedNodeId) == true)
-                        {
-                            var stanceSourceConnection = MakeInputConnection(mappedNodeId);
-                            node.AddProperty("m_stanceSourceConnection", stanceSourceConnection);
-                        }
+                        node.Add("m_stanceSourceConnection", MakeInputConnection(mappedNodeId));
                     }
-                    else
+                    else if (stanceSourceNodeId == -1)
                     {
-                        var emptyConnection = MakeInputConnection(-1);
-                        node.AddProperty("m_stanceSourceConnection", emptyConnection);
+                        node.Add("m_stanceSourceConnection", MakeInputConnection(-1));
                     }
-                    continue;
-                }
-                else if (key == "m_hParameter")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_blendParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_eMode")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_footStanceInfo")
-                {
                     continue;
                 }
                 else if (key == "m_opFixedData")
                 {
-                    var opFixedData = subCollection.Value;
-                    if (opFixedData.ContainsKey("m_nFrameIndex"))
-                    {
-                        var frameIndex = opFixedData.GetIntegerProperty("m_nFrameIndex");
-                        node.AddProperty("m_nFrameIndex", frameIndex);
-                    }
+                    CopyIfPresent(value, node, "m_nFrameIndex");
                     continue;
                 }
-                if (!node.Properties.ContainsKey("m_sequenceName"))
+                if (!node.ContainsKey("m_sequenceName"))
                 {
-                    node.AddProperty("m_sequenceName", "");
+                    node.Add("m_sequenceName", "");
                 }
-                if (!node.Properties.ContainsKey("m_nFrameIndex"))
+                if (!node.ContainsKey("m_nFrameIndex"))
                 {
-                    node.AddProperty("m_nFrameIndex", 0);
+                    node.Add("m_nFrameIndex", 0);
                 }
             }
             else if (className == "CSkeletalInput")
             {
-                if (!node.Properties.ContainsKey("m_transformSource"))
+                if (!node.ContainsKey("m_transformSource"))
                 {
-                    node.AddProperty("m_transformSource", "AnimVrBoneTransformSource_LiveStream");
+                    node.Add("m_transformSource", "AnimVrBoneTransformSource_LiveStream");
                 }
-                if (!node.Properties.ContainsKey("m_motionRange"))
+                if (!node.ContainsKey("m_motionRange"))
                 {
-                    node.AddProperty("m_motionRange", "MotionRange_WithController");
+                    node.Add("m_motionRange", "MotionRange_WithController");
                 }
-                if (!node.Properties.ContainsKey("m_bEnableIK"))
+                if (!node.ContainsKey("m_bEnableIK"))
                 {
-                    node.AddProperty("m_bEnableIK", true);
+                    node.Add("m_bEnableIK", true);
                 }
-                if (!node.Properties.ContainsKey("m_bEnableCollision"))
+                if (!node.ContainsKey("m_bEnableCollision"))
                 {
-                    node.AddProperty("m_bEnableCollision", true);
-                }
-            }
-            else if (className == "CStopAtGoal")
-            {
-                if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_flOuterRadius" || key == "m_flInnerRadius" ||
-                         key == "m_flMaxScale" || key == "m_flMinScale")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                else if (key == "m_damping")
-                {
-                    node.AddProperty(key, value);
-                    continue;
+                    node.Add("m_bEnableCollision", true);
                 }
             }
             else if (className == "CFootLock")
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_pChildNode")
-                {
-                    var childNodeIndex = subCollection.Value.GetIntegerProperty("m_nodeIndex");
-                    if (nodeIndexToIdMap?.TryGetValue(childNodeIndex, out var childNodeId) == true)
-                    {
-                        var connection = MakeInputConnection(childNodeId);
-                        node.AddProperty("m_inputConnection", connection);
-                    }
+                    var nameValue = value.ToString() ?? "Unnamed";
+                    node.Add("m_sName", nameValue);
                     continue;
                 }
                 else if (key == "m_opFixedSettings")
                 {
-                    var opFixedSettings = subCollection.Value;
+                    var opFixedSettings = value;
 
                     if (opFixedSettings.ContainsKey("m_nHipBoneIndex"))
                     {
-                        var hipBoneIndex = (int)opFixedSettings.GetIntegerProperty("m_nHipBoneIndex");
-                        var hipBoneName = GetBoneName(hipBoneIndex);
-                        if (!string.IsNullOrEmpty(hipBoneName))
-                        {
-                            node.AddProperty("m_hipBoneName", hipBoneName);
-                        }
+                        AddIfNotEmpty(node, "m_hipBoneName", GetBoneName((int)opFixedSettings.GetIntegerProperty("m_nHipBoneIndex")));
                     }
 
-                    if (opFixedSettings.ContainsKey("m_ikSolverType"))
+                    CopyIfPresent(opFixedSettings, node, "m_ikSolverType");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bAlwaysUseFallbackHinge");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bApplyLegTwistLimits");
+                    CopyIfPresent(opFixedSettings, node, "m_flMaxLegTwist");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bApplyTilt");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bApplyHipDrop");
+
+                    if (opFixedSettings.ContainsKey("m_bApplyFootRotationLimits") && !node.ContainsKey("m_bApplyFootRotationLimits"))
                     {
-                        node.AddProperty("m_ikSolverType", opFixedSettings.GetProperty<string>("m_ikSolverType"));
+                        node.Add("m_bApplyFootRotationLimits", opFixedSettings.GetIntegerProperty("m_bApplyFootRotationLimits") > 0);
                     }
 
-                    if (opFixedSettings.ContainsKey("m_bAlwaysUseFallbackHinge"))
-                    {
-                        node.AddProperty("m_bAlwaysUseFallbackHinge", opFixedSettings.GetIntegerProperty("m_bAlwaysUseFallbackHinge") > 0);
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_bApplyLegTwistLimits"))
-                    {
-                        node.AddProperty("m_bApplyLegTwistLimits", opFixedSettings.GetIntegerProperty("m_bApplyLegTwistLimits") > 0);
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flMaxLegTwist"))
-                    {
-                        node.AddProperty("m_flMaxLegTwist", opFixedSettings.GetFloatProperty("m_flMaxLegTwist"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_bApplyTilt"))
-                    {
-                        node.AddProperty("m_bApplyTilt", opFixedSettings.GetIntegerProperty("m_bApplyTilt") > 0);
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_bApplyHipDrop"))
-                    {
-                        node.AddProperty("m_bApplyHipDrop", opFixedSettings.GetIntegerProperty("m_bApplyHipDrop") > 0);
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_bApplyFootRotationLimits") && !node.Properties.ContainsKey("m_bApplyFootRotationLimits"))
-                    {
-                        node.AddProperty("m_bApplyFootRotationLimits", opFixedSettings.GetIntegerProperty("m_bApplyFootRotationLimits") > 0);
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flMaxFootHeight"))
-                    {
-                        node.AddProperty("m_flMaxFootHeight", opFixedSettings.GetFloatProperty("m_flMaxFootHeight"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flExtensionScale"))
-                    {
-                        node.AddProperty("m_flExtensionScale", opFixedSettings.GetFloatProperty("m_flExtensionScale"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_bEnableLockBreaking"))
-                    {
-                        node.AddProperty("m_bEnableLockBreaking", opFixedSettings.GetIntegerProperty("m_bEnableLockBreaking") > 0);
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flLockBreakTolerance"))
-                    {
-                        node.AddProperty("m_flLockBreakTolerance", opFixedSettings.GetFloatProperty("m_flLockBreakTolerance"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flLockBlendTime"))
-                    {
-                        node.AddProperty("m_flLockBreakBlendTime", opFixedSettings.GetFloatProperty("m_flLockBlendTime"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_bEnableStretching"))
-                    {
-                        node.AddProperty("m_bEnableStretching", opFixedSettings.GetIntegerProperty("m_bEnableStretching") > 0);
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flMaxStretchAmount"))
-                    {
-                        node.AddProperty("m_flMaxStretchAmount", opFixedSettings.GetFloatProperty("m_flMaxStretchAmount"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_flStretchExtensionScale"))
-                    {
-                        node.AddProperty("m_flStretchExtensionScale", opFixedSettings.GetFloatProperty("m_flStretchExtensionScale"));
-                    }
-
-                    if (opFixedSettings.ContainsKey("m_hipDampingSettings"))
-                    {
-                        node.AddProperty("m_hipDampingSettings", opFixedSettings.GetSubCollection("m_hipDampingSettings"));
-                    }
+                    CopyIfPresent(opFixedSettings, node, "m_flMaxFootHeight");
+                    CopyIfPresent(opFixedSettings, node, "m_flExtensionScale");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bEnableLockBreaking");
+                    CopyIfPresent(opFixedSettings, node, "m_flLockBreakTolerance");
+                    CopyIfPresent(opFixedSettings, node, "m_flLockBlendTime", "m_flLockBreakBlendTime");
+                    CopyBoolIfPresent(opFixedSettings, node, "m_bEnableStretching");
+                    CopyIfPresent(opFixedSettings, node, "m_flMaxStretchAmount");
+                    CopyIfPresent(opFixedSettings, node, "m_flStretchExtensionScale");
+                    CopyIfPresent(opFixedSettings, node, "m_hipDampingSettings");
                     continue;
                 }
                 else if (key == "m_footSettings")
@@ -4621,81 +3801,56 @@ public class AnimationGraphExtract : IDisposable
                     var firstFootHasGroundTracing = false;
                     var firstFootTraceAngleBlend = 0.0f;
 
-                    for (var i = 0; i < footSettings.Length; i++)
+                    for (var i = 0; i < footSettings.Count; i++)
                     {
                         var footSetting = footSettings[i];
-                        var footInfo = footInfoArray != null && i < footInfoArray.Length ? footInfoArray[i] : null;
+                        var footInfo = footInfoArray != null && i < footInfoArray.Count ? footInfoArray[i] : null;
 
-                        var item = new KVObject(null, 8);
+                        var item = new KVObject();
 
                         if (footSetting.ContainsKey("m_nFootIndex"))
                         {
-                            var footIndex = (int)footSetting.GetIntegerProperty("m_nFootIndex");
-                            var footName = GetFootName(footIndex);
-                            if (!string.IsNullOrEmpty(footName))
-                            {
-                                item.AddProperty("m_footName", footName);
-                            }
+                            AddIfNotEmpty(item, "m_footName", GetFootName((int)footSetting.GetIntegerProperty("m_nFootIndex")));
                         }
 
-                        if (footInfo != null && footInfo.ContainsKey("m_nTargetBoneIndex"))
+                        if (footInfo?.ContainsKey("m_nTargetBoneIndex") == true)
                         {
-                            var targetBoneIndex = (int)footInfo.GetIntegerProperty("m_nTargetBoneIndex");
-                            var targetBoneName = GetBoneName(targetBoneIndex);
-                            if (!string.IsNullOrEmpty(targetBoneName))
-                            {
-                                item.AddProperty("m_targetBoneName", targetBoneName);
-                            }
+                            AddIfNotEmpty(item, "m_targetBoneName", GetBoneName((int)footInfo.GetIntegerProperty("m_nTargetBoneIndex")));
                         }
 
-                        if (footInfo != null && footInfo.ContainsKey("m_ikChainIndex"))
+                        if (footInfo?.ContainsKey("m_ikChainIndex") == true)
                         {
-                            var ikChainIndex = (int)footInfo.GetIntegerProperty("m_ikChainIndex");
-                            var ikChainName = GetIKChainName(ikChainIndex);
-                            if (!string.IsNullOrEmpty(ikChainName))
-                            {
-                                item.AddProperty("m_ikChainName", ikChainName);
-                            }
+                            AddIfNotEmpty(item, "m_ikChainName", GetIKChainName((int)footInfo.GetIntegerProperty("m_ikChainIndex")));
                         }
 
                         if (footSetting.ContainsKey("m_nDisableTagIndex"))
                         {
-                            var tagIndex = footSetting.GetIntegerProperty("m_nDisableTagIndex");
-                            var tagId = -1L;
-                            if (tagIndex >= 0 && tagIndex < Tags.Length)
-                            {
-                                tagId = Tags[tagIndex].GetSubCollection("m_tagID").GetIntegerProperty("m_id");
-                            }
-                            item.AddProperty("m_disableTagID", MakeNodeIdObjectValue(tagId));
+                            item.Add("m_disableTagID",
+                                MakeNodeIdObjectValue(GetTagIdFromIndex(footSetting.GetIntegerProperty("m_nDisableTagIndex"))));
                         }
 
                         if (footSetting.ContainsKey("m_footstepLandedTagIndex"))
                         {
-                            var tagIndex = footSetting.GetIntegerProperty("m_footstepLandedTagIndex");
-                            var tagId = -1L;
-                            if (tagIndex >= 0 && tagIndex < Tags.Length)
-                            {
-                                tagId = Tags[tagIndex].GetSubCollection("m_tagID").GetIntegerProperty("m_id");
-                            }
-                            item.AddProperty("m_footstepLandedTag", MakeNodeIdObjectValue(tagId));
+                            item.Add("m_footstepLandedTag",
+                                MakeNodeIdObjectValue(GetTagIdFromIndex(footSetting.GetIntegerProperty("m_footstepLandedTagIndex"))));
                         }
 
                         if (footSetting.ContainsKey("m_flMaxRotationLeft"))
                         {
-                            item.AddProperty("m_flMaxRotationLeft", footSetting.GetFloatProperty("m_flMaxRotationLeft"));
+                            item.Add("m_flMaxRotationLeft", footSetting.GetFloatProperty("m_flMaxRotationLeft"));
                         }
-                        else if (footInfo != null && footInfo.ContainsKey("m_flMaxRotationLeft"))
+                        else if (footInfo?.ContainsKey("m_flMaxRotationLeft") == true)
                         {
-                            item.AddProperty("m_flMaxRotationLeft", footInfo.GetFloatProperty("m_flMaxRotationLeft"));
+                            item.Add("m_flMaxRotationLeft", footInfo.GetFloatProperty("m_flMaxRotationLeft"));
                         }
 
                         if (footSetting.ContainsKey("m_flMaxRotationRight"))
                         {
-                            item.AddProperty("m_flMaxRotationRight", footSetting.GetFloatProperty("m_flMaxRotationRight"));
+                            item.Add("m_flMaxRotationRight", footSetting.GetFloatProperty("m_flMaxRotationRight"));
                         }
-                        else if (footInfo != null && footInfo.ContainsKey("m_flMaxRotationRight"))
+                        else if (footInfo?.ContainsKey("m_flMaxRotationRight") == true)
                         {
-                            item.AddProperty("m_flMaxRotationRight", footInfo.GetFloatProperty("m_flMaxRotationRight"));
+                            item.Add("m_flMaxRotationRight", footInfo.GetFloatProperty("m_flMaxRotationRight"));
                         }
 
                         if (i == 0)
@@ -4715,108 +3870,18 @@ public class AnimationGraphExtract : IDisposable
 
                     if (items.Count > 0)
                     {
-                        node.AddProperty("m_items", KVValue.MakeArray(items.ToArray()));
+                        node.Add("m_items", MakeArray(items));
                     }
 
-                    if (!node.Properties.ContainsKey("m_bEnableGroundTracing"))
+                    if (!node.ContainsKey("m_bEnableGroundTracing"))
                     {
-                        node.AddProperty("m_bEnableGroundTracing", firstFootHasGroundTracing);
+                        node.Add("m_bEnableGroundTracing", firstFootHasGroundTracing);
                     }
-                    if (!node.Properties.ContainsKey("m_flTraceAngleBlend"))
+                    if (!node.ContainsKey("m_flTraceAngleBlend"))
                     {
-                        node.AddProperty("m_flTraceAngleBlend", firstFootTraceAngleBlend);
+                        node.Add("m_flTraceAngleBlend", firstFootTraceAngleBlend);
                     }
 
-                    continue;
-                }
-                else if (key == "m_hipShiftDamping")
-                {
-                    node.AddProperty("m_hipShiftDamping", subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_rootHeightDamping")
-                {
-                    node.AddProperty("m_rootHeightDamping", subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_flStrideCurveScale")
-                {
-                    node.AddProperty("m_flStrideCurveScale", value);
-                    continue;
-                }
-                else if (key == "m_flStrideCurveLimitScale")
-                {
-                    node.AddProperty("m_flStrideCurveLimitScale", value);
-                    continue;
-                }
-                else if (key == "m_flStepHeightIncreaseScale")
-                {
-                    node.AddProperty("m_flStepHeightIncreaseScale", value);
-                    continue;
-                }
-                else if (key == "m_flStepHeightDecreaseScale")
-                {
-                    node.AddProperty("m_flStepHeightDecreaseScale", value);
-                    continue;
-                }
-                else if (key == "m_flHipShiftScale")
-                {
-                    node.AddProperty("m_flHipShiftScale", value);
-                    continue;
-                }
-                else if (key == "m_flBlendTime")
-                {
-                    node.AddProperty("m_flBlendTime", value);
-                    continue;
-                }
-                else if (key == "m_flMaxRootHeightOffset")
-                {
-                    node.AddProperty("m_flMaxRootHeightOffset", value);
-                    continue;
-                }
-                else if (key == "m_flMinRootHeightOffset")
-                {
-                    node.AddProperty("m_flMinRootHeightOffset", value);
-                    continue;
-                }
-                else if (key == "m_flTiltPlanePitchSpringStrength")
-                {
-                    node.AddProperty("m_flTiltPlanePitchSpringStrength", value);
-                    continue;
-                }
-                else if (key == "m_flTiltPlaneRollSpringStrength")
-                {
-                    node.AddProperty("m_flTiltPlaneRollSpringStrength", value);
-                    continue;
-                }
-                else if (key == "m_bApplyFootRotationLimits")
-                {
-                    node.AddProperty("m_bApplyFootRotationLimits", value);
-                    continue;
-                }
-                else if (key == "m_bApplyHipShift")
-                {
-                    node.AddProperty("m_bEnableHipShift", value);
-                    continue;
-                }
-                else if (key == "m_bModulateStepHeight")
-                {
-                    node.AddProperty("m_bModulateStepHeight", value);
-                    continue;
-                }
-                else if (key == "m_bResetChild")
-                {
-                    node.AddProperty("m_bResetChild", value);
-                    continue;
-                }
-                else if (key == "m_bEnableVerticalCurvedPaths")
-                {
-                    node.AddProperty("m_bEnableVerticalCurvedPaths", value);
-                    continue;
-                }
-                else if (key == "m_bEnableRootHeightDamping")
-                {
-                    node.AddProperty("m_bEnableRootHeightDamping", value);
                     continue;
                 }
             }
@@ -4824,112 +3889,65 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
+                    var nameValue = value.ToString() ?? "Unnamed";
+                    node.Add("m_sName", nameValue);
                     continue;
                 }
                 else if (key == "m_opFixedData")
                 {
-                    var opFixedData = subCollection.Value;
+                    var opFixedData = value;
                     var foundChainName = "";
 
                     if (opFixedData.ContainsKey("m_nFixedBoneIndex") &&
                         opFixedData.ContainsKey("m_nMiddleBoneIndex") &&
                         opFixedData.ContainsKey("m_nEndBoneIndex"))
                     {
-                        var fixedBoneIndex = (int)opFixedData.GetIntegerProperty("m_nFixedBoneIndex");
-                        var middleBoneIndex = (int)opFixedData.GetIntegerProperty("m_nMiddleBoneIndex");
-                        var endBoneIndex = (int)opFixedData.GetIntegerProperty("m_nEndBoneIndex");
+                        foundChainName = GetIKChainNameByBoneIndices(
+                            (int)opFixedData.GetIntegerProperty("m_nFixedBoneIndex"),
+                            (int)opFixedData.GetIntegerProperty("m_nMiddleBoneIndex"),
+                            (int)opFixedData.GetIntegerProperty("m_nEndBoneIndex"));
+                    }
+                    node.Add("m_ikChainName", foundChainName);
 
-                        foundChainName = GetIKChainNameByBoneIndices(fixedBoneIndex, middleBoneIndex, endBoneIndex);
-                    }
-                    node.AddProperty("m_ikChainName", foundChainName);
+                    node.Add("m_bAutoDetectHingeAxis", !opFixedData.ContainsKey("m_bAlwaysUseFallbackHinge")
+                        || opFixedData.GetIntegerProperty("m_bAlwaysUseFallbackHinge") == 0);
 
-                    if (opFixedData.ContainsKey("m_bAlwaysUseFallbackHinge"))
-                    {
-                        var alwaysUseFallback = opFixedData.GetIntegerProperty("m_bAlwaysUseFallbackHinge") > 0;
-                        node.AddProperty("m_bAutoDetectHingeAxis", !alwaysUseFallback);
-                    }
-                    else
-                    {
-                        node.AddProperty("m_bAutoDetectHingeAxis", true);
-                    }
-
-                    if (opFixedData.ContainsKey("m_endEffectorType"))
-                    {
-                        node.AddProperty("m_endEffectorType", opFixedData.GetProperty<string>("m_endEffectorType"));
-                    }
+                    CopyIfPresent(opFixedData, node, "m_endEffectorType");
 
                     if (opFixedData.ContainsKey("m_endEffectorAttachment"))
                     {
-                        var attachment = opFixedData.GetSubCollection("m_endEffectorAttachment");
-                        var attachmentName = FindMatchingAttachmentName(attachment);
-                        node.AddProperty("m_endEffectorAttachmentName", attachmentName);
+                        node.Add("m_endEffectorAttachmentName",
+                            FindMatchingAttachmentName(opFixedData.GetSubCollection("m_endEffectorAttachment")));
                     }
 
-                    if (opFixedData.ContainsKey("m_targetType"))
-                    {
-                        node.AddProperty("m_targetType", opFixedData.GetProperty<string>("m_targetType"));
-                    }
+                    CopyIfPresent(opFixedData, node, "m_targetType");
 
                     if (opFixedData.ContainsKey("m_targetAttachment"))
                     {
-                        var attachment = opFixedData.GetSubCollection("m_targetAttachment");
-                        var attachmentName = FindMatchingAttachmentName(attachment);
-                        node.AddProperty("m_attachmentName", attachmentName);
+                        node.Add("m_attachmentName",
+                            FindMatchingAttachmentName(opFixedData.GetSubCollection("m_targetAttachment")));
                     }
 
                     if (opFixedData.ContainsKey("m_targetBoneIndex"))
                     {
                         var targetBoneIndex = (int)opFixedData.GetIntegerProperty("m_targetBoneIndex");
-                        if (targetBoneIndex != -1)
-                        {
-                            var targetBoneName = GetBoneName(targetBoneIndex);
-                            node.AddProperty("m_targetBoneName", targetBoneName);
-                        }
-                        else
-                        {
-                            node.AddProperty("m_targetBoneName", "");
-                        }
+                        node.Add("m_targetBoneName", targetBoneIndex != -1 ? GetBoneName(targetBoneIndex) : "");
                     }
 
                     if (opFixedData.ContainsKey("m_hPositionParam"))
                     {
-                        var paramRef = opFixedData.GetSubCollection("m_hPositionParam");
-                        var paramType = paramRef.GetStringProperty("m_type");
-                        var paramIndex = paramRef.GetIntegerProperty("m_index");
-                        var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                        node.AddProperty("m_targetParam", paramIdValue);
+                        node.Add("m_targetParam", ExtractParameterID(opFixedData.GetSubCollection("m_hPositionParam")));
                     }
 
-                    if (opFixedData.ContainsKey("m_bMatchTargetOrientation"))
-                    {
-                        node.AddProperty("m_bMatchTargetOrientation", opFixedData.GetIntegerProperty("m_bMatchTargetOrientation") > 0);
-                    }
+                    CopyBoolIfPresent(opFixedData, node, "m_bMatchTargetOrientation");
 
                     if (opFixedData.ContainsKey("m_hRotationParam"))
                     {
-                        var paramRef = opFixedData.GetSubCollection("m_hRotationParam");
-                        var paramType = paramRef.GetStringProperty("m_type");
-                        var paramIndex = paramRef.GetIntegerProperty("m_index");
-                        var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                        node.AddProperty("m_rotationParam", paramIdValue);
+                        node.Add("m_rotationParam", ExtractParameterID(opFixedData.GetSubCollection("m_hRotationParam")));
                     }
 
-                    if (opFixedData.ContainsKey("m_bConstrainTwist"))
-                    {
-                        node.AddProperty("m_bConstrainTwist", opFixedData.GetIntegerProperty("m_bConstrainTwist") > 0);
-                    }
-
-                    if (opFixedData.ContainsKey("m_flMaxTwist"))
-                    {
-                        node.AddProperty("m_flMaxTwist", opFixedData.GetFloatProperty("m_flMaxTwist"));
-                    }
+                    CopyBoolIfPresent(opFixedData, node, "m_bConstrainTwist");
+                    CopyIfPresent(opFixedData, node, "m_flMaxTwist");
 
                     continue;
                 }
@@ -4938,8 +3956,8 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
+                    var nameValue = value.ToString() ?? "Unnamed";
+                    node.Add("m_sName", nameValue);
 
                     var colonIndex = nameValue.LastIndexOf(':');
                     if (colonIndex != -1)
@@ -4947,21 +3965,14 @@ public class AnimationGraphExtract : IDisposable
                         var frameIndexStr = nameValue[(colonIndex + 1)..].Trim();
                         if (int.TryParse(frameIndexStr, out var frameIndex))
                         {
-                            node.AddProperty("m_nFrameIndex", frameIndex);
+                            node.Add("m_nFrameIndex", frameIndex);
                         }
                     }
                     continue;
                 }
-                else if (key == "m_hSequence")
-                {
-                    var sequenceIndex = compiledNode.GetIntegerProperty("m_hSequence");
-                    var sequenceName = GetSequenceName(sequenceIndex);
-                    node.AddProperty("m_sequenceName", sequenceName);
-                    continue;
-                }
                 else if (key == "m_hPoseCacheHandle")
                 {
-                    node.AddProperty("m_eFrameSelection", "SpecificFrame");
+                    node.Add("m_eFrameSelection", "SpecificFrame");
                     continue;
                 }
                 else if (key == "m_flCycle")
@@ -4973,18 +3984,13 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
+                    var nameValue = value.ToString() ?? "Unnamed";
+                    node.Add("m_sName", nameValue);
                     continue;
                 }
                 else if (key == "m_dataSet")
                 {
-                    var dataSet = subCollection.Value;
+                    var dataSet = value;
 
                     if (dataSet.ContainsKey("m_groups"))
                     {
@@ -4994,7 +4000,7 @@ public class AnimationGraphExtract : IDisposable
                         foreach (var compiledGroup in compiledGroups)
                         {
                             var group = MakeNode("CMotionItemGroup");
-                            group.AddProperty("m_name", compiledGroup.GetStringProperty("m_name") ?? string.Empty);
+                            group.Add("m_name", compiledGroup.GetStringProperty("m_name") ?? string.Empty);
 
                             if (compiledGroup.ContainsKey("m_motionGraphs"))
                             {
@@ -5004,8 +4010,8 @@ public class AnimationGraphExtract : IDisposable
                                 foreach (var motionGraph in motionGraphs)
                                 {
                                     var motion = MakeNode("CGraphMotionItem");
-                                    motion.AddProperty("m_name", "New Graph");
-                                    motion.AddProperty("m_bLoop", motionGraph.GetIntegerProperty("m_bLoop") > 0);
+                                    motion.Add("m_name", "New Graph");
+                                    motion.Add("m_bLoop", motionGraph.GetIntegerProperty("m_bLoop") > 0);
 
                                     var configCount = motionGraph.GetIntegerProperty("m_nConfigCount");
                                     var sampleCount = Math.Max(0, (int)configCount - 1);
@@ -5013,6 +4019,8 @@ public class AnimationGraphExtract : IDisposable
                                     var paramManager = MakeNode("CMotionParameterManager");
                                     var motionParams = new List<KVObject>();
                                     var motionParamIds = new List<long>();
+                                    var motionParamIdSet = new HashSet<long>();
+                                    var motionParamCursor = GeneratedNodeIdMin;
 
                                     if (compiledGroup.ContainsKey("m_motionGraphConfigs"))
                                     {
@@ -5022,11 +4030,12 @@ public class AnimationGraphExtract : IDisposable
                                         for (var paramIdx = 0; paramIdx < parameterCount; paramIdx++)
                                         {
                                             var motionParam = MakeNode("CMotionParameter");
-                                            motionParam.AddProperty("m_name", paramIdx.ToString(CultureInfo.InvariantCulture));
+                                            motionParam.Add("m_name", paramIdx.ToString(CultureInfo.InvariantCulture));
 
-                                            var paramId = GenerateNewNodeId([.. motionParamIds]);
+                                            var paramId = GenerateNewNodeId(motionParamIdSet, ref motionParamCursor);
                                             motionParamIds.Add(paramId);
-                                            motionParam.AddProperty("m_id", MakeNodeIdObjectValue(paramId));
+                                            motionParamIdSet.Add(paramId);
+                                            motionParam.Add("m_id", MakeNodeIdObjectValue(paramId));
 
                                             var minValue = float.MaxValue;
                                             var maxValue = float.MinValue;
@@ -5048,16 +4057,16 @@ public class AnimationGraphExtract : IDisposable
                                                 maxValue = 180.0f;
                                             }
 
-                                            motionParam.AddProperty("m_flMinValue", minValue);
-                                            motionParam.AddProperty("m_flMaxValue", maxValue);
-                                            motionParam.AddProperty("m_nSamples", sampleCount);
+                                            motionParam.Add("m_flMinValue", minValue);
+                                            motionParam.Add("m_flMaxValue", maxValue);
+                                            motionParam.Add("m_nSamples", sampleCount);
 
                                             motionParams.Add(motionParam);
                                         }
                                     }
 
-                                    paramManager.AddProperty("m_params", KVValue.MakeArray(motionParams.ToArray()));
-                                    motion.AddProperty("m_paramManager", paramManager);
+                                    paramManager.Add("m_params", MakeArray(motionParams));
+                                    motion.Add("m_paramManager", paramManager);
 
                                     if (motionGraph.ContainsKey("m_pRootNode"))
                                     {
@@ -5065,113 +4074,37 @@ public class AnimationGraphExtract : IDisposable
                                         var nodeManager = MakeNode("CMotionNodeManager");
 
                                         var motionNodes = ConvertMotionNodeHierarchy(rootNode, motionParamIds);
-                                        nodeManager.AddProperty("m_nodes", KVValue.MakeArray(motionNodes.ToArray()));
+                                        nodeManager.Add("m_nodes", MakeArray(motionNodes));
 
-                                        motion.AddProperty("m_nodeManager", nodeManager);
+                                        motion.Add("m_nodeManager", nodeManager);
                                     }
 
-                                    if (motionGraph.ContainsKey("m_tags"))
-                                    {
-                                        var compiledTagSpans = motionGraph.GetArray("m_tags");
-                                        var tagSpans = new List<KVObject>();
+                                    motion.Add("m_tagSpans", motionGraph.ContainsKey("m_tags")
+                                        ? ConvertTagSpansArray(motionGraph.GetArray("m_tags"))
+                                        : KVObject.Array());
 
-                                        foreach (var compiledTagSpan in compiledTagSpans)
-                                        {
-                                            var tagSpan = MakeNode("CAnimTagSpan");
-
-                                            var tagIndex = compiledTagSpan.GetIntegerProperty("m_tagIndex");
-                                            var tagId = -1L;
-                                            if (tagIndex >= 0 && tagIndex < Tags.Length)
-                                            {
-                                                tagId = Tags[tagIndex].GetSubCollection("m_tagID").GetIntegerProperty("m_id");
-                                            }
-
-                                            tagSpan.AddProperty("m_id", MakeNodeIdObjectValue(tagId));
-                                            tagSpan.AddProperty("m_fStartCycle", compiledTagSpan.GetFloatProperty("m_startCycle"));
-                                            tagSpan.AddProperty("m_fDuration",
-                                                compiledTagSpan.GetFloatProperty("m_endCycle") - compiledTagSpan.GetFloatProperty("m_startCycle"));
-
-                                            tagSpans.Add(tagSpan);
-                                        }
-
-                                        motion.AddProperty("m_tagSpans", KVValue.MakeArray(tagSpans.ToArray()));
-                                    }
-                                    else
-                                    {
-                                        motion.AddProperty("m_tagSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
-                                    }
-
-                                    if (motionGraph.ContainsKey("m_paramSpans"))
-                                    {
-                                        var paramSpansContainer = motionGraph.GetSubCollection("m_paramSpans");
-
-                                        if (paramSpansContainer.ContainsKey("m_spans"))
-                                        {
-                                            var compiledParamSpans = paramSpansContainer.GetArray("m_spans");
-                                            var paramSpans = new List<KVObject>();
-
-                                            foreach (var compiledParamSpan in compiledParamSpans)
-                                            {
-                                                var paramSpan = MakeNode("CAnimParamSpan");
-
-                                                if (compiledParamSpan.ContainsKey("m_hParam"))
-                                                {
-                                                    paramSpan.AddProperty("m_id", ExtractParameterID(compiledParamSpan.GetSubCollection("m_hParam")));
-                                                }
-                                                else
-                                                {
-                                                    paramSpan.AddProperty("m_id", MakeNodeIdObjectValue(-1));
-                                                }
-
-                                                paramSpan.AddProperty("m_flStartCycle", compiledParamSpan.GetFloatProperty("m_flStartCycle"));
-                                                paramSpan.AddProperty("m_flEndCycle", compiledParamSpan.GetFloatProperty("m_flEndCycle"));
-
-                                                if (compiledParamSpan.ContainsKey("m_samples"))
-                                                {
-                                                    paramSpan.AddProperty("m_samples", compiledParamSpan.GetSubCollection("m_samples"));
-                                                }
-
-                                                paramSpans.Add(paramSpan);
-                                            }
-
-                                            motion.AddProperty("m_paramSpans", KVValue.MakeArray(paramSpans.ToArray()));
-                                        }
-                                    }
-                                    else
-                                    {
-                                        motion.AddProperty("m_paramSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
-                                    }
+                                    motion.Add("m_paramSpans", motionGraph.ContainsKey("m_paramSpans")
+                                        ? ConvertParamSpans(motionGraph.GetSubCollection("m_paramSpans"))
+                                        : KVObject.Array());
 
                                     motions.Add(motion);
                                 }
 
-                                group.AddProperty("m_motions", KVValue.MakeArray(motions.ToArray()));
+                                group.Add("m_motions", MakeArray(motions));
                             }
 
-                            if (compiledGroup.ContainsKey("m_hIsActiveScript") && scriptManager != null)
+                            if (compiledGroup.ContainsKey("m_hIsActiveScript"))
                             {
-                                var scriptHandle = compiledGroup.GetSubCollection("m_hIsActiveScript");
-                                var scriptIndex = scriptHandle.GetIntegerProperty("m_id");
-
-                                if (scriptIndex >= 0)
+                                var scriptCode = TryGetFuseGeneralScriptCode(
+                                    compiledGroup.GetSubCollection("m_hIsActiveScript").GetIntegerProperty("m_id"));
+                                if (scriptCode != null)
                                 {
-                                    var scriptInfoArray = scriptManager.GetArray("m_scriptInfo");
-                                    if (scriptIndex < scriptInfoArray.Length)
+                                    var conditions = ParseConditionExpression(scriptCode);
+                                    if (conditions != null && conditions.Count > 0)
                                     {
-                                        var scriptInfo = scriptInfoArray[scriptIndex];
-                                        var scriptType = scriptInfo.GetStringProperty("m_eScriptType");
-                                        var scriptCode = scriptInfo.GetStringProperty("m_code");
-
-                                        if (scriptType == "ANIMSCRIPT_FUSE_GENERAL" && !string.IsNullOrEmpty(scriptCode))
-                                        {
-                                            var conditions = ParseConditionExpression(scriptCode);
-                                            if (conditions != null && conditions.Count > 0)
-                                            {
-                                                var conditionContainer = MakeNode("CConditionContainer");
-                                                conditionContainer.AddProperty("m_conditions", KVValue.MakeArray(conditions.ToArray()));
-                                                group.AddProperty("m_conditions", conditionContainer);
-                                            }
-                                        }
+                                        var conditionContainer = MakeNode("CConditionContainer");
+                                        conditionContainer.Add("m_conditions", MakeArray(conditions));
+                                        group.Add("m_conditions", conditionContainer);
                                     }
                                 }
                             }
@@ -5179,7 +4112,7 @@ public class AnimationGraphExtract : IDisposable
                             groups.Add(group);
                         }
 
-                        node.AddProperty("m_groups", KVValue.MakeArray(groups.ToArray()));
+                        node.Add("m_groups", MakeArray(groups));
                     }
                     continue;
                 }
@@ -5194,106 +4127,74 @@ public class AnimationGraphExtract : IDisposable
                         var uncompiledClassName = metricClassName.Replace("MetricEvaluator", "Metric", StringComparison.Ordinal);
                         var metric = MakeNode(uncompiledClassName);
 
-                        metric.AddProperty("m_flWeight", compiledMetric.GetFloatProperty("m_flWeight"));
+                        metric.Add("m_flWeight", compiledMetric.GetFloatProperty("m_flWeight"));
 
                         if (metricClassName == "CBonePositionMetricEvaluator" || metricClassName == "CBoneVelocityMetricEvaluator")
                         {
                             var boneIndex = compiledMetric.GetIntegerProperty("m_nBoneIndex");
                             var boneName = GetBoneName((int)boneIndex);
-                            metric.AddProperty("m_boneName", boneName);
+                            metric.Add("m_boneName", boneName);
                         }
                         else if (metricClassName == "CFutureVelocityMetricEvaluator")
                         {
-                            metric.AddProperty("m_flDistance", compiledMetric.GetFloatProperty("m_flDistance"));
-                            metric.AddProperty("m_flStoppingDistance", compiledMetric.GetFloatProperty("m_flStoppingDistance"));
-                            metric.AddProperty("m_eMode", compiledMetric.GetProperty<string>("m_eMode"));
-                            metric.AddProperty("m_bAutoTargetSpeed", compiledMetric.GetIntegerProperty("m_bAutoTargetSpeed") > 0);
-                            metric.AddProperty("m_flManualTargetSpeed", compiledMetric.GetFloatProperty("m_flManualTargetSpeed"));
+                            metric.Add("m_flDistance", compiledMetric.GetFloatProperty("m_flDistance"));
+                            metric.Add("m_flStoppingDistance", compiledMetric.GetFloatProperty("m_flStoppingDistance"));
+                            metric.Add("m_eMode", compiledMetric.GetStringProperty("m_eMode"));
+                            metric.Add("m_bAutoTargetSpeed", compiledMetric.GetIntegerProperty("m_bAutoTargetSpeed") > 0);
+                            metric.Add("m_flManualTargetSpeed", compiledMetric.GetFloatProperty("m_flManualTargetSpeed"));
                         }
                         else if (metricClassName == "CDistanceRemainingMetricEvaluator")
                         {
-                            metric.AddProperty("m_flMaxDistance", compiledMetric.GetFloatProperty("m_flMaxDistance"));
-                            metric.AddProperty("m_flMinDistance", compiledMetric.GetFloatProperty("m_flMinDistance"));
-                            metric.AddProperty("m_flStartGoalFilterDistance", compiledMetric.GetFloatProperty("m_flStartGoalFilterDistance"));
-                            metric.AddProperty("m_flMaxGoalOvershootScale", compiledMetric.GetFloatProperty("m_flMaxGoalOvershootScale"));
-                            metric.AddProperty("m_bFilterFixedMinDistance", compiledMetric.GetIntegerProperty("m_bFilterFixedMinDistance") > 0);
-                            metric.AddProperty("m_bFilterGoalDistance", compiledMetric.GetIntegerProperty("m_bFilterGoalDistance") > 0);
-                            metric.AddProperty("m_bFilterGoalOvershoot", compiledMetric.GetIntegerProperty("m_bFilterGoalOvershoot") > 0);
+                            metric.Add("m_flMaxDistance", compiledMetric.GetFloatProperty("m_flMaxDistance"));
+                            metric.Add("m_flMinDistance", compiledMetric.GetFloatProperty("m_flMinDistance"));
+                            metric.Add("m_flStartGoalFilterDistance", compiledMetric.GetFloatProperty("m_flStartGoalFilterDistance"));
+                            metric.Add("m_flMaxGoalOvershootScale", compiledMetric.GetFloatProperty("m_flMaxGoalOvershootScale"));
+                            metric.Add("m_bFilterFixedMinDistance", compiledMetric.GetIntegerProperty("m_bFilterFixedMinDistance") > 0);
+                            metric.Add("m_bFilterGoalDistance", compiledMetric.GetIntegerProperty("m_bFilterGoalDistance") > 0);
+                            metric.Add("m_bFilterGoalOvershoot", compiledMetric.GetIntegerProperty("m_bFilterGoalOvershoot") > 0);
                         }
                         else if (metricClassName == "CTimeRemainingMetricEvaluator")
                         {
-                            metric.AddProperty("m_bMatchByTimeRemaining", compiledMetric.GetIntegerProperty("m_bMatchByTimeRemaining") > 0);
-                            metric.AddProperty("m_flMaxTimeRemaining", compiledMetric.GetFloatProperty("m_flMaxTimeRemaining"));
-                            metric.AddProperty("m_bFilterByTimeRemaining", compiledMetric.GetIntegerProperty("m_bFilterByTimeRemaining") > 0);
-                            metric.AddProperty("m_flMinTimeRemaining", compiledMetric.GetFloatProperty("m_flMinTimeRemaining"));
+                            metric.Add("m_bMatchByTimeRemaining", compiledMetric.GetIntegerProperty("m_bMatchByTimeRemaining") > 0);
+                            metric.Add("m_flMaxTimeRemaining", compiledMetric.GetFloatProperty("m_flMaxTimeRemaining"));
+                            metric.Add("m_bFilterByTimeRemaining", compiledMetric.GetIntegerProperty("m_bFilterByTimeRemaining") > 0);
+                            metric.Add("m_flMinTimeRemaining", compiledMetric.GetFloatProperty("m_flMinTimeRemaining"));
                         }
                         else if (metricClassName == "CPathMetricEvaluator")
                         {
-                            metric.AddProperty("m_flDistance", compiledMetric.GetFloatProperty("m_flDistance"));
+                            metric.Add("m_flDistance", compiledMetric.GetFloatProperty("m_flDistance"));
 
                             if (compiledMetric.ContainsKey("m_pathTimeSamples"))
                             {
                                 var timeSamples = compiledMetric.GetFloatArray("m_pathTimeSamples");
-                                var pathSamplesArray = new KVObject(null, isArray: true, timeSamples.Length);
+                                var pathSamplesArray = KVObject.Array();
                                 foreach (var sample in timeSamples)
                                 {
-                                    pathSamplesArray.AddItem(new KVValue(ValveKeyValue.KVValueType.FloatingPoint, sample));
+                                    pathSamplesArray.Add((float)sample);
                                 }
-                                metric.AddProperty("m_pathSamples", pathSamplesArray);
+                                metric.Add("m_pathSamples", pathSamplesArray);
                             }
-                            metric.AddProperty("m_bExtrapolateMovement", compiledMetric.GetIntegerProperty("m_bExtrapolateMovement") > 0);
-                            metric.AddProperty("m_flMinExtrapolationSpeed", compiledMetric.GetFloatProperty("m_flMinExtrapolationSpeed"));
+                            metric.Add("m_bExtrapolateMovement", compiledMetric.GetIntegerProperty("m_bExtrapolateMovement") > 0);
+                            metric.Add("m_flMinExtrapolationSpeed", compiledMetric.GetFloatProperty("m_flMinExtrapolationSpeed"));
                         }
                         else if (metricClassName == "CStepsRemainingMetricEvaluator")
                         {
-                            metric.AddProperty("m_flMinStepsRemaining", compiledMetric.GetFloatProperty("m_flMinStepsRemaining"));
-
-                            if (compiledMetric.ContainsKey("m_footIndices"))
-                            {
-                                var footIndices = compiledMetric.GetIntegerArray("m_footIndices");
-                                var feetArray = new KVObject(null, isArray: true, footIndices.Length);
-                                foreach (var footIndex in footIndices)
-                                {
-                                    var footName = GetFootName((int)footIndex);
-                                    feetArray.AddItem(new KVValue(ValveKeyValue.KVValueType.String, footName));
-                                }
-                                metric.AddProperty("m_feet", feetArray);
-                            }
+                            metric.Add("m_flMinStepsRemaining", compiledMetric.GetFloatProperty("m_flMinStepsRemaining"));
+                            AddFeetProperty(metric, compiledMetric);
                         }
                         else if (metricClassName == "CFootPositionMetricEvaluator")
                         {
-                            metric.AddProperty("m_bIgnoreSlope", compiledMetric.GetIntegerProperty("m_bIgnoreSlope") > 0);
-
-                            if (compiledMetric.ContainsKey("m_footIndices"))
-                            {
-                                var footIndices = compiledMetric.GetIntegerArray("m_footIndices");
-                                var feetArray = new KVObject(null, isArray: true, footIndices.Length);
-                                foreach (var footIndex in footIndices)
-                                {
-                                    var footName = GetFootName((int)footIndex);
-                                    feetArray.AddItem(new KVValue(ValveKeyValue.KVValueType.String, footName));
-                                }
-                                metric.AddProperty("m_feet", feetArray);
-                            }
+                            metric.Add("m_bIgnoreSlope", compiledMetric.GetIntegerProperty("m_bIgnoreSlope") > 0);
+                            AddFeetProperty(metric, compiledMetric);
                         }
                         else if (metricClassName == "CFutureFacingMetricEvaluator")
                         {
-                            metric.AddProperty("m_flDistance", compiledMetric.GetFloatProperty("m_flDistance"));
-                            metric.AddProperty("m_flTime", compiledMetric.GetFloatProperty("m_flTime"));
+                            metric.Add("m_flDistance", compiledMetric.GetFloatProperty("m_flDistance"));
+                            metric.Add("m_flTime", compiledMetric.GetFloatProperty("m_flTime"));
                         }
                         else if (metricClassName == "CFootCycleMetricEvaluator")
                         {
-                            if (compiledMetric.ContainsKey("m_footIndices"))
-                            {
-                                var footIndices = compiledMetric.GetIntegerArray("m_footIndices");
-                                var feetArray = new KVObject(null, isArray: true, footIndices.Length);
-                                foreach (var footIndex in footIndices)
-                                {
-                                    var footName = GetFootName((int)footIndex);
-                                    feetArray.AddItem(new KVValue(ValveKeyValue.KVValueType.String, footName));
-                                }
-                                metric.AddProperty("m_feet", feetArray);
-                            }
+                            AddFeetProperty(metric, compiledMetric);
                         }
                         else if (metricClassName == "CCurrentRotationVelocityMetricEvaluator"
                         || metricClassName == "CCurrentVelocityMetricEvaluator"
@@ -5303,33 +4204,7 @@ public class AnimationGraphExtract : IDisposable
                         metrics.Add(metric);
                     }
 
-                    node.AddProperty("m_metrics", KVValue.MakeArray(metrics.ToArray()));
-                    continue;
-                }
-                else if (key == "m_blendCurve")
-                {
-                    var compiledCurve = subCollection.Value;
-                    var blendCurve = MakeNode("CBlendCurve");
-                    blendCurve.AddProperty("m_flControlPoint1", compiledCurve.GetFloatProperty("m_flControlPoint1"));
-                    blendCurve.AddProperty("m_flControlPoint2", compiledCurve.GetFloatProperty("m_flControlPoint2"));
-                    node.AddProperty("m_blendCurve", blendCurve);
-                    continue;
-                }
-                else if (key == "m_distanceScale_Damping")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-
-                if (key is "m_nRandomSeed" or "m_flSampleRate" or "m_bSearchEveryTick" or "m_flSearchInterval"
-                    or "m_bSearchWhenClipEnds" or "m_bSearchWhenGoalChanges" or "m_flBlendTime"
-                    or "m_flSelectionThreshold" or "m_flReselectionTimeWindow" or "m_bLockClipWhenWaning"
-                    or "m_bEnableRotationCorrection" or "m_bGoalAssist" or "m_flGoalAssistDistance"
-                    or "m_flGoalAssistTolerance" or "m_bEnableDistanceScaling" or "m_flDistanceScale_OuterRadius"
-                    or "m_flDistanceScale_InnerRadius" or "m_flDistanceScale_MaxScale" or "m_flDistanceScale_MinScale"
-                    or "m_networkMode")
-                {
-                    node.AddProperty(key, value);
+                    node.Add("m_metrics", MakeArray(metrics));
                     continue;
                 }
             }
@@ -5337,120 +4212,45 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
+                    node.Add("m_sName", value.ToString() ?? "Unnamed");
                     continue;
                 }
                 else if (key == "m_opFixedSettings")
                 {
-                    var opFixedSettings = subCollection.Value;
+                    var opFixedSettings = value;
 
                     if (opFixedSettings.ContainsKey("m_nChainIndex"))
                     {
-                        var chainIndex = (int)opFixedSettings.GetIntegerProperty("m_nChainIndex");
-                        var chainName = GetIKChainName(chainIndex);
-                        node.AddProperty("m_ikChain", chainName);
+                        node.Add("m_ikChain", GetIKChainName((int)opFixedSettings.GetIntegerProperty("m_nChainIndex")));
                     }
 
-                    var boneProperties = new[]
-                    {
+                    (string compiledKey, string sourceKey)[] boneProperties =
+                    [
                         ("m_nCameraJointIndex", "m_cameraJointName"),
                         ("m_nPelvisJointIndex", "m_pelvisJointName"),
                         ("m_nClavicleLeftJointIndex", "m_clavicleLeftJointName"),
                         ("m_nClavicleRightJointIndex", "m_clavicleRightJointName"),
-                        ("m_nDepenetrationJointIndex", "m_depenetrationJointName")
-                    };
+                        ("m_nDepenetrationJointIndex", "m_depenetrationJointName"),
+                    ];
 
                     foreach (var (compiledKey, sourceKey) in boneProperties)
                     {
                         if (opFixedSettings.ContainsKey(compiledKey))
                         {
-                            var boneIndex = (int)opFixedSettings.GetIntegerProperty(compiledKey);
-                            var boneName = GetBoneName(boneIndex);
-                            node.AddProperty(sourceKey, boneName);
+                            node.Add(sourceKey, GetBoneName((int)opFixedSettings.GetIntegerProperty(compiledKey)));
                         }
                     }
 
                     if (opFixedSettings.ContainsKey("m_propJoints"))
                     {
-                        var propJointIndices = opFixedSettings.GetIntegerArray("m_propJoints");
-                        var propJoints = new List<KVObject>();
-
-                        foreach (var jointIndex in propJointIndices)
+                        var propJoints = opFixedSettings.GetIntegerArray("m_propJoints").Select(jointIndex =>
                         {
-                            var propJoint = new KVObject(null, 1);
-                            var boneName = GetBoneName((int)jointIndex);
-                            propJoint.AddProperty("m_jointName", boneName);
-                            propJoints.Add(propJoint);
-                        }
-                        node.AddProperty("m_propJoints", KVValue.MakeArray(propJoints.ToArray()));
+                            var propJoint = new KVObject();
+                            propJoint.Add("m_jointName", GetBoneName((int)jointIndex));
+                            return propJoint;
+                        }).ToArray();
+                        node.Add("m_propJoints", MakeArray(propJoints));
                     }
-                    continue;
-                }
-                else if (key == "m_hParameterPosition")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_parameterNamePosition", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hParameterOrientation")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_parameterNameOrientation", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hParameterPelvisOffset")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_parameterNamePelvisOffset", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hParameterCameraOnly")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_parameterCameraOnly", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hParameterCameraClearanceDistance")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_parameterCameraClearanceDistance", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hParameterWeaponDepenetrationDistance")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_parameterWeaponDepenetrationDistance", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hParameterWeaponDepenetrationDelta")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_parameterWeaponDepenetrationDelta", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
                     continue;
                 }
             }
@@ -5458,203 +4258,19 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
+                    node.Add("m_sName", value.ToString() ?? "Unnamed");
                     continue;
                 }
-                else if (key == "m_pChildNode")
+                if (!node.ContainsKey("m_eLinearRootMotionMode"))
                 {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_eAngleMode")
-                {
-                    node.AddProperty("m_eAngleMode", value);
-                    continue;
-                }
-                else if (key == "m_hTargetPositionParameter")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_targetPositionParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hTargetUpVectorParameter")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_targetUpVectorParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hTargetFacePositionParameter")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_targetFacePositionParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hMoveHeadingParameter")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_moveHeadingParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hDesiredMoveHeadingParameter")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_desiredMoveHeadingParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_eCorrectionMethod")
-                {
-                    node.AddProperty("m_eCorrectionMethod", value);
-                    continue;
-                }
-                else if (key == "m_eTargetWarpTimingMethod")
-                {
-                    node.AddProperty("m_eTargetWarpTimingMethod", value);
-                    continue;
-                }
-                else if (key == "m_bTargetFacePositionIsWorldSpace")
-                {
-                    node.AddProperty("m_bTargetFacePositionIsWorldSpace", value);
-                    continue;
-                }
-                else if (key == "m_bTargetPositionIsWorldSpace")
-                {
-                    node.AddProperty("m_bTargetPositionIsWorldSpace", value);
-                    continue;
-                }
-                else if (key == "m_bOnlyWarpWhenTagIsFound")
-                {
-                    node.AddProperty("m_bOnlyWarpWhenTagIsFound", value);
-                    continue;
-                }
-                else if (key == "m_bWarpOrientationDuringTranslation")
-                {
-                    node.AddProperty("m_bWarpOrientationDuringTranslation", value);
-                    continue;
-                }
-                else if (key == "m_bWarpAroundCenter")
-                {
-                    node.AddProperty("m_bWarpAroundCenter", value);
-                    continue;
-                }
-                else if (key == "m_flMaxAngle")
-                {
-                    node.AddProperty("m_flMaxAngle", value);
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                if (!node.Properties.ContainsKey("m_eLinearRootMotionMode"))
-                {
-                    node.AddProperty("m_eLinearRootMotionMode", "TargetWarpLinearRootMotionMode_Default");
+                    node.Add("m_eLinearRootMotionMode", "TargetWarpLinearRootMotionMode_Default");
                 }
             }
             else if (className == "COrientationWarp")
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
-                    continue;
-                }
-                else if (key == "m_eMode")
-                {
-                    node.AddProperty("m_eMode", value);
-                    continue;
-                }
-                else if (key == "m_hTargetParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_targetParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hTargetPositionParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_targetPositionParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_hFallbackTargetPositionParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_fallbackTargetPositionParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_eTargetOffsetMode")
-                {
-                    node.AddProperty("m_eTargetOffsetMode", value);
-                    continue;
-                }
-                else if (key == "m_flTargetOffset")
-                {
-                    node.AddProperty("m_flTargetOffset", value);
-                    continue;
-                }
-                else if (key == "m_hTargetOffsetParam")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    node.AddProperty("m_targetOffsetParamID", ParameterIDFromIndex(paramType, paramIndex));
-                    continue;
-                }
-                else if (key == "m_damping")
-                {
-                    node.AddProperty("m_damping", value);
-                    continue;
-                }
-                else if (key == "m_eRootMotionSource")
-                {
-                    node.AddProperty("m_eRootMotionSource", value);
-                    continue;
-                }
-                else if (key == "m_flMaxRootMotionScale")
-                {
-                    node.AddProperty("m_flMaxRootMotionScale", value);
-                    continue;
-                }
-                else if (key == "m_bEnablePreferredRotationDirection")
-                {
-                    node.AddProperty("m_bEnablePreferredRotationDirection", value);
-                    continue;
-                }
-                else if (key == "m_ePreferredRotationDirection")
-                {
-                    node.AddProperty("m_ePreferredRotationDirection", value);
-                    continue;
-                }
-                else if (key == "m_flPreferredRotationThreshold")
-                {
-                    node.AddProperty("m_flPreferredRotationThreshold", value);
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
+                    node.Add("m_sName", value.ToString() ?? "Unnamed");
                     continue;
                 }
             }
@@ -5662,149 +4278,68 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
+                    node.Add("m_sName", value.ToString() ?? "Unnamed");
                     continue;
                 }
-                else if (key == "m_sPairedSequenceRole")
+                if (!node.ContainsKey("m_previewSequenceName"))
                 {
-                    node.AddProperty("m_sPairedRole", value);
-                    continue;
-                }
-                else if (key == "m_playbackSpeed")
-                {
-                    node.AddProperty("m_flPlaybackSpeed", value);
-                    continue;
-                }
-                else if (key == "m_bLoop")
-                {
-                    node.AddProperty("m_bLoop", value);
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
-                    continue;
-                }
-                if (!node.Properties.ContainsKey("m_previewSequenceName"))
-                {
-                    node.AddProperty("m_previewSequenceName", "");
+                    node.Add("m_previewSequenceName", "");
                 }
             }
             else if (className == "CFollowTarget")
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.Value?.ToString() ?? "Unnamed";
-                    node.AddProperty("m_sName", nameValue);
-                    continue;
-                }
-                else if (key == "m_pChildNode")
-                {
-                    TryAddInputConnectionFromRef(node, subCollection.Value);
+                    node.Add("m_sName", value.ToString() ?? "Unnamed");
                     continue;
                 }
                 else if (key == "m_opFixedData")
                 {
-                    var opFixedData = subCollection.Value;
+                    var opFixedData = value;
 
                     if (opFixedData.ContainsKey("m_boneIndex"))
                     {
-                        var boneIndex = (int)opFixedData.GetIntegerProperty("m_boneIndex");
-                        var boneName = GetBoneName(boneIndex);
-                        node.AddProperty("m_boneName", boneName);
+                        node.Add("m_boneName", GetBoneName((int)opFixedData.GetIntegerProperty("m_boneIndex")));
                     }
 
-                    var targetSettings = new KVObject(null, 5);
+                    var targetSettings = new KVObject();
+                    targetSettings.Add("m_TargetSource",
+                        opFixedData.GetIntegerProperty("m_bBoneTarget", 0) > 0 ? "Bone" : "AnimgraphParameter");
 
-                    string targetSource;
-                    if (opFixedData.ContainsKey("m_bBoneTarget") && opFixedData.GetIntegerProperty("m_bBoneTarget") > 0)
-                    {
-                        targetSource = "Bone";
-                    }
-                    else
-                    {
-                        targetSource = "AnimgraphParameter";
-                    }
-                    targetSettings.AddProperty("m_TargetSource", targetSource);
-
-                    var boneNameAndIndex = new KVObject(null, 1);
+                    var boneNameAndIndex = new KVObject();
                     if (opFixedData.ContainsKey("m_boneTargetIndex"))
                     {
                         var boneTargetIndex = (int)opFixedData.GetIntegerProperty("m_boneTargetIndex");
                         if (boneTargetIndex != -1)
                         {
-                            var targetBoneName = GetBoneName(boneTargetIndex);
-                            boneNameAndIndex.AddProperty("m_Name", targetBoneName);
+                            boneNameAndIndex.Add("m_Name", GetBoneName(boneTargetIndex));
                         }
                     }
-                    targetSettings.AddProperty("m_Bone", boneNameAndIndex);
+                    targetSettings.Add("m_Bone", boneNameAndIndex);
 
-                    string targetCoordSystem;
-                    if (opFixedData.ContainsKey("m_bWorldCoodinateTarget") && opFixedData.GetIntegerProperty("m_bWorldCoodinateTarget") > 0)
-                    {
-                        targetCoordSystem = "World";
-                    }
-                    else
-                    {
-                        targetCoordSystem = "Model";
-                    }
-                    targetSettings.AddProperty("m_TargetCoordSystem", targetCoordSystem);
+                    targetSettings.Add("m_TargetCoordSystem",
+                        opFixedData.GetIntegerProperty("m_bWorldCoodinateTarget", 0) > 0 ? "World" : "Model");
 
-                    node.AddProperty("m_TargetSettings", targetSettings);
+                    node.Add("m_TargetSettings", targetSettings);
 
-                    if (opFixedData.ContainsKey("m_bMatchTargetOrientation"))
-                    {
-                        node.AddProperty("m_bMatchTargetOrientation", opFixedData.GetIntegerProperty("m_bMatchTargetOrientation") > 0);
-                    }
-
+                    CopyBoolIfPresent(opFixedData, node, "m_bMatchTargetOrientation");
                     continue;
                 }
-                else if (key == "m_hParameterPosition")
+                else if (key is "m_hParameterPosition" or "m_hParameterOrientation")
                 {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-
-                    if (!node.Properties.ContainsKey("m_TargetSettings"))
+                    if (!node.ContainsKey("m_TargetSettings"))
                     {
-                        var targetSettings = new KVObject(null, 5);
-                        targetSettings.AddProperty("m_TargetSource", "AnimgraphParameter");
-                        targetSettings.AddProperty("m_Bone", new KVObject(null, 1));
-                        targetSettings.AddProperty("m_TargetCoordSystem", "Model");
-                        node.AddProperty("m_TargetSettings", targetSettings);
+                        var targetSettings = new KVObject();
+                        targetSettings.Add("m_TargetSource", "AnimgraphParameter");
+                        targetSettings.Add("m_Bone", KVObject.Null());
+                        targetSettings.Add("m_TargetCoordSystem", "Model");
+                        node.Add("m_TargetSettings", targetSettings);
                     }
 
-                    var targetSettingsObj = node.GetSubCollection("m_TargetSettings");
-                    targetSettingsObj.AddProperty("m_AnimgraphParameterNamePosition", paramIdValue);
-
-                    continue;
-                }
-                else if (key == "m_hParameterOrientation")
-                {
-                    var paramRef = subCollection.Value;
-                    var paramType = paramRef.GetStringProperty("m_type");
-                    var paramIndex = paramRef.GetIntegerProperty("m_index");
-                    var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-
-                    if (!node.Properties.ContainsKey("m_TargetSettings"))
-                    {
-                        var targetSettings = new KVObject(null, 5);
-                        targetSettings.AddProperty("m_TargetSource", "AnimgraphParameter");
-                        targetSettings.AddProperty("m_Bone", new KVObject(null, 1));
-                        targetSettings.AddProperty("m_TargetCoordSystem", "Model");
-                        node.AddProperty("m_TargetSettings", targetSettings);
-                    }
-
-                    var targetSettingsObj = node.GetSubCollection("m_TargetSettings");
-                    targetSettingsObj.AddProperty("m_AnimgraphParameterNameOrientation", paramIdValue);
-
-                    continue;
-                }
-                else if (key == "m_networkMode")
-                {
-                    node.AddProperty(key, value);
+                    var destKey = key == "m_hParameterPosition"
+                        ? "m_AnimgraphParameterNamePosition"
+                        : "m_AnimgraphParameterNameOrientation";
+                    node.GetSubCollection("m_TargetSettings").Add(destKey, ExtractParameterID(value));
                     continue;
                 }
             }
@@ -5812,7 +4347,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (inputNodeIds is not null)
                 {
-                    node.AddProperty(key, KVValue.MakeArray(inputNodeIds.Select(MakeInputConnection)));
+                    node.Add(key, MakeArray(inputNodeIds.Select(MakeInputConnection)));
                 }
                 continue;
             }
@@ -5822,34 +4357,11 @@ public class AnimationGraphExtract : IDisposable
                 {
                     try
                     {
-                        var compiledTagSpans = compiledNode.GetArray("m_tags");
-                        var tagSpans = new List<KVObject>();
-
-                        foreach (var compiledTagSpan in compiledTagSpans)
-                        {
-                            var tagIndex = compiledTagSpan.GetIntegerProperty("m_tagIndex");
-                            var startCycle = compiledTagSpan.GetFloatProperty("m_startCycle");
-                            var endCycle = compiledTagSpan.GetFloatProperty("m_endCycle");
-                            var duration = endCycle - startCycle;
-                            var tagId = -1L;
-
-                            if (tagIndex >= 0 && tagIndex < Tags.Length)
-                            {
-                                tagId = Tags[tagIndex].GetSubCollection("m_tagID").GetIntegerProperty("m_id");
-                            }
-
-                            var tagSpan = MakeNode("CAnimTagSpan");
-                            tagSpan.AddProperty("m_id", MakeNodeIdObjectValue(tagId));
-                            tagSpan.AddProperty("m_fStartCycle", startCycle);
-                            tagSpan.AddProperty("m_fDuration", duration);
-                            tagSpans.Add(tagSpan);
-                        }
-
-                        node.AddProperty("m_tagSpans", KVValue.MakeArray(tagSpans.ToArray()));
+                        node.Add("m_tagSpans", ConvertTagSpansArray(compiledNode.GetArray("m_tags")));
                     }
                     catch
                     {
-                        node.AddProperty("m_tagSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
+                        node.Add("m_tagSpans", KVObject.Array());
                     }
                     continue;
                 }
@@ -5858,11 +4370,11 @@ public class AnimationGraphExtract : IDisposable
                     try
                     {
                         var tagIndices = compiledNode.GetIntegerArray(key);
-                        node.AddProperty(key, ConvertTagIndicesArray(tagIndices));
+                        node.Add(key, ConvertTagIndicesArray(tagIndices));
                     }
                     catch (InvalidCastException)
                     {
-                        node.AddProperty(key, KVValue.MakeArray(Array.Empty<KVObject>()));
+                        node.Add(key, KVObject.Array());
                     }
                     continue;
                 }
@@ -5871,7 +4383,7 @@ public class AnimationGraphExtract : IDisposable
                     try
                     {
                         var tagIds = compiledNode.GetIntegerArray(key);
-                        node.AddProperty(key, KVValue.MakeArray(tagIds.Select(MakeNodeIdObjectValue)));
+                        node.Add(key, MakeArray(tagIds.Select(MakeNodeIdObjectValue)));
                         continue;
                     }
                     catch (InvalidCastException)
@@ -5886,64 +4398,25 @@ public class AnimationGraphExtract : IDisposable
                 try
                 {
                     var compiledParamSpans = compiledNode.GetSubCollection("m_paramSpans");
-
-                    if (compiledParamSpans is not null && compiledParamSpans.ContainsKey("m_spans"))
+                    if (compiledParamSpans?.ContainsKey("m_spans") == true)
                     {
-                        var compiledSpans = compiledParamSpans.GetArray("m_spans");
-                        var paramSpans = new List<KVObject>();
-
-                        foreach (var compiledSpan in compiledSpans)
-                        {
-                            var paramSpan = MakeNode("CAnimParamSpan");
-
-                            if (compiledSpan.ContainsKey("m_samples"))
-                            {
-                                paramSpan.AddProperty("m_samples", compiledSpan.GetProperty<KVObject>("m_samples"));
-                            }
-
-                            if (compiledSpan.ContainsKey("m_hParam"))
-                            {
-                                var paramHandle = compiledSpan.GetSubCollection("m_hParam");
-                                var paramType = paramHandle.GetStringProperty("m_type");
-                                var paramIndex = paramHandle.GetIntegerProperty("m_index");
-                                var paramIdValue = ParameterIDFromIndex(paramType, paramIndex);
-                                paramSpan.AddProperty("m_id", paramIdValue);
-                            }
-
-                            if (compiledSpan.ContainsKey("m_flStartCycle"))
-                            {
-                                paramSpan.AddProperty("m_flStartCycle", compiledSpan.GetFloatProperty("m_flStartCycle"));
-                            }
-
-                            if (compiledSpan.ContainsKey("m_flEndCycle"))
-                            {
-                                paramSpan.AddProperty("m_flEndCycle", compiledSpan.GetFloatProperty("m_flEndCycle"));
-                            }
-
-                            paramSpans.Add(paramSpan);
-                        }
-
-                        node.AddProperty("m_paramSpans", KVValue.MakeArray(paramSpans.ToArray()));
+                        node.Add("m_paramSpans", ConvertParamSpans(compiledParamSpans));
                     }
                 }
                 catch
                 {
-                    node.AddProperty("m_paramSpans", KVValue.MakeArray(Array.Empty<KVObject>()));
+                    node.Add("m_paramSpans", KVObject.Array());
                 }
-
                 continue;
             }
 
-            if (key == "m_paramIndex" || key == "m_hParam")
+            if (key is "m_paramIndex" or "m_hParam")
             {
-                var paramRef = subCollection.Value;
-                var paramType = paramRef.GetStringProperty("m_type");
-                var paramIndex = paramRef.GetIntegerProperty("m_index");
-                node.AddProperty("m_param", ParameterIDFromIndex(paramType, paramIndex));
+                node.Add("m_param", ExtractParameterID(value));
                 continue;
             }
 
-            node.AddProperty(newKey, value);
+            node.Add(newKey, value);
         }
         if (className == "CStateMachine")
         {
@@ -5952,66 +4425,82 @@ public class AnimationGraphExtract : IDisposable
             var transitionData = compiledNode.GetArray("m_transitionData");
 
             var states = ConvertStateMachine(stateMachine, stateData, transitionData, isComponent: false);
-            node.AddProperty("m_states", KVValue.MakeArray(states));
+            node.Add("m_states", MakeArray(states));
         }
         else if (className == "CFootPinning" && !node.ContainsKey("m_items") && footPinningItems is { Count: > 0 })
         {
-            node.AddProperty("m_items", KVValue.MakeArray(footPinningItems.ToArray()));
+            node.Add("m_items", MakeArray(footPinningItems));
         }
         return node;
     }
 
-    private KVValue ParameterIDFromIndex(string paramType, long paramIndex, bool requireFloat = false)
+    private static string ClassNameToParamType(string paramClass) => paramClass switch
+    {
+        "CFloatAnimParameter" => "FLOAT",
+        "CEnumAnimParameter" => "ENUM",
+        "CBoolAnimParameter" => "BOOL",
+        "CIntAnimParameter" => "INT",
+        "CVectorAnimParameter" => "VECTOR",
+        "CQuaternionAnimParameter" => "QUATERNION",
+        "CSymbolAnimParameter" => "SYMBOL",
+        "CVirtualAnimParameter" => "VIRTUAL",
+        _ => paramClass.TrimStart('C').Replace("AnimParameter", "", StringComparison.Ordinal).ToUpperInvariant(),
+    };
+
+    private static long GetParameterId(KVObject parameter)
+        => parameter.GetSubCollection("m_id").GetIntegerProperty("m_id");
+
+    // Indexed by uncompiled type (e.g. "FLOAT"); each list is the ordered sequence of parameter ids of that type.
+    private Dictionary<string, List<long>>? parameterIdsByType;
+    private long? firstFloatParameterId;
+
+    private void BuildParameterIndex()
+    {
+        parameterIdsByType = [];
+        foreach (var parameter in Parameters)
+        {
+            var paramClass = parameter.GetStringProperty("_class");
+            var type = ClassNameToParamType(paramClass);
+            if (!parameterIdsByType.TryGetValue(type, out var list))
+            {
+                list = [];
+                parameterIdsByType[type] = list;
+            }
+            list.Add(GetParameterId(parameter));
+
+            if (firstFloatParameterId is null && paramClass == "CFloatAnimParameter")
+            {
+                firstFloatParameterId = GetParameterId(parameter);
+            }
+        }
+    }
+
+    private KVObject ParameterIDFromIndex(string paramType, long paramIndex, bool requireFloat = false)
     {
         if (paramIndex == 255)
         {
             return MakeNodeIdObjectValue(-1);
         }
 
+        parameterIdsByType ??= BuildAndReturnParameterIndex();
+
         var uncompiledType = paramType.Replace("ANIMPARAM_", "", StringComparison.Ordinal);
-        var currentCount = 0;
-
-        for (var i = 0; i < Parameters.Length; i++)
+        if (parameterIdsByType.TryGetValue(uncompiledType, out var idsOfType) && paramIndex < idsOfType.Count)
         {
-            var parameter = Parameters[i];
-            var paramClass = parameter.GetStringProperty("_class");
-            var paramTypeName = paramClass switch
-            {
-                "CFloatAnimParameter" => "FLOAT",
-                "CEnumAnimParameter" => "ENUM",
-                "CBoolAnimParameter" => "BOOL",
-                "CIntAnimParameter" => "INT",
-                "CVectorAnimParameter" => "VECTOR",
-                "CQuaternionAnimParameter" => "QUATERNION",
-                "CSymbolAnimParameter" => "SYMBOL",
-                "CVirtualAnimParameter" => "VIRTUAL",
-                _ => paramClass.TrimStart('C').Replace("AnimParameter", "", StringComparison.Ordinal).ToUpperInvariant(),
-            };
-
-            if (paramTypeName == uncompiledType)
-            {
-                if (currentCount == paramIndex)
-                {
-                    var id = parameter.GetSubCollection("m_id").GetIntegerProperty("m_id");
-                    return MakeNodeIdObjectValue(id);
-                }
-
-                currentCount++;
-            }
+            return MakeNodeIdObjectValue(idsOfType[(int)paramIndex]);
         }
 
-        if (requireFloat && uncompiledType != "FLOAT")
+        if (requireFloat && uncompiledType != "FLOAT" && firstFloatParameterId is { } floatId)
         {
-            foreach (var parameter in Parameters)
-            {
-                if (parameter.GetStringProperty("_class") == "CFloatAnimParameter")
-                {
-                    var id = parameter.GetSubCollection("m_id").GetIntegerProperty("m_id");
-                    return MakeNodeIdObjectValue(id);
-                }
-            }
+            return MakeNodeIdObjectValue(floatId);
         }
         return MakeNodeIdObjectValue(-1);
+    }
+
+    private Dictionary<string, List<long>> BuildAndReturnParameterIndex()
+    {
+        BuildParameterIndex();
+        return parameterIdsByType!;
     }
 
     /// <inheritdoc/>

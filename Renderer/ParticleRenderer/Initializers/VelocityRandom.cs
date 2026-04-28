@@ -2,8 +2,8 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
 {
     /// <summary>
     /// Initializes particle velocity to a random direction and speed, with independent per-axis speed ranges in a local coordinate system.
-    /// Corresponds to <c>C_INIT_VelocityRandom</c>.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_INIT_VelocityRandom">C_INIT_VelocityRandom</seealso>
     class VelocityRandom : ParticleFunctionInitializer
     {
         private readonly IVectorProvider vectorMin = new LiteralVectorProvider(Vector3.Zero);
@@ -19,7 +19,7 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
             speedMax = parse.NumberProvider("m_fSpeedMax", speedMax);
         }
 
-        public override Particle Initialize(ref Particle particle, ParticleSystemRenderState particleSystemState)
+        public override Particle Initialize(ref Particle particle, ParticleCollection particles, ParticleSystemRenderState particleSystemState)
         {
             // A bit unclear what the speed is here, but I do know that going under 1.0 does nothing different than 1.0
             var speedmin = speedMin.NextNumber(ref particle, particleSystemState);

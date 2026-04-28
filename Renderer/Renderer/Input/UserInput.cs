@@ -81,6 +81,10 @@ public class UserInput
     public bool ForceUpdate { get => _forceUpdate || TransitionEndTime > Renderer.Uptime; set => _forceUpdate = value; }
     /// <summary>Gets or sets a value indicating whether mouse movement affects camera look direction.</summary>
     public bool EnableMouseLook { get; set; } = true;
+
+    /// <summary>Gets or sets the mouse look sensitivity applied to pitch/yaw deltas.</summary>
+    public float MouseSensitivity { get; set; } = 1f;
+
     private Vector2 MouseDelta2D;
     private Vector2 MouseDeltaPitchYaw;
 
@@ -120,20 +124,13 @@ public class UserInput
         if (Pressed(key))
         {
             var currentTime = Renderer.Uptime;
-            if (lastKeyPressTimes.TryGetValue(key, out var lastPressTime))
+            if (lastKeyPressTimes.TryGetValue(key, out var lastPressTime) && currentTime - lastPressTime <= maxInterval)
             {
-                var interval = currentTime - lastPressTime;
-                lastKeyPressTimes[key] = currentTime;
+                lastKeyPressTimes.Remove(key);
+                return true;
+            }
 
-                if (interval <= maxInterval)
-                {
-                    return true;
-                }
-            }
-            else
-            {
-                lastKeyPressTimes[key] = currentTime;
-            }
+            lastKeyPressTimes[key] = currentTime;
         }
 
         return false;
@@ -159,11 +156,18 @@ public class UserInput
         MouseDelta2D = mouseDelta;
         Camera.RecalculateDirectionVectors();
 
-        // Full width of the screen is a 1 PI (180deg)
+        const float m_yaw = 0.022f;
+        const float m_pitch = 0.022f;
+
         MouseDeltaPitchYaw = new(
-            MathF.PI / renderCamera.AspectRatio * mouseDelta.Y / renderCamera.WindowSize.Y,
-            MathF.PI * mouseDelta.X / renderCamera.WindowSize.X
+            m_pitch * mouseDelta.Y,
+            m_yaw * mouseDelta.X
         );
+
+        var fovRatio = Renderer.RendererContext.FieldOfView / float.RadiansToDegrees(2f * MathF.Atan(3f / 4f));
+        MouseDeltaPitchYaw *= fovRatio;
+        MouseDeltaPitchYaw *= MouseSensitivity;
+        MouseDeltaPitchYaw = Vector2.DegreesToRadians(MouseDeltaPitchYaw);
 
         if (!OrbitModeAlways)
         {
@@ -297,12 +301,12 @@ public class UserInput
             Camera.ClampRotation();
         }
 
-        if ((keyboardState & TrackedKeys.Forward) != 0)
+        if ((keyboardState & TrackedKeys.W) != 0)
         {
             OrbitZoom(-deltaTime * 10);
         }
 
-        if ((keyboardState & TrackedKeys.Back) != 0)
+        if ((keyboardState & TrackedKeys.S) != 0)
         {
             OrbitZoom(deltaTime * 10);
         }
@@ -437,32 +441,32 @@ public class UserInput
         var maxSpeed = MovementSpeed * SpeedModifiers[CurrentSpeedModifier];
         var targetVelocity = Vector3.Zero;
 
-        if ((keyboardState & TrackedKeys.Forward) != 0)
+        if ((keyboardState & TrackedKeys.W) != 0)
         {
             targetVelocity += Camera.Forward * maxSpeed;
         }
 
-        if ((keyboardState & TrackedKeys.Back) != 0)
+        if ((keyboardState & TrackedKeys.S) != 0)
         {
             targetVelocity -= Camera.Forward * maxSpeed;
         }
 
-        if ((keyboardState & TrackedKeys.Right) != 0)
+        if ((keyboardState & TrackedKeys.D) != 0)
         {
             targetVelocity += Camera.Right * maxSpeed;
         }
 
-        if ((keyboardState & TrackedKeys.Left) != 0)
+        if ((keyboardState & TrackedKeys.A) != 0)
         {
             targetVelocity -= Camera.Right * maxSpeed;
         }
 
-        if ((keyboardState & TrackedKeys.Down) != 0)
+        if ((keyboardState & TrackedKeys.Z) != 0)
         {
             targetVelocity += new Vector3(0, 0, -maxSpeed);
         }
 
-        if ((keyboardState & TrackedKeys.Up) != 0)
+        if ((keyboardState & TrackedKeys.Q) != 0)
         {
             targetVelocity += new Vector3(0, 0, maxSpeed);
         }

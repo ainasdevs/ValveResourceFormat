@@ -7,6 +7,13 @@ namespace ValveResourceFormat.Renderer.Particles
     {
         public static readonly ParticleSystemRenderState Default = new();
 
+        public ParticleSystemRenderState? ParentSystem { get; }
+
+        public ParticleSystemRenderState(ParticleSystemRenderState? parentSystem = null)
+        {
+            ParentSystem = parentSystem;
+        }
+
         public ParticleRenderer? Data { get; init; }
 
         // Properties
@@ -35,17 +42,28 @@ namespace ValveResourceFormat.Renderer.Particles
 
         public ControlPoint GetControlPoint(int cp)
         {
-            if (!controlPoints.TryGetValue(cp, out var point))
+            if (ParentSystem != null)
             {
-                point = new ControlPoint();
-                SetControlPoint(cp, point);
+                return ParentSystem.GetControlPoint(cp);
             }
 
+            if (controlPoints.TryGetValue(cp, out var point))
+            {
+                return point;
+            }
+
+            point = new ControlPoint();
+            SetControlPoint(cp, point);
             return point;
         }
 
         public void SetControlPoint(int cp, ControlPoint point)
         {
+            if (ParentSystem != null)
+            {
+                ParentSystem.SetControlPoint(cp, point);
+            }
+
             controlPoints[cp] = point;
         }
 
@@ -73,19 +91,44 @@ namespace ValveResourceFormat.Renderer.Particles
         {
             GetControlPoint(cp).Orientation = orientation;
         }
+
+        /// <summary>
+        /// Return a random float in the range [flLow, flHigh). The distribution is uniform.
+        /// </summary>
+        internal static float RandomFloat(float flLow, float flHigh)
+        {
+            var random = Random.Shared.NextSingle();
+            return float.Lerp(flLow, flHigh, random);
+        }
     }
 
     /// <summary>
     /// Control point used in Valve particle systems. System 0 is the default spawn position.
     /// These are used in numerous different ways, for many different effects. We only support a few of them.
     /// </summary>
-    class ControlPoint
+    public class ControlPoint
     {
+        /// <summary>
+        /// The position of this control point. Some times this is used for things other than position.
+        /// </summary>
         public Vector3 Position { get; set; }
+
+        /// <summary>
+        /// The orientation/direction of this control point.
+        /// </summary>
         public Vector3 Orientation { get; set; }
 
+
+        /// <summary>
+        /// Different attachment styles.
+        /// </summary>
         public ParticleAttachment AttachType { get; set; }
 
+        /// <summary>
+        /// Write potentially non positional data to the control point, for the particle to read.
+        /// </summary>
+        /// <param name="component">0, 1, 2</param>
+        /// <param name="value">Number</param>
         public void SetComponent(int component, float value)
         {
             component = Math.Clamp(component, 0, 2);

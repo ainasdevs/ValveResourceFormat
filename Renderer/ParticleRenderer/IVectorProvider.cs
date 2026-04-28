@@ -1,3 +1,4 @@
+using ValveResourceFormat.Renderer.Particles.Utils;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Renderer.Particles
@@ -55,13 +56,43 @@ namespace ValveResourceFormat.Renderer.Particles
     {
         private readonly ParticleField VectorAttribute;
         private readonly Vector3 VectorAttributeScale = Vector3.One;
+        private readonly int ControlPoint = -1;
+        private readonly Vector3 ControlPointValueScale = Vector3.One;
+        private readonly Vector3 ControlPointRelativePosition = Vector3.Zero;
+        private readonly Vector3 ControlPointRelativeDirection = Vector3.Zero;
+
         public PerParticleVectorProvider(ParticleDefinitionParser parse)
         {
             VectorAttribute = parse.ParticleField("m_nVectorAttribute");
             VectorAttributeScale = parse.Vector3("m_vVectorAttributeScale", VectorAttributeScale);
+            ControlPoint = parse.Int32("m_nControlPoint", ControlPoint);
+            ControlPointValueScale = parse.Vector3("m_vCPValueScale", ControlPointValueScale);
+            ControlPointRelativePosition = parse.Vector3("m_vCPRelativePosition", ControlPointRelativePosition);
+            ControlPointRelativeDirection = parse.Vector3("m_vCPRelativeDir", ControlPointRelativeDirection);
         }
 
-        public Vector3 NextVector(ref Particle particle, ParticleSystemRenderState renderState) => VectorAttributeScale * particle.GetVector(VectorAttribute);
+        public Vector3 NextVector(ref Particle particle, ParticleSystemRenderState renderState)
+        {
+            var result = VectorAttributeScale * particle.GetVector(VectorAttribute);
+
+            if (ControlPoint < 0)
+            {
+                return result;
+            }
+
+            var cp = renderState.GetControlPoint(ControlPoint);
+            result = cp.Position * ControlPointValueScale;
+            result += ControlPointRelativePosition;
+
+            if (ControlPointRelativeDirection != Vector3.Zero)
+            {
+                result += cp.Orientation != Vector3.Zero
+                    ? cp.Orientation - ControlPointRelativeDirection
+                    : -ControlPointRelativeDirection;
+            }
+
+            return result;
+        }
     }
 
     // Particle Velocity
@@ -128,6 +159,44 @@ namespace ValveResourceFormat.Renderer.Particles
                 return Vector3.Zero;
             }
             return cpDirection - relativeDirection;
+        }
+    }
+
+    class RandomUniformVectorProvider : IVectorProvider
+    {
+        private readonly Vector3 min;
+        private readonly Vector3 max;
+
+        public RandomUniformVectorProvider(ParticleDefinitionParser parse)
+        {
+            min = parse.Vector3("m_vRandomMin");
+            max = parse.Vector3("m_vRandomMax");
+        }
+
+        public Vector3 NextVector(ref Particle particle, ParticleSystemRenderState renderState)
+        {
+            return new Vector3(
+                ParticleSystemRenderState.RandomFloat(min.X, max.X),
+                ParticleSystemRenderState.RandomFloat(min.Y, max.Y),
+                ParticleSystemRenderState.RandomFloat(min.Z, max.Z));
+        }
+    }
+
+    class RandomUniformOffsetVectorProvider : RandomUniformVectorProvider
+    {
+        private readonly ParticleField VectorAttribute;
+        private readonly Vector3 VectorAttributeScale = Vector3.One;
+
+        public RandomUniformOffsetVectorProvider(ParticleDefinitionParser parse) : base(parse)
+        {
+            VectorAttribute = parse.ParticleField("m_nVectorAttribute");
+            VectorAttributeScale = parse.Vector3("m_vVectorAttributeScale", VectorAttributeScale);
+        }
+
+        public new Vector3 NextVector(ref Particle particle, ParticleSystemRenderState renderState)
+        {
+            var baseValue = VectorAttributeScale * particle.GetVector(VectorAttribute);
+            return baseValue + base.NextVector(ref particle, renderState);
         }
     }
 
@@ -207,9 +276,9 @@ namespace ValveResourceFormat.Renderer.Particles
             var stops = parse.Data.GetSubCollection("m_Gradient")
                 .GetArray("m_Stops");
 
-            gradientStops = new GradientStop[stops.Length];
+            gradientStops = new GradientStop[stops.Count];
 
-            for (var i = 0; i < stops.Length; i++)
+            for (var i = 0; i < stops.Count; i++)
             {
                 var position = stops[i].GetFloatProperty("m_flPosition");
                 var color = stops[i].GetArray<int>("m_Color");

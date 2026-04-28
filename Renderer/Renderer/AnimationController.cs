@@ -1,5 +1,3 @@
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 using ValveResourceFormat.ResourceTypes.ModelAnimation;
 using ValveResourceFormat.ResourceTypes.ModelFlex;
 
@@ -150,6 +148,20 @@ namespace ValveResourceFormat.Renderer
             {
                 BindPose.AsSpan().CopyTo(Pose);
                 return true;
+            }
+
+            if (ActiveAnimation?.Clip is { IsAdditive: true })
+            {
+                // We need a frame we can write to without ruining the frame cache
+                AnimationFrame.Bones.CopyTo(FrameCache.InterpolatedFrame.Bones);
+                AnimationFrame = FrameCache.InterpolatedFrame;
+
+                // Add over bind pose
+                for (var i = 0; i < AnimationFrame.Bones.Length; i++)
+                {
+                    var bindPose = new FrameBone(Skeleton.Bones[i].Position, 1f, Skeleton.Bones[i].Angle);
+                    AnimationFrame.Bones[i] = AnimationFrame.Bones[i].BlendAdd(bindPose, 1f);
+                }
             }
 
             foreach (var root in Skeleton.Roots)

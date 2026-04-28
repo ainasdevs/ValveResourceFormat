@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using OpenTK.Graphics.OpenGL;
+using ValveResourceFormat.Blocks;
 using ValveResourceFormat.Renderer.Buffers;
 using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.Renderer.SceneNodes;
@@ -72,6 +73,15 @@ namespace ValveResourceFormat.Renderer
 
         /// <summary>Gets or sets the physics simulation world associated with this scene.</summary>
         public Rubikon? PhysicsWorld { get; set; }
+
+        /// <summary>Gets or sets the voxel visibility data.</summary>
+        public VoxelVisibility? VoxelVisibility { get; set; }
+
+        /// <summary>Gets or sets whether PVS culling is enabled for this scene.</summary>
+        public bool EnablePvsCulling { get; set; }
+
+        /// <summary>Gets or sets the PVS bitfield for the cluster at the current camera position.</summary>
+        public byte[]? CurrentFramePvs { get; set; }
 
         private UniformBuffer<LightingConstants>? lightingBuffer;
         private UniformBuffer<EnvMapArray>? envMapBuffer;
@@ -347,9 +357,10 @@ namespace ValveResourceFormat.Renderer
                     return false;
                 }
 
-                return node.EntityData.Properties.Properties.TryGetValue(keyToFind, out var value)
-                    && value.Value is string outString
-                    && valueToFind.Equals(outString, StringComparison.OrdinalIgnoreCase);
+                var value = node.EntityData[keyToFind];
+                return value != null
+                    && value.ValueType == ValveKeyValue.KVValueType.String
+                    && valueToFind.Equals((string)value, StringComparison.OrdinalIgnoreCase);
             }
 
             return staticNodes.Find(IsMatchingEntity) ?? dynamicNodes.Find(IsMatchingEntity);
@@ -949,7 +960,7 @@ namespace ValveResourceFormat.Renderer
 
             entry.DrawCalls ??= CreateDepthOnlyDrawCallCollection();
             // Skip static geo for stationary lights
-            CollectShadowDrawCalls(lightFrustum, includeStatic: light.DirectLight != 3, includeDynamic: true, entry.DrawCalls);
+            CollectShadowDrawCalls(lightFrustum, includeStatic: light.DirectLight != SceneLight.DirectLightType.Stationary, includeDynamic: true, entry.DrawCalls);
             entry.FrustumHash = barnLightFrustumHash;
         }
 

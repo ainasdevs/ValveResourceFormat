@@ -2,8 +2,8 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
 {
     /// <summary>
     /// Initializes the trail length of a particle to a random value between a min and max length.
-    /// Corresponds to <c>C_INIT_RandomTrailLength</c>.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_INIT_RandomTrailLength">C_INIT_RandomTrailLength</seealso>
     class RandomTrailLength : ParticleFunctionInitializer
     {
         private readonly float minLength = 0.1f;
@@ -15,7 +15,7 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
             maxLength = parse.Float("m_flMaxLength", maxLength);
         }
 
-        public override Particle Initialize(ref Particle particle, ParticleSystemRenderState particleSystemState)
+        public override Particle Initialize(ref Particle particle, ParticleCollection particles, ParticleSystemRenderState particleSystemState)
         {
             particle.TrailLength = ParticleCollection.RandomBetween(particle.ParticleID, minLength, maxLength);
 

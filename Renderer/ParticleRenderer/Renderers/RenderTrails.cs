@@ -1,12 +1,13 @@
 using OpenTK.Graphics.OpenGL;
+using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Renderer.Particles.Renderers
 {
     /// <summary>
     /// Renders particles as trail segments stretched between the particle's current and previous
     /// positions, with configurable length, fade-in, texture scaling, and blend modes.
-    /// Corresponds to <c>C_OP_RenderTrails</c>.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_OP_RenderTrails">C_OP_RenderTrails</seealso>
     internal class RenderTrails : ParticleFunctionRenderer
     {
         private const string ShaderName = "vrf.particle_trail";
@@ -14,6 +15,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         private readonly Shader shader;
         private readonly RendererContext RendererContext;
         private readonly int vaoHandle;
+        private readonly int bufferHandle;
         private readonly RenderTexture texture;
 
         private readonly float animationRate = 0.1f;
@@ -38,12 +40,13 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             // The same quad is reused for all particles
             var (quadVao, quadBuffer) = SetupQuadBuffer();
             vaoHandle = quadVao;
+            bufferHandle = quadBuffer;
 
             string? textureName = null;
 
             if (parse.Data.ContainsKey("m_hTexture"))
             {
-                textureName = parse.Data.GetProperty<string>("m_hTexture");
+                textureName = parse.Data.GetStringProperty("m_hTexture");
             }
             else
             {
@@ -51,7 +54,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                 if (textures.Length > 0)
                 {
                     // TODO: Support more than one texture
-                    textureName = textures[0].Data.GetProperty<string>("m_hTexture");
+                    textureName = textures[0].Data.GetStringProperty("m_hTexture");
                 }
             }
 
@@ -224,6 +227,12 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
 
         public override void SetRenderMode(string renderMode)
         {
+        }
+
+        public void Delete()
+        {
+            GL.DeleteVertexArray(vaoHandle);
+            GL.DeleteBuffer(bufferHandle);
         }
     }
 }

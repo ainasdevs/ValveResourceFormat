@@ -3,9 +3,11 @@
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using SharpGLTF.Memory;
 using SharpGLTF.Schema2;
+using ValveKeyValue;
 using ValveResourceFormat.NavMesh;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.ResourceTypes.ModelAnimation;
@@ -369,8 +371,8 @@ namespace ValveResourceFormat.IO
             foreach (var entity in entityLump.GetEntities())
             {
                 var transform = EntityTransformHelper.CalculateTransformationMatrix(entity) * parentTransform;
-                var modelName = entity.GetProperty<string>("model");
-                var className = entity.GetProperty<string>("classname");
+                var modelName = entity.GetStringProperty("model");
+                var className = entity.GetStringProperty("classname");
 
                 if (string.IsNullOrEmpty(modelName))
                 {
@@ -400,7 +402,7 @@ namespace ValveResourceFormat.IO
                     }
                     else if (className == "point_template")
                     {
-                        var entityLumpName = entity.GetProperty<string>("entitylumpname");
+                        var entityLumpName = entity.GetStringProperty("entitylumpname");
 
                         if (entityLumpName != null && childEntityLumps.TryGetValue(entityLumpName, out var childLump))
                         {
@@ -429,7 +431,7 @@ namespace ValveResourceFormat.IO
                 // TODO: skybox/skydome
 
                 var model = (VModel)modelResource.DataBlock!;
-                var skinName = entity.GetProperty<string>("skin");
+                var skinName = entity.GetStringProperty("skin");
                 if (skinName == "0" || skinName == "default")
                 {
                     skinName = null;
@@ -437,7 +439,7 @@ namespace ValveResourceFormat.IO
 
                 // todo: rendercolor might sometimes be vec4, which holds renderamt
                 var rendercolor = entity.GetColor32Property("rendercolor");
-                var renderamt = entity.GetPropertyUnchecked("renderamt", 1.0f);
+                var renderamt = entity.GetFloatProperty("renderamt", 1.0f);
 
                 if (renderamt > 1f)
                 {
@@ -502,7 +504,7 @@ namespace ValveResourceFormat.IO
         {
             foreach (var sceneObject in worldNode.SceneObjects)
             {
-                var renderableModel = sceneObject.GetProperty<string>("m_renderableModel");
+                var renderableModel = sceneObject.GetStringProperty("m_renderableModel");
                 if (renderableModel == null)
                 {
                     continue;
@@ -529,7 +531,7 @@ namespace ValveResourceFormat.IO
 
             foreach (var sceneObject in worldNode.AggregateSceneObjects)
             {
-                var renderableModel = sceneObject.GetProperty<string>("m_renderableModel");
+                var renderableModel = sceneObject.GetStringProperty("m_renderableModel");
 
                 if (renderableModel != null)
                 {
@@ -616,10 +618,14 @@ namespace ValveResourceFormat.IO
                 var skeletonData = Skeleton.FromSkeletonData(((BinaryKV3)skeletonResource.DataBlock!).Data);
 
                 var (skeletonNode, joints) = CreateGltfSkeleton(scene, skeletonData, clip.SkeletonName);
-                if (joints == null)
+                if (skeletonNode == null || joints == null)
                 {
                     throw new InvalidDataException($"Failure creating glTF skeleton for '{clip.SkeletonName}'.");
                 }
+
+                // Create a skeleton visualization mesh so importers recognize this as a proper skeleton
+                var meshNode = CreateSkeletonVisualizationMesh(exportedModel, scene, skeletonData, joints);
+                meshNode.Name = $"{clip.SkeletonName}.empty_mesh_reference";
 
                 //if (ExportAnimations)
                 {
@@ -627,6 +633,8 @@ namespace ValveResourceFormat.IO
                     var animationWriter = new AnimationWriter(skeletonData, []);
                     animationWriter.WriteAnimation(exportedModel, joints, animation);
                 }
+
+                skeletonNode.WorldMatrix = TRANSFORMSOURCETOGLTF;
             }
 
             ExportAnimationClip(animationClip);
@@ -663,7 +671,7 @@ namespace ValveResourceFormat.IO
                 // When exporting map entities, only export the default animation
                 if (entity != null)
                 {
-                    var entityAnimation = entity.GetProperty<string>("defaultanim") ?? entity.GetProperty<string>("idleanim");
+                    var entityAnimation = entity.GetStringProperty("defaultanim") ?? entity.GetStringProperty("idleanim");
                     if (entityAnimation != null)
                     {
                         animationFilter = [
@@ -699,7 +707,7 @@ namespace ValveResourceFormat.IO
                 var meshName = m.Name;
 
                 // Apply mesh filter if specified
-                if (MeshFilter.Count > 0 && !MeshFilter.Contains(name.Split('.')[^1]))
+                if (MeshFilter.Count > 0 && !MeshFilter.Contains(meshName.Split('.')[^1]))
                 {
                     continue;
                 }
@@ -780,7 +788,7 @@ namespace ValveResourceFormat.IO
             VMesh mesh, Blocks.VBIB vbib, Node[]? joints, int[]? boneRemapTable = null,
             string? skinMaterialPath = null, EntityLump.Entity? entity = null)
         {
-            if (mesh.Data.GetArray("m_sceneObjects").Length == 0)
+            if (mesh.Data.GetArray("m_sceneObjects").Count == 0)
             {
                 return null;
             }
@@ -798,9 +806,9 @@ namespace ValveResourceFormat.IO
 
             if (entity != null && ExportExtras)
             {
-                foreach (var (key, value) in entity.Properties)
+                foreach (var (key, value) in entity.Children)
                 {
-                    exportedMesh.Extras[key] = value as string;
+                    exportedMesh.Extras[key] = value.ValueType == KVValueType.String ? (string)value : value.ToString();
                 }
             }
 
@@ -928,9 +936,73 @@ namespace ValveResourceFormat.IO
             }
         }
 
+        private static Node CreateSkeletonVisualizationMesh(ModelRoot exportedModel, Scene scene, Skeleton skeleton, Node[] joints)
+        {
+            var positions = new List<Vector3>();
+            var normals = new List<Vector3>();
+            var boneIndicesShort = new List<ushort>();
+            var boneWeights = new List<Vector4>();
+
+            // Create a single vertex at each bone position
+            foreach (var bone in skeleton.Bones)
+            {
+                var joint = joints[bone.Index];
+                var worldMatrix = joint.WorldMatrix;
+                var worldPosition = worldMatrix.Translation;
+
+                positions.Add(worldPosition);
+                normals.Add(Vector3.UnitY);
+                boneIndicesShort.Add((ushort)bone.Index);
+                boneIndicesShort.Add(0);
+                boneIndicesShort.Add(0);
+                boneIndicesShort.Add(0);
+                boneWeights.Add(new Vector4(1.0f, 0, 0, 0));
+            }
+
+            var indices = Enumerable.Range(0, positions.Count).ToArray();
+
+            var mesh = exportedModel.CreateMesh();
+            var primitive = mesh.CreatePrimitive();
+
+            var positionAccessor = CreateAccessor(exportedModel, [.. positions]);
+            var normalAccessor = CreateAccessor(exportedModel, [.. normals]);
+            var weightsAccessor = CreateAccessor(exportedModel, [.. boneWeights]);
+
+            // Create JOINTS accessor with UInt16 format
+            var jointsBufferView = exportedModel.CreateBufferView(2 * boneIndicesShort.Count, 8, BufferMode.ARRAY_BUFFER);
+            var bufferViewShorts = MemoryMarshal.Cast<byte, ushort>(((Memory<byte>)jointsBufferView.Content).Span);
+            for (var i = 0; i < boneIndicesShort.Count; i++)
+            {
+                bufferViewShorts[i] = boneIndicesShort[i];
+            }
+
+            var jointsAccessor = exportedModel.CreateAccessor();
+            jointsAccessor.SetVertexData(jointsBufferView, 0, positions.Count, new AttributeFormat(DimensionType.VEC4, EncodingType.UNSIGNED_SHORT));
+
+            primitive.SetVertexAccessor("POSITION", positionAccessor);
+            primitive.SetVertexAccessor("NORMAL", normalAccessor);
+            primitive.SetVertexAccessor("JOINTS_0", jointsAccessor);
+            primitive.SetVertexAccessor("WEIGHTS_0", weightsAccessor);
+
+            primitive.WithIndicesAccessor(PrimitiveType.POINTS, indices);
+
+            // Reuse skeleton material if it already exists
+            var material = exportedModel.LogicalMaterials.FirstOrDefault(m => m.Name == "skeleton_material");
+            if (material == null)
+            {
+                material = exportedModel.CreateMaterial("skeleton_material");
+                material.WithPBRMetallicRoughness(new Vector4(0.8f, 0.8f, 0.8f, 1.0f), null, metallicFactor: 0.0f);
+                material.Alpha = AlphaMode.OPAQUE;
+            }
+
+            primitive.WithMaterial(material);
+
+            return scene.CreateNode().WithSkinnedMesh(mesh, TRANSFORMSOURCETOGLTF, joints);
+        }
+
         private static PunctualLight CreateGltfLightEnvironment(ModelRoot exportedModel, VEntityLump.Entity entity)
         {
-            var intensity = entity.GetPropertyUnchecked("brightness", 1f);
+            var intensity = entity.GetFloatProperty("brightness", 1f);
             var color = entity.GetColor32Property("color");
             color = ColorSpace.SrgbGammaToLinear(color);
 

@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using ValveKeyValue;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.IO.ContentFormats.DmxModel;
 using ValveResourceFormat.IO.ContentFormats.ValveMap;
@@ -388,7 +389,8 @@ public sealed class MapExtract
         var phys = LoadWorldPhysics();
         if (phys != null)
         {
-            var worldPhysMeshes = phys.Parts[0].Shape.Meshes.Where(m => phys.CollisionAttributes[m.CollisionAttributeIndex].GetStringProperty("m_CollisionGroupString") == "Default");
+            var collisionAttributes = phys.CollisionAttributes;
+            var worldPhysMeshes = phys.Parts[0].Shape.Meshes.Where(m => collisionAttributes[m.CollisionAttributeIndex].GetStringProperty("m_CollisionGroupString") == "Default");
 
             PhysVertexMatcher = new PhysicsVertexMatcher(worldPhysMeshes.ToArray());
 
@@ -641,7 +643,7 @@ public sealed class MapExtract
                 }
 
                 var modelmesh = ((Model)resource.DataBlock).GetEmbeddedMeshes().First();
-                var sceneObject = modelmesh.Mesh.Data.GetArray("m_sceneObjects").First();
+                var sceneObject = modelmesh.Mesh.Data.GetArray("m_sceneObjects")[0];
                 var drawCalls = sceneObject.GetArray("m_drawCalls");
 
                 var tint = Vector3.One * 255f;
@@ -804,8 +806,9 @@ public sealed class MapExtract
 
     private void HandleWorldNode(WorldNode node)
     {
-        var layerNodes = new List<MapNode>(node.LayerNames.Count);
-        foreach (var layerName in node.LayerNames)
+        var layerNames = node.LayerNames;
+        var layerNodes = new List<MapNode>(layerNames.Count);
+        foreach (var layerName in layerNames)
         {
             if (layerName == "world_layer_base")
             {
@@ -886,8 +889,8 @@ public sealed class MapExtract
 
         void ProcessSceneObject(KVObject sceneObject, int layerIndex, List<MapNode> layerNodes)
         {
-            var modelName = sceneObject.GetProperty<string>("m_renderableModel");
-            var meshName = sceneObject.GetProperty<string>("m_renderable");
+            var modelName = sceneObject.GetStringProperty("m_renderableModel");
+            var meshName = sceneObject.GetStringProperty("m_renderable");
 
             if (string.IsNullOrEmpty(modelName))
             {
@@ -946,8 +949,8 @@ public sealed class MapExtract
                 propStatic.Scales = scales;
             }
 
-            var fadeStartDistance = sceneObject.GetProperty<double>("m_flFadeStartDistance");
-            var fadeEndDistance = sceneObject.GetProperty<double>("m_flFadeEndDistance");
+            var fadeStartDistance = sceneObject.GetDoubleProperty("m_flFadeStartDistance");
+            var fadeEndDistance = sceneObject.GetDoubleProperty("m_flFadeEndDistance");
             if (fadeStartDistance > 0)
             {
                 propStatic.EntityProperties["fademindist"] = fadeStartDistance.ToString(CultureInfo.InvariantCulture);
@@ -966,7 +969,7 @@ public sealed class MapExtract
                 propStatic.EntityProperties["precomputelightprobes"] = StringBool(false);
             }*/
 
-            var skin = sceneObject.GetProperty<string>("m_skin");
+            var skin = sceneObject.GetStringProperty("m_skin");
             if (!string.IsNullOrEmpty(skin))
             {
                 propStatic.EntityProperties["skin"] = skin;
@@ -992,7 +995,7 @@ public sealed class MapExtract
 
         void ProcessAggregate(KVObject agg, int layerIndex, List<MapNode> layerNodes)
         {
-            var modelName = agg.GetProperty<string>("m_renderableModel");
+            var modelName = agg.GetStringProperty("m_renderableModel");
             var anyFlags = agg.GetEnumValue<ObjectTypeFlags>("m_anyFlags", normalize: true);
             var allFlags = agg.GetEnumValue<ObjectTypeFlags>("m_allFlags", normalize: true);
 
@@ -1002,7 +1005,7 @@ public sealed class MapExtract
 
             var aggregateMeshes = agg.GetArray("m_aggregateMeshes");
 
-            var drawCalls = Array.Empty<KVObject>();
+            IReadOnlyList<KVObject> drawCalls = [];
             var drawCenters = Array.Empty<Vector3>();
 
             var transformIndex = 0;
@@ -1010,7 +1013,7 @@ public sealed class MapExtract
                 ? agg.GetArray("m_fragmentTransforms")
                 : [];
 
-            var aggregateHasTransforms = fragmentTransforms.Length > 0;
+            var aggregateHasTransforms = fragmentTransforms.Count > 0;
 
             FolderExtractFilter.Add(modelName);
             using var modelRes = FileLoader.LoadFileCompiled(modelName);
@@ -1024,7 +1027,7 @@ public sealed class MapExtract
 
             // TODO: reference meshes
             var mesh = ((Model)modelRes.DataBlock).GetEmbeddedMeshes().First();
-            var sceneObject = mesh.Mesh.Data.GetArray("m_sceneObjects").First();
+            var sceneObject = mesh.Mesh.Data.GetArray("m_sceneObjects")[0];
             drawCalls = sceneObject.GetArray("m_drawCalls");
 
             if (convertToHalfEdge)
@@ -1043,7 +1046,7 @@ public sealed class MapExtract
                         .ToArray();
                 }
 
-                var modelFiles = ModelExtract.GetContentFiles_DrawCallSplit(modelRes, FileLoader, drawCenters, drawCalls.Length);
+                var modelFiles = ModelExtract.GetContentFiles_DrawCallSplit(modelRes, FileLoader, drawCenters, drawCalls.Count);
                 PreExportedFragments.AddRange(modelFiles);
             }
 
@@ -1057,12 +1060,12 @@ public sealed class MapExtract
             var drawSelectionSet = new CMapSelectionSet();
             if (convertToHalfEdge)
             {
-                drawSelectionSet.SelectionSetName = "hammer mesh " + (aggregateHasTransforms ? "(instanced) " : "(" + drawCalls.Length + " split draw meshes) ") + Path.GetFileNameWithoutExtension(modelName);
+                drawSelectionSet.SelectionSetName = "hammer mesh " + (aggregateHasTransforms ? "(instanced) " : "(" + drawCalls.Count + " split draw meshes) ") + Path.GetFileNameWithoutExtension(modelName);
                 HammerMeshesSelectionSet?.Children.Add(drawSelectionSet);
             }
             else
             {
-                drawSelectionSet.SelectionSetName = "prop_static render mesh " + (aggregateHasTransforms ? "(instanced) " : "(" + drawCalls.Length + " split draw meshes) ") + Path.GetFileNameWithoutExtension(modelName);
+                drawSelectionSet.SelectionSetName = "prop_static render mesh " + (aggregateHasTransforms ? "(instanced) " : "(" + drawCalls.Count + " split draw meshes) ") + Path.GetFileNameWithoutExtension(modelName);
                 StaticPropsSelectionSet?.Children.Add(drawSelectionSet);
             }
 
@@ -1143,10 +1146,12 @@ public sealed class MapExtract
             }
         }
 
-        for (var i = 0; i < node.SceneObjects.Count; i++)
+        var sceneObjects = node.SceneObjects;
+        var sceneObjectLayerIndices = node.SceneObjectLayerIndices;
+        for (var i = 0; i < sceneObjects.Count; i++)
         {
-            var sceneObject = node.SceneObjects[i];
-            var layerIndex = (int)(node.SceneObjectLayerIndices?[i] ?? -1);
+            var sceneObject = sceneObjects[i];
+            var layerIndex = (int)(sceneObjectLayerIndices?[i] ?? -1);
             ProcessSceneObject(sceneObject, layerIndex, layerNodes);
         }
 
@@ -1177,26 +1182,25 @@ public sealed class MapExtract
     {
         var textureName = Path.ChangeExtension(materialName, ".png");
 
-        var root = new ValveKeyValue.KVObject("Layer0",
-        [
-            new("shader", "generic.vfx"),
-            new("F_TRANSLUCENT", 1),
-            new("TextureTranslucency", $"[{0.700000f:N6} {0.700000f:N6} {0.700000f:N6} {0.000000f:N6}]"),
-            new("TextureColor", textureName),
-            new("Attributes",
-            [
-                new("mapbuilder.nodraw", 1),
-                new("tools.toolsmaterial", 1),
-                new("physics.nodefaultsimplification", 1),
-            ]),
-            new("SystemAttributes",
-            [
-                new("PhysicsSurfaceProperties", surfaceProperty),
-            ]),
-        ]);
+        var root = ValveKeyValue.KVObject.ListCollection();
+        root.Add("shader", "generic.vfx");
+        root.Add("F_TRANSLUCENT", 1);
+        root.Add("TextureTranslucency", $"[{0.700000f:N6} {0.700000f:N6} {0.700000f:N6} {0.000000f:N6}]");
+        root.Add("TextureColor", textureName);
+
+        var attributes = ValveKeyValue.KVObject.ListCollection();
+        attributes.Add("mapbuilder.nodraw", 1);
+        attributes.Add("tools.toolsmaterial", 1);
+        attributes.Add("physics.nodefaultsimplification", 1);
+        root.Add("Attributes", attributes);
+
+        var systemAttributes = ValveKeyValue.KVObject.ListCollection();
+        systemAttributes.Add("PhysicsSurfaceProperties", surfaceProperty);
+        root.Add("SystemAttributes", systemAttributes);
 
         using var ms = new MemoryStream();
-        ValveKeyValue.KVSerializer.Create(ValveKeyValue.KVSerializationFormat.KeyValues1Text).Serialize(ms, root);
+        var doc = new ValveKeyValue.KVDocument(new(), "Layer0", root);
+        ValveKeyValue.KVSerializer.Create(ValveKeyValue.KVSerializationFormat.KeyValues1Text).Serialize(ms, doc);
 
         var vmat = new ContentFile()
         {
@@ -1235,7 +1239,7 @@ public sealed class MapExtract
 
         foreach (var compiledEntity in entityLump.GetEntities())
         {
-            var className = compiledEntity.GetProperty<string>("classname");
+            var className = compiledEntity.GetStringProperty("classname");
 
             if (className == null)
             {
@@ -1246,7 +1250,7 @@ public sealed class MapExtract
             {
                 AddProperties(className, compiledEntity, MapDocument.World);
                 MapDocument.World.EntityProperties["description"] = $"Decompiled with {StringToken.VRF_GENERATOR}";
-                var mapType = compiledEntity.GetProperty<string>("mapusagetype");
+                var mapType = compiledEntity.GetStringProperty("mapusagetype");
                 if (mapType != null)
                 {
                     MapDocument.World.MapUsageType = mapType;
@@ -1295,7 +1299,7 @@ public sealed class MapExtract
                 }
             }
 
-            var rawModelName = compiledEntity.GetProperty<string>("model");
+            var rawModelName = compiledEntity.GetStringProperty("model");
             string? modelName = null;
             if (!string.IsNullOrEmpty(rawModelName))
             {
@@ -1332,7 +1336,7 @@ public sealed class MapExtract
                 }
             }
 
-            var rawSnapshotFile = compiledEntity.GetProperty<string>("snapshot_file");
+            var rawSnapshotFile = compiledEntity.GetStringProperty("snapshot_file");
             string? snapshotFile = null;
             if (!string.IsNullOrEmpty(rawSnapshotFile))
             {
@@ -1410,7 +1414,7 @@ public sealed class MapExtract
     private static int[] AddProperties(string className, Entity compiledEntity, BaseEntity mapEntity)
     {
         var entityLineage = Array.Empty<int>();
-        foreach (var (key, value) in compiledEntity.Properties)
+        foreach (var (key, value) in compiledEntity.Children)
         {
             var propertyKey = key.ToLowerInvariant();
 
@@ -1436,11 +1440,11 @@ public sealed class MapExtract
             {
                 var dmeConnection = new DmeConnectionData
                 {
-                    OutputName = connection.GetProperty<string>("m_outputName"),
+                    OutputName = connection.GetStringProperty("m_outputName"),
                     TargetType = connection.GetInt32Property("m_targetType"),
-                    TargetName = RemoveTargetnamePrefix(connection.GetProperty<string>("m_targetName")),
-                    InputName = connection.GetProperty<string>("m_inputName"),
-                    OverrideParam = connection.GetProperty<string>("m_overrideParam"),
+                    TargetName = RemoveTargetnamePrefix(connection.GetStringProperty("m_targetName")),
+                    InputName = connection.GetStringProperty("m_inputName"),
+                    OverrideParam = connection.GetStringProperty("m_overrideParam"),
                     Delay = connection.GetFloatProperty("m_flDelay"),
                     TimesToFire = connection.GetInt32Property("m_nTimesToFire"),
                 };
@@ -1473,7 +1477,7 @@ public sealed class MapExtract
         {
             try
             {
-                var hammerUniqueIdString = ToEditString(compiledEntity.GetProperty(key).Value);
+                var hammerUniqueIdString = compiledEntity.TryGetValue(key, out var hammerValue) ? ToEditString(hammerValue) : null;
                 if (!string.IsNullOrEmpty(hammerUniqueIdString))
                 {
                     lineage = Array.ConvertAll(hammerUniqueIdString.Split(':'), int.Parse);
@@ -1528,9 +1532,20 @@ public sealed class MapExtract
                 return string.Join(' ', kvObject.Select(p => p.Value.ToString() ?? string.Empty));
             }
 
-            using var writer = new IndentedTextWriter();
-            kvObject.Serialize(writer);
-            return writer.ToString();
+            if (kvObject.ValueType is not KVValueType.Collection)
+            {
+                return kvObject.ValueType switch
+                {
+                    KVValueType.String => (string)kvObject,
+                    KVValueType.Boolean => StringBool((bool)kvObject),
+                    KVValueType.Null => string.Empty,
+                    _ => kvObject.ToString(),
+                };
+            }
+
+            using var ms = new MemoryStream();
+            KVSerializer.Create(KVSerializationFormat.KeyValues1Text).Serialize(ms, new KVDocument(null, null, kvObject));
+            return System.Text.Encoding.UTF8.GetString(ms.ToArray());
         }
 
         return data switch

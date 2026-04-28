@@ -3,8 +3,9 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
     /// <summary>
     /// Places particles at positions taken from a user-defined list of control-point-relative
     /// offsets. Optionally spaces particles evenly along the path formed by the list, with support
-    /// for closed-loop paths. Corresponds to <c>C_INIT_PointList</c>.
+    /// for closed-loop paths.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_INIT_PointList">C_INIT_PointList</seealso>
     class PointList : ParticleFunctionInitializer
     {
         private class PointDefinition
@@ -103,7 +104,7 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
 
         }
 
-        public override Particle Initialize(ref Particle particle, ParticleSystemRenderState particleSystemState)
+        public override Particle Initialize(ref Particle particle, ParticleCollection particles, ParticleSystemRenderState particleSystemState)
         {
             var particlePosition = GetParticlePosition(particleSystemState);
 

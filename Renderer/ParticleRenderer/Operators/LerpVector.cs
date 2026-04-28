@@ -4,6 +4,7 @@ namespace ValveResourceFormat.Renderer.Particles.Operators
     /// Lerps a vector particle attribute from its initial value toward a target vector over a
     /// specified time window of the particle's absolute age.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_OP_LerpVector">C_OP_LerpVector</seealso>
     class LerpVector : ParticleFunctionOperator
     {
         private readonly ParticleField FieldOutput = ParticleField.Position;
@@ -16,7 +17,7 @@ namespace ValveResourceFormat.Renderer.Particles.Operators
         public LerpVector(ParticleDefinitionParser parse) : base(parse)
         {
             FieldOutput = parse.ParticleField("m_nFieldOutput", FieldOutput);
-            output = parse.Vector3("m_nInputValue", output);
+            output = parse.Vector3("m_vecOutput", output);
             startTime = parse.Float("m_flStartTime", startTime);
             endTime = parse.Float("m_flEndTime", endTime);
             setMethod = parse.Enum<ParticleSetMethod>("m_nSetMethod", setMethod);

@@ -2,8 +2,8 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
 {
     /// <summary>
     /// Initializes a vector particle attribute to a random value with each component chosen independently between a min and max vector.
-    /// Corresponds to <c>C_INIT_RandomVector</c>.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_INIT_RandomVector">C_INIT_RandomVector</seealso>
     class RandomVector : ParticleFunctionInitializer
     {
         private readonly ParticleField FieldOutput = ParticleField.Position;
@@ -17,7 +17,7 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
             Max = parse.Vector3("m_vecMax", Max);
         }
 
-        public override Particle Initialize(ref Particle particle, ParticleSystemRenderState particleSystemState)
+        public override Particle Initialize(ref Particle particle, ParticleCollection particles, ParticleSystemRenderState particleSystemState)
         {
             var newVector = ParticleCollection.RandomBetweenPerComponent(particle.ParticleID, Min, Max);
 

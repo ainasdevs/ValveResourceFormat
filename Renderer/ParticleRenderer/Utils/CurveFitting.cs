@@ -1,3 +1,4 @@
+using ValveKeyValue;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Renderer.Particles.Utils
@@ -135,22 +136,22 @@ namespace ValveResourceFormat.Renderer.Particles.Utils
             var splines = curveInfo.GetArray("m_spline");
             var tangents = curveInfo.GetArray("m_tangents");
 
-            var CurvePoints = new CurvePoint[splines.Length];
+            var CurvePoints = new CurvePoint[splines.Count];
 
-            for (var i = 0; i < splines.Length; i++)
+            for (var i = 0; i < splines.Count; i++)
             {
                 CurvePoints[i] = new CurvePoint
                 {
                     X = splines[i].GetFloatProperty("x"),
                     Y = splines[i].GetFloatProperty("y"),
-                    IncomingTangent = CurvePoint.GetTangentType(tangents[i].GetProperty<string>("m_nIncomingTangent")),
-                    OutgoingTangent = CurvePoint.GetTangentType(tangents[i].GetProperty<string>("m_nOutgoingTangent")),
+                    IncomingTangent = CurvePoint.GetTangentType(tangents[i].GetStringProperty("m_nIncomingTangent")),
+                    OutgoingTangent = CurvePoint.GetTangentType(tangents[i].GetStringProperty("m_nOutgoingTangent")),
                     SlopeIncoming = splines[i].GetFloatProperty("m_flSlopeIncoming"),
                     SlopeOutgoing = splines[i].GetFloatProperty("m_flSlopeOutgoing"),
                 };
             }
 
-            CurveSegments = new SplineCurve[splines.Length - 1];
+            CurveSegments = new SplineCurve[splines.Count - 1];
 
             for (var i = 0; i < CurvePoints.Length - 1; i++)
             {

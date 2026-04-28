@@ -40,10 +40,10 @@ layout(std140, binding = 2) uniform EnvMapArray
 #if (S_SCENE_CUBEMAP_TYPE == 0)
     // ...
 #elif (S_SCENE_CUBEMAP_TYPE == 1)
-    uniform samplerCube g_tEnvironmentMap;
+    uniform samplerCube g_tEnvironmentMap; // SrgbRead(true)
     flat in uvec4 g_nEnvMapVisibility;
 #elif (S_SCENE_CUBEMAP_TYPE == 2)
-    uniform samplerCubeArray g_tEnvironmentMap;
+    uniform samplerCubeArray g_tEnvironmentMap; // SrgbRead(true)
     flat in uvec4 g_nEnvMapVisibility;
 #endif
 
@@ -184,7 +184,15 @@ vec3 GetEnvironmentNoBRDF(MaterialProperties_t mat, float roughnessReflectionCor
     #if (S_SCENE_CUBEMAP_TYPE == 0)
         envMap = vec3(0.3, 0.3, 0.3);
     #elif (S_SCENE_CUBEMAP_TYPE == 1)
-        int envMapIndex = int(g_nEnvMapVisibility.x);
+        int envMapIndex = 0;
+        for (uint visBucket = 0; visBucket < 4; visBucket++)
+        {
+            if (g_nEnvMapVisibility[visBucket] != 0u)
+            {
+                envMapIndex = int(visBucket * 32) + findLSB(g_nEnvMapVisibility[visBucket]);
+                break;
+            }
+        }
         EnvMapData envData = envMaps[envMapIndex];
         bool isBoxProjection = envData.ProjectionType == 1u;
         vec3 envMapBoxMin = envData.BoxMins;

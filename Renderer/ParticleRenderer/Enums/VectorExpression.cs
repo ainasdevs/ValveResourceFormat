@@ -3,7 +3,8 @@ namespace ValveResourceFormat.Renderer.Particles
     /// <summary>
     /// Mathematical operation types for vector expressions.
     /// </summary>
-    public enum VectorExpression // VectorExpressionType_t
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/VectorExpressionType_t">VectorExpressionType_t</seealso>
+    public enum VectorExpression
     {
         /// <summary>Uninitialized expression; outputs zero.</summary>
         VECTOR_EXPRESSION_UNINITIALIZED = -1,
@@ -23,5 +24,7 @@ namespace ValveResourceFormat.Renderer.Particles
         VECTOR_EXPRESSION_MAX = 6,
         /// <summary>Cross product of the two input vectors.</summary>
         VECTOR_EXPRESSION_CROSSPRODUCT = 7,
+        /// <summary>Linearly interpolates between the two input vectors.</summary>
+        VECTOR_EXPRESSION_LERP = 8,
     }
 }

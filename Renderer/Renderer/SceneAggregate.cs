@@ -1,5 +1,6 @@
 using System.IO;
 using System.Linq;
+using ValveKeyValue;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
 
@@ -130,7 +131,7 @@ namespace ValveResourceFormat.Renderer
             var aggregateMeshes = aggregateSceneObject.GetArray("m_aggregateMeshes");
 
             // Aperture Desk Job goes from draw call -> aggregate mesh
-            if (aggregateMeshes.Length > 0 && !aggregateMeshes[0].ContainsKey("m_nDrawCallIndex"))
+            if (aggregateMeshes.Count > 0 && !aggregateMeshes[0].ContainsKey("m_nDrawCallIndex"))
             {
                 foreach (var drawCall in RenderMesh.DrawCallsOpaque)
                 {
@@ -186,7 +187,7 @@ namespace ValveResourceFormat.Renderer
                     Flags = flags,
                 };
 
-                if (fragmentData.GetProperty<bool>("m_bHasTransform") == true)
+                if (fragmentData.GetBooleanProperty("m_bHasTransform") == true)
                 {
                     CanDrawIndirect = false; // skip indirect draw path for instanced draws
                     fragment.Transform *= fragmentTransforms[transformIndex++].ToMatrix4x4();

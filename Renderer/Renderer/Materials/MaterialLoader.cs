@@ -18,6 +18,7 @@ namespace ValveResourceFormat.Renderer.Materials
         private readonly Dictionary<ulong, RenderMaterial> Materials = [];
         private readonly Dictionary<string, RenderTexture> Textures = [];
         private readonly Dictionary<string, RenderTexture> TexturesSrgb = [];
+        private readonly Dictionary<(int AddressU, int AddressV, bool AnisotropicFiltering), int> Samplers = [];
         private readonly RendererContext RendererContext;
         private RenderTexture? ErrorTexture;
         private RenderTexture? DefaultNormal;
@@ -66,6 +67,13 @@ namespace ValveResourceFormat.Renderer.Materials
             }
 
             TexturesSrgb.Clear();
+
+            foreach (var sampler in Samplers.Values)
+            {
+                GL.DeleteSampler(sampler);
+            }
+
+            Samplers.Clear();
         }
 
         /// <summary>Returns a cached <see cref="RenderMaterial"/> for the given resource path and shader arguments, loading and caching it on first access.</summary>
@@ -193,6 +201,47 @@ namespace ValveResourceFormat.Renderer.Materials
 
             return tex;
         }
+
+        /// <summary>
+        /// Gets a sampler object for the supplied texture address modes, creating and caching one per <see cref="MaterialLoader" />.
+        /// </summary>
+        public int GetOrCreateSampler(int addressModeU, int addressModeV, bool mipmaps = true, bool anisotropicFiltering = true)
+        {
+            var key = (addressModeU, addressModeV, anisotropicFiltering);
+
+            if (key == (0, 0, true))
+            {
+                return 0; // default sampler state with repeat wrap mode
+            }
+
+            if (Samplers.TryGetValue(key, out var sampler))
+            {
+                return sampler;
+            }
+
+            GL.CreateSamplers(1, out sampler);
+            GL.SamplerParameter(sampler, SamplerParameterName.TextureWrapS, (int)MapAddressMode(addressModeU));
+            GL.SamplerParameter(sampler, SamplerParameterName.TextureWrapT, (int)MapAddressMode(addressModeV));
+            GL.SamplerParameter(sampler, SamplerParameterName.TextureMinFilter, (int)(mipmaps ? TextureMinFilter.LinearMipmapLinear : TextureMinFilter.Linear));
+            GL.SamplerParameter(sampler, SamplerParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+
+            if (anisotropicFiltering && MaxTextureMaxAnisotropy >= 4)
+            {
+                GL.SamplerParameter(sampler, (SamplerParameterName)ExtTextureFilterAnisotropic.TextureMaxAnisotropyExt, MaxTextureMaxAnisotropy);
+            }
+
+            Samplers[key] = sampler;
+            return sampler;
+        }
+
+        private static TextureWrapMode MapAddressMode(int mode) => mode switch
+        {
+            0 => TextureWrapMode.Repeat,
+            1 => TextureWrapMode.MirroredRepeat,
+            2 => TextureWrapMode.ClampToEdge,
+            3 => TextureWrapMode.ClampToBorder,
+            _ => TextureWrapMode.Repeat,
+        };
 
         private RenderTexture LoadTexture(string name, bool srgbRead = false)
         {
@@ -443,11 +492,22 @@ namespace ValveResourceFormat.Renderer.Materials
         {
             var texture = new RenderTexture(TextureTarget.Texture2D, bitmap.Width, bitmap.Height, 1, 1);
 
-            var isHdr = bitmap.ColorType == Texture.HdrBitmapColorType;
-            var store = GetImageExportFormat(isHdr);
+            // var isHdr = bitmap.ColorType == Texture.HdrBitmapColorType;
+            // var store = GetImageExportFormat(isHdr);
 
-            GL.TextureStorage2D(texture.Handle, 1, store.SizedInternalFormat, texture.Width, texture.Height);
-            GL.TextureSubImage2D(texture.Handle, 0, 0, 0, texture.Width, texture.Height, store.PixelFormat, store.PixelType, bitmap.GetPixels());
+            var store = bitmap.ColorType switch
+            {
+                SKColorType.Rgba8888 => new TextureFormatMapping(SizedInternalFormat.Rgba8, PixelFormat.Rgba, PixelType.UnsignedByte),
+                SKColorType.Bgra8888 => new TextureFormatMapping(SizedInternalFormat.Rgba8, PixelFormat.Bgra, PixelType.UnsignedByte),
+                SKColorType.Rgb888x => new TextureFormatMapping(SizedInternalFormat.Rgb8, PixelFormat.Rgba, PixelType.UnsignedByte),
+                SKColorType.Gray8 => new TextureFormatMapping(SizedInternalFormat.R8, PixelFormat.Red, PixelType.UnsignedByte),
+                SKColorType.RgbaF16 => new TextureFormatMapping(SizedInternalFormat.Rgba16f, PixelFormat.Rgba, PixelType.HalfFloat),
+                SKColorType.RgbaF32 => new TextureFormatMapping(SizedInternalFormat.Rgba32f, PixelFormat.Rgba, PixelType.Float),
+                _ => throw new NotSupportedException($"Unsupported bitmap color type for GPU upload {bitmap.ColorType}"),
+            };
+
+            GL.TextureStorage2D(texture.Handle, 1, store.InternalFormat, texture.Width, texture.Height);
+            GL.TextureSubImage2D(texture.Handle, 0, 0, 0, texture.Width, texture.Height, store.PixelFormat!.Value, store.PixelType!.Value, bitmap.GetPixels());
 
             return texture;
         }

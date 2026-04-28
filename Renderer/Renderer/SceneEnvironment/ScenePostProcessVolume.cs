@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Linq;
 using OpenTK.Graphics.OpenGL;
+using ValveKeyValue;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.ResourceTypes.EntityLump;
@@ -9,6 +11,7 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
     /// <summary>
     /// Filmic tonemapping curve parameters for HDR-to-LDR conversion.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/materialsystem2/PostProcessingTonemapParameters_t">PostProcessingTonemapParameters_t</seealso>
     public readonly struct TonemapSettings
     {
         /// <summary>Gets the exposure bias in log2 stops; converted to linear via exp2 before GPU upload.</summary>
@@ -77,15 +80,14 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
         /// <param name="tonemapParams">The KV object containing tonemapping parameters.</param>
         public TonemapSettings(KVObject tonemapParams)
         {
-            // no "Unchecked" equivalent for KVObject
-            ExposureBias = (float)tonemapParams.GetProperty<double>("m_flExposureBias");
-            ShoulderStrength = (float)tonemapParams.GetProperty<double>("m_flShoulderStrength");
-            LinearStrength = (float)tonemapParams.GetProperty<double>("m_flLinearStrength");
-            LinearAngle = (float)tonemapParams.GetProperty<double>("m_flLinearAngle");
-            ToeStrength = (float)tonemapParams.GetProperty<double>("m_flToeStrength");
-            ToeNum = (float)tonemapParams.GetProperty<double>("m_flToeNum");
-            ToeDenom = (float)tonemapParams.GetProperty<double>("m_flToeDenom");
-            WhitePoint = (float)tonemapParams.GetProperty<double>("m_flWhitePoint");
+            ExposureBias = (float)tonemapParams.GetDoubleProperty("m_flExposureBias");
+            ShoulderStrength = (float)tonemapParams.GetDoubleProperty("m_flShoulderStrength");
+            LinearStrength = (float)tonemapParams.GetDoubleProperty("m_flLinearStrength");
+            LinearAngle = (float)tonemapParams.GetDoubleProperty("m_flLinearAngle");
+            ToeStrength = (float)tonemapParams.GetDoubleProperty("m_flToeStrength");
+            ToeNum = (float)tonemapParams.GetDoubleProperty("m_flToeNum");
+            ToeDenom = (float)tonemapParams.GetDoubleProperty("m_flToeDenom");
+            WhitePoint = (float)tonemapParams.GetDoubleProperty("m_flWhitePoint");
         }
         /// <summary>Linearly interpolates between two <see cref="TonemapSettings"/> by a given weight.</summary>
         /// <param name="weight">Blend factor in the range [0, 1]; 0 returns <paramref name="TonemapSettings1"/>, 1 returns <paramref name="TonemapSettings2"/>.</param>
@@ -162,16 +164,16 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
             var settings = new ExposureSettings
             {
                 ExposureMin = entity.ContainsKey("minlogexposure")
-                    ? MathF.Pow(2, entity.GetPropertyUnchecked<float>("minlogexposure"))
-                    : entity.GetPropertyUnchecked("minexposure", def.ExposureMin),
+                    ? MathF.Pow(2, entity.GetFloatProperty("minlogexposure"))
+                    : entity.GetFloatProperty("minexposure", def.ExposureMin),
                 ExposureMax = entity.ContainsKey("maxlogexposure")
-                    ? MathF.Pow(2, entity.GetPropertyUnchecked<float>("maxlogexposure"))
-                    : entity.GetPropertyUnchecked("maxexposure", def.ExposureMax),
-                ExposureSpeedUp = entity.GetPropertyUnchecked("exposurespeedup", def.ExposureSpeedUp),
-                ExposureSpeedDown = entity.GetPropertyUnchecked("exposurespeeddown", def.ExposureSpeedDown),
-                ExposureCompensation = entity.GetPropertyUnchecked("exposurecompensation", def.ExposureCompensation),
-                ExposureSmoothingRange = entity.GetPropertyUnchecked("exposuresmoothingrange", def.ExposureSmoothingRange),
-                AutoExposureEnabled = entity.GetProperty<bool>("enableexposure"), // todo: test where this is enabled/disabled
+                    ? MathF.Pow(2, entity.GetFloatProperty("maxlogexposure"))
+                    : entity.GetFloatProperty("maxexposure", def.ExposureMax),
+                ExposureSpeedUp = entity.GetFloatProperty("exposurespeedup", def.ExposureSpeedUp),
+                ExposureSpeedDown = entity.GetFloatProperty("exposurespeeddown", def.ExposureSpeedDown),
+                ExposureCompensation = entity.GetFloatProperty("exposurecompensation", def.ExposureCompensation),
+                ExposureSmoothingRange = entity.GetFloatProperty("exposuresmoothingrange", def.ExposureSmoothingRange),
+                AutoExposureEnabled = entity.GetBooleanProperty("enableexposure"), // todo: test where this is enabled/disabled
             };
 
             settings.AutoExposureEnabled = settings.AutoExposureEnabled && settings.ExposureMax > settings.ExposureMin;
@@ -182,6 +184,7 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
     /// <summary>
     /// Bloom compositing blend modes.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/materialsystem2/BloomBlendMode_t">BloomBlendMode_t</seealso>
     public enum BloomBlendType
     {
         /// <summary>Additively blends the bloom layer over the scene.</summary>
@@ -195,6 +198,7 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
     /// <summary>
     /// Bloom effect parameters including threshold, intensity, and per-mip blur settings.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/materialsystem2/PostProcessingBloomParameters_t">PostProcessingBloomParameters_t</seealso>
     public readonly struct BloomSettings()
     {
         /// <summary>Gets the compositing blend mode used to apply bloom.</summary>
@@ -244,7 +248,7 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
 
             const int NumBlurBuffers = 5;
             var blurWeight = data.GetFloatArray("m_flBlurWeight");
-            var blurTint = data.GetArray("m_vBlurTint", v => v.ToVector3());
+            var blurTint = data.GetArray("m_vBlurTint").Select(v => v.ToVector3()).ToArray();
 
             Debug.Assert(blurWeight.Length == NumBlurBuffers);
             Debug.Assert(blurTint.Length == NumBlurBuffers);

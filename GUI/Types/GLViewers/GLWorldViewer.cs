@@ -12,6 +12,7 @@ using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.Renderer.SceneNodes;
 using ValveResourceFormat.Renderer.World;
 using ValveResourceFormat.ResourceTypes;
+using ValveResourceFormat.Serialization.KeyValues;
 using static GUI.Controls.SavedCameraPositionsControl;
 using static ValveResourceFormat.Renderer.PickingTexture;
 
@@ -348,6 +349,12 @@ namespace GUI.Types.GLViewers
                     UiControl.AddCheckBox("Show Fog", Scene.FogEnabled, v => Scene.FogEnabled = v);
                     UiControl.AddCheckBox("Color Correction", Renderer.Postprocess.ColorCorrectionEnabled, v => Renderer.Postprocess.ColorCorrectionEnabled = v);
                     UiControl.AddCheckBox("Occlusion Culling", Scene.EnableOcclusionCulling, (v) => Scene.EnableOcclusionCulling = v);
+
+                    // TODO: PVS culling is not implemented yet
+                    // if (Scene.VoxelVisibility != null)
+                    // {
+                    //     UiControl.AddCheckBox("PVS Culling", Scene.EnablePvsCulling, v => Scene.EnablePvsCulling = v);
+                    // }
                     UiControl.AddCheckBox("Gpu Culling", Scene.EnableIndirectDraws, v =>
                     {
                         Scene.EnableIndirectDraws = v;
@@ -745,7 +752,7 @@ namespace GUI.Types.GLViewers
             if (sceneNode.EntityData != null)
             {
                 // Perhaps this needs to check for correct classname?
-                var particle = sceneNode.EntityData.GetProperty<string>("effect_name");
+                var particle = sceneNode.EntityData.GetStringProperty("effect_name");
 
                 if (particle != null)
                 {
@@ -840,7 +847,7 @@ namespace GUI.Types.GLViewers
 
             entityInfoForm.EntityInfoControl.PopulateFromEntity(sceneNode.EntityData);
 
-            var classname = sceneNode.EntityData.GetProperty<string>("classname");
+            var classname = sceneNode.EntityData.GetStringProperty("classname");
             entityInfoForm.Text = $"Entity: {classname}";
         }
 

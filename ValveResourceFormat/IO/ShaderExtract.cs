@@ -1221,7 +1221,7 @@ public sealed class ShaderExtract
         [nameof(VfxRenderStateInfoPixelShader.RsRasterizerStateDesc.MultisampleEnable)] = typeof(Boolean),
 
         // RsDepthStencilStateDesc
-        [nameof(VfxRenderStateInfoPixelShader.RsDepthStencilStateDesc.DepthFunc)] = typeof(VfxRenderStateInfoPixelShader.RsDepthStencilStateDesc.RsComparison),
+        [nameof(VfxRenderStateInfoPixelShader.RsDepthStencilStateDesc.DepthFunc)] = typeof(RsComparison),
         ["DepthEnable"] = typeof(Boolean),
         [nameof(VfxRenderStateInfoPixelShader.RsDepthStencilStateDesc.DepthWriteEnable)] = typeof(Boolean),
 
@@ -1419,7 +1419,11 @@ public sealed class ShaderExtract
             annotations.Add($"OutputFormat({format});");
         }
 
-        annotations.Add($"SrgbRead({(param.SrgbRead ? "true" : "false")});");
+        // only add SrgbRead to actual textures
+        if (param.VfxType is < VfxVariableType.StructuredBuffer or > VfxVariableType.RWStructuredBufferWithCounter)
+        {
+            annotations.Add($"SrgbRead({(param.SrgbRead ? "true" : "false")});");
+        }
 
         const string Sampler = "Sampler";
         var typeString = param.VfxType.ToString();

@@ -4,6 +4,7 @@ namespace ValveResourceFormat.Renderer.Particles.Operators
     /// Sets a vector particle attribute to a per-particle vector value, with an optional
     /// interpolation factor that blends between the current value and the target each frame.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_OP_SetVec">C_OP_SetVec</seealso>
     class SetVec : ParticleFunctionOperator
     {
         private readonly ParticleField OutputField = ParticleField.Color;
@@ -14,7 +15,7 @@ namespace ValveResourceFormat.Renderer.Particles.Operators
         public SetVec(ParticleDefinitionParser parse) : base(parse)
         {
             OutputField = parse.ParticleField("m_nOutputField", OutputField);
-            value = parse.VectorProvider("m_nInputValue", value);
+            value = parse.VectorProvider("m_InputValue", value);
             setMethod = parse.Enum<ParticleSetMethod>("m_nSetMethod", setMethod);
             lerp = parse.NumberProvider("m_Lerp", lerp);
 

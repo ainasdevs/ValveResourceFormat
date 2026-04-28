@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.IO;
-using ValveResourceFormat.Serialization.KeyValues;
+using ValveKeyValue;
 
 namespace ValveResourceFormat.CompiledShader;
 
@@ -22,7 +22,7 @@ public class VfxStaticComboVcsEntry
     /// <summary>
     /// Resource entry for KeyValues-based files.
     /// </summary>
-    public record ResourceEntry(KVObject ComboData, VfxShaderAttribute[] AllAttributes, KVObject[] ByteCodeDescArray);
+    public record ResourceEntry(KVObject ComboData, VfxShaderAttribute[] AllAttributes, IReadOnlyList<KVObject> ByteCodeDescArray);
 
     /// <summary>Gets or sets the KeyValues entry.</summary>
     public ResourceEntry? KVEntry { get; init; }

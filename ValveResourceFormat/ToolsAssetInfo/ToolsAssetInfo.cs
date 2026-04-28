@@ -229,7 +229,7 @@ namespace ValveResourceFormat.ToolsAssetInfo
         /// <summary>
         /// Gets the KV3 segment data, if present.
         /// </summary>
-        public Serialization.KeyValues.KVObject? KV3Segment { get; private set; }
+        public ValveKeyValue.KVObject? KV3Segment { get; private set; }
 
         /// <summary>
         /// Opens and reads the given filename.
@@ -300,6 +300,8 @@ namespace ValveResourceFormat.ToolsAssetInfo
                 subassetValues = [];
             }
 
+            var path = new StringBuilder(128);
+
             string ConstructFilePath(ulong hash)
             {
                 var unk1 = (int)((hash >> 61) & 7);
@@ -308,7 +310,7 @@ namespace ValveResourceFormat.ToolsAssetInfo
                 var filenameIndex = (int)((hash >> 10) & 0x7FFFFF);
                 var extensionIndex = (int)(hash & 0x3FF);
 
-                var path = new StringBuilder();
+                path.Clear();
 
                 if (addonIndex != 0x1FF)
                 {

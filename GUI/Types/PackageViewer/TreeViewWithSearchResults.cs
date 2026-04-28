@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Drawing;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -11,6 +13,7 @@ using GUI.Forms;
 using GUI.Types.PackageViewer.ThumbnailRenderers;
 using GUI.Utils;
 using SteamDatabase.ValvePak;
+using ValveResourceFormat.IO;
 
 namespace GUI.Types.PackageViewer
 {
@@ -39,6 +42,12 @@ namespace GUI.Types.PackageViewer
 
         private CancellationTokenSource? ThumbnailRenderTokenSource;
 
+        // Items are populated lazily in OnLoad so that the listview's font and DPI context have
+        // stabilized before the native control caches per-item label measurements. Populating
+        // earlier (while the user control is still un-parented) causes labels to be measured
+        // against a stale font, leaving them truncated until the layout is invalidated.
+        private VirtualPackageNode? PendingInitialDisplayNode;
+
         private readonly ConcurrentDictionary<PackageEntry, byte> QueuedOrRenderedThumbnailItems = new();
 
         private readonly CancellationTokenSource RenderLoopCancelationTokenSource = new();
@@ -53,6 +62,10 @@ namespace GUI.Types.PackageViewer
         public PackageViewer Viewer { get; }
 
         public CancellationTokenSource? PreviewTokenSource { get; private set; }
+
+        private Dictionary<string, Dictionary<string, string>>? AssetSearchData;
+        private Dictionary<string, SortedSet<string>>? SearchDataKeys;
+        private bool SearchDataBuilt;
 
         public event EventHandler<PackageEntry>? OpenPackageEntry;
         public event EventHandler<PackageContextMenuEventArgs>? OpenContextMenu;
@@ -279,13 +292,7 @@ namespace GUI.Types.PackageViewer
 
             DrainThumbnailQueue();
 
-            mainListView.BeginUpdate();
-
             ListViewItems.Clear();
-            mainListView.VirtualListSize = 0;
-
-            var sorter = mainListView.ListViewItemSorter;
-            mainListView.ListViewItemSorter = null;
 
             if (pkgNode.Parent != null)
             {
@@ -302,22 +309,35 @@ namespace GUI.Types.PackageViewer
                 AddFileToListView(file);
             }
 
-            mainListView.ListViewItemSorter = sorter;
+            mainListView.BeginUpdate();
+            mainListView.VirtualListSize = ListViewItems.Count;
+
+            AssignIcons();
+
+            if (ListViewItems.Count > 0)
+            {
+                mainListView.EnsureVisible(0);
+            }
+
             mainListView.EndUpdate();
 
             if (updatePath)
             {
                 UpdateSearchTextBoxToCurrentPath(pkgNode);
             }
+        }
+
+        private void AssignIcons()
+        {
+            SortListViewItemsForVirtualMode();
 
             if (mainListView.View == View.LargeIcon)
             {
                 AssignBigIconIndicesAndRenderThumbnails();
+                return;
             }
-            else
-            {
-                AssignSmallIconIndices();
-            }
+
+            AssignSmallIconIndices();
         }
 
         private readonly Dictionary<string, ThumbnailRenderer> ThumbnailRenderers = new()
@@ -326,6 +346,7 @@ namespace GUI.Types.PackageViewer
             {"vmat_c", new ThumbnailMaterialRenderer() },
             {"vtex_c", new ThumbnailTextureRenderer() },
             {"vsvg_c", new ThumbnailSVGRenderer() },
+            {"vpcf_c", new ThumbnailParticleRenderer() },
         };
 
         /// <summary>
@@ -429,7 +450,15 @@ namespace GUI.Types.PackageViewer
                             }
                             else
                             {
-                                bitmap = renderer.Render(entry, context, CurrentThumbnailSizes, cancellationToken);
+                                try
+                                {
+                                    bitmap = renderer.Render(entry, context, CurrentThumbnailSizes, cancellationToken);
+                                }
+                                catch (Exception ex) when (ex is not OperationCanceledException)
+                                {
+                                    Log.Error(nameof(TreeViewWithSearchResults), $"Failed to render thumbnail for {entry.GetFullPath()}: {ex.Message}");
+                                    return;
+                                }
 
                                 if (bitmap == null)
                                 {
@@ -447,7 +476,7 @@ namespace GUI.Types.PackageViewer
                             {
                                 await listView.InvokeAsync(() =>
                                 {
-                                    if (listView.IsDisposed || listView.View != View.LargeIcon)
+                                    if (listView.IsDisposed || listView.View != View.LargeIcon || !ListViewItems.Contains(castItem))
                                     {
                                         bitmap?.Dispose();
                                         return;
@@ -699,7 +728,8 @@ namespace GUI.Types.PackageViewer
             control.TreeViewNodeSorter = new TreeViewFileSorter();
             control.EndUpdate();
 
-            MainListView_DisplayNodes(rootVirtual);
+            // Defer until OnLoad, see comment on PendingInitialDisplayNode.
+            PendingInitialDisplayNode = rootVirtual;
         }
 
         private void Control_BeforeExpand(object? sender, TreeViewCancelEventArgs e)
@@ -1048,33 +1078,20 @@ namespace GUI.Types.PackageViewer
         /// </summary>
         /// <param name="searchText">Value to search for in the TreeView. Matching on this value is based on the search type.</param>
         /// <param name="selectedSearchType">Determines the matching of the value. For example, full/partial text search or full path search.</param>
-        internal void SearchAndFillResults(string searchText, SearchType selectedSearchType)
+        internal void SearchAndFillResults(string searchText, SearchType selectedSearchType, string? filterKey = null, string? filterValue = null)
         {
             var results = mainTreeView.Search(searchText, selectedSearchType);
 
-            ThumbnailRenderTokenSource?.Dispose();
-            ThumbnailRenderTokenSource = new CancellationTokenSource();
-            DrainThumbnailQueue();
-
-            mainListView.BeginUpdate();
-
-            ListViewItems.Clear();
-            mainListView.VirtualListSize = 0;
-
-            var sorter = mainListView.ListViewItemSorter;
-            mainListView.ListViewItemSorter = null;
-
-            foreach (var entry in results)
+            if (filterKey != null && AssetSearchData != null)
             {
-                AddFileToListView(entry);
+                results.RemoveAll(entry => !MatchesAssetFilter(entry, filterKey, filterValue));
             }
 
-            mainListView.ListViewItemSorter = sorter;
+            var node = new VirtualPackageNode(string.Empty, 0, null);
+            node.Files.AddRange(results);
 
             DisplayMainListView();
-            mainListView.EndUpdate();
-
-            AssignBigIconIndicesAndRenderThumbnails();
+            MainListView_DisplayNodes(node, updatePath: false);
         }
 
         private void MainListView_ColumnClick(object? sender, ColumnClickEventArgs e)
@@ -1264,6 +1281,13 @@ namespace GUI.Types.PackageViewer
             {
                 mainListView.Columns.Add(Columns[i]);
             }
+
+            if (PendingInitialDisplayNode != null)
+            {
+                var node = PendingInitialDisplayNode;
+                PendingInitialDisplayNode = null;
+                MainListView_DisplayNodes(node);
+            }
         }
 
         private void AddParentNavigationItemToListView(VirtualPackageNode parentNode)
@@ -1319,6 +1343,7 @@ namespace GUI.Types.PackageViewer
         public void ReplaceListViewWithControl(TabPage tab)
         {
             mainListView.Visible = false;
+            SetGridModeToolbarVisible(false);
 
             var tabs = new ThemedTabControl
             {
@@ -1348,6 +1373,12 @@ namespace GUI.Types.PackageViewer
             }
         }
 
+        private void SetGridModeToolbarVisible(bool visible)
+        {
+            tableLayoutPanel2.Visible = visible;
+            tableLayoutPanel1.RowStyles[0].Height = visible ? 40F : 0F;
+        }
+
         private void DisplayMainListView()
         {
             if (mainListView.Parent == null)
@@ -1363,6 +1394,7 @@ namespace GUI.Types.PackageViewer
                 }
             }
 
+            SetGridModeToolbarVisible(true);
             mainListView.Visible = true;
         }
 
@@ -1480,16 +1512,16 @@ namespace GUI.Types.PackageViewer
                 return;
             }
 
-            ListViewItems.Sort((a, b) => sorter.Compare(a, b));
+            ListViewItems.Sort(sorter.Compare);
 
-            mainListView.VirtualListSize = ListViewItems.Count; // force refresh
-            mainListView.Invalidate(true);
+            if (ListViewItems.Count > 0)
+            {
+                mainListView.RedrawItems(0, ListViewItems.Count - 1, true);
+            }
         }
 
         private void AssignBigIconIndicesAndRenderThumbnails()
         {
-            SortListViewItemsForVirtualMode();
-
             var currentThumbnailSizeInt = (int)CurrentThumbnailSizes;
 
             for (var i = 0; i < ListViewItems.Count; i++)
@@ -1544,13 +1576,120 @@ namespace GUI.Types.PackageViewer
                 betterListViewItem.ImageIndex = iconImageCacheEntry.index;
             }
 
-            mainListView.VirtualListSize = ListViewItems.Count;
-            mainListView.Invalidate();
-
             if (mainListView.View == View.LargeIcon)
             {
                 _ = UpdateLargeImageListIconsAsync(ThumbnailRenderTokenSource!.Token);
             }
+        }
+
+        /// <summary>
+        /// Returns a task that resolves to the SearchableUserData filter keys.
+        /// If already cached, returns a completed task. Otherwise loads on a background thread.
+        /// </summary>
+        internal Task<Dictionary<string, SortedSet<string>>?> GetSearchDataKeysAsync()
+        {
+            if (SearchDataBuilt)
+            {
+                return Task.FromResult(SearchDataKeys);
+            }
+
+            return Task.Run(GetSearchDataKeys);
+        }
+
+        /// <summary>
+        /// Lazily loads the tools asset info and builds the SearchableUserData index.
+        /// Returns the collected filter keys and their unique values, or null if no data.
+        /// </summary>
+        internal Dictionary<string, SortedSet<string>>? GetSearchDataKeys()
+        {
+            if (SearchDataBuilt)
+            {
+                return SearchDataKeys;
+            }
+
+            SearchDataBuilt = true;
+
+            var vrfGuiContext = mainTreeView?.VrfGuiContext;
+            if (vrfGuiContext == null)
+            {
+                return null;
+            }
+
+            var toolsAssetInfo = vrfGuiContext.GetOrLoadToolsAssetInfo();
+            if (toolsAssetInfo == null)
+            {
+                return null;
+            }
+
+            var assetSearchData = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            var searchDataKeys = new Dictionary<string, SortedSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (filePath, file) in toolsAssetInfo.Files)
+            {
+                if (file.SearchableUserData.Count == 0)
+                {
+                    continue;
+                }
+
+                var converted = new Dictionary<string, string>(file.SearchableUserData.Count, StringComparer.OrdinalIgnoreCase);
+
+                foreach (var (key, value) in file.SearchableUserData)
+                {
+                    var stringValue = Convert.ToString(value, CultureInfo.InvariantCulture) ?? string.Empty;
+                    converted[key] = stringValue;
+
+                    if (!searchDataKeys.TryGetValue(key, out var values))
+                    {
+                        values = new SortedSet<string>(SearchForm.NumericComparer);
+                        searchDataKeys[key] = values;
+                    }
+
+                    if (values.Count < 100)
+                    {
+                        values.Add(stringValue);
+                    }
+                }
+
+                assetSearchData[filePath] = converted;
+            }
+
+            if (searchDataKeys.Count > 0)
+            {
+                AssetSearchData = assetSearchData;
+                SearchDataKeys = searchDataKeys;
+            }
+
+            return SearchDataKeys;
+        }
+
+        private bool MatchesAssetFilter(PackageEntry entry, string filterKey, string? filterValue)
+        {
+            Debug.Assert(AssetSearchData is not null);
+
+            var filePath = entry.GetFullPath();
+
+            if (!AssetSearchData.TryGetValue(filePath, out var searchData))
+            {
+                // Try without the compiled suffix
+                if (!filePath.EndsWith(GameFileLoader.CompiledFileSuffix, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var uncompiledPath = filePath.AsSpan(0, filePath.Length - GameFileLoader.CompiledFileSuffix.Length);
+
+                if (!AssetSearchData.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(uncompiledPath, out searchData))
+                {
+                    return false;
+                }
+            }
+
+            if (!searchData.TryGetValue(filterKey, out var value))
+            {
+                return false;
+            }
+
+            return filterValue == null || value == filterValue;
         }
 
         private void MainListView_Disposed(object? sender, EventArgs e)
@@ -1612,7 +1751,7 @@ namespace GUI.Types.PackageViewer
                 mainListView.View = View.Details;
                 mainListView.SmallImageList = MainForm.ImageList;
 
-                AssignSmallIconIndices();
+                AssignIcons();
 
                 mainListView.AdjustColumnWidths();
                 mainListView.Invalidate();
@@ -1621,8 +1760,6 @@ namespace GUI.Types.PackageViewer
 
         private void AssignSmallIconIndices()
         {
-            SortListViewItemsForVirtualMode();
-
             foreach (var item in ListViewItems)
             {
                 if (item is not BetterListViewItem betterItem)
@@ -1660,8 +1797,7 @@ namespace GUI.Types.PackageViewer
                 ThumbnailRenderTokenSource = new CancellationTokenSource();
 
                 mainListView.View = View.LargeIcon;
-
-                AssignBigIconIndicesAndRenderThumbnails();
+                AssignIcons();
             }
         }
 
@@ -1683,7 +1819,7 @@ namespace GUI.Types.PackageViewer
             mainListView.LargeImageList = BigIconsImageList;
             oldBigIconsImageList.Dispose();
 
-            AssignBigIconIndicesAndRenderThumbnails();
+            AssignIcons();
         }
     }
 }

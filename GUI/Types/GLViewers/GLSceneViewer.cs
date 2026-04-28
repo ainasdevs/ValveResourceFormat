@@ -8,7 +8,6 @@ using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Input;
 using ValveResourceFormat.Renderer.Materials;
-using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.Renderer.Utils;
 using static ValveResourceFormat.Renderer.PickingTexture;
 
@@ -33,6 +32,7 @@ namespace GUI.Types.GLViewers
 
         private bool showStaticOctree;
         private bool showDynamicOctree;
+        private bool showVisDebug;
 
         private readonly List<RenderModes.RenderMode> renderModes = new(RenderModes.Items.Count);
         private int renderModeCurrentIndex;
@@ -93,6 +93,7 @@ namespace GUI.Types.GLViewers
                 UiControl.AddCheckBox("Lock Cull Frustum", false, (v) =>
                 {
                     Renderer.LockedCullFrustum = v ? Renderer.Camera.ViewFrustum.Clone() : null;
+                    Renderer.LockedCullPosition = v ? Renderer.Camera.Location : null;
                 });
 
                 UiControl.AddCheckBox("Show Static Octree", showStaticOctree, (v) => showStaticOctree = v);
@@ -104,9 +105,14 @@ namespace GUI.Types.GLViewers
                     SkyboxScene?.ShowToolsMaterials = v;
                 });
 
-                if (this is GLWorldViewer worldViewer)
+                if (this is GLWorldViewer)
                 {
                     UiControl.AddCheckBox("Show Occluded Bounds", Scene.OcclusionDebugEnabled, (v) => Scene.OcclusionDebugEnabled = v);
+
+                    if (Scene.VoxelVisibility != null)
+                    {
+                        UiControl.AddCheckBox("Show Vis Debug", showVisDebug, v => showVisDebug = v);
+                    }
                 }
 
                 UiControl.AddCheckBox("Show Render Timings", Renderer.Timings.Capture, (v) => Renderer.Timings.Capture = v);
@@ -345,7 +351,9 @@ namespace GUI.Types.GLViewers
 
             if (MouseOverRenderArea || Input.ForceUpdate)
             {
-                var pressedKeys = CurrentlyPressedKeys;
+                Input.MouseSensitivity = Settings.Config.MouseSensitivity;
+
+                var pressedKeys = ConsumeCurrentlyPressedKeysForUpdate();
                 var modifierKeys = Control.ModifierKeys;
 
                 if ((modifierKeys & Keys.Shift) > 0)
@@ -358,12 +366,12 @@ namespace GUI.Types.GLViewers
                     pressedKeys |= TrackedKeys.Alt;
                 }
 
-                Input.Tick(frameTime, pressedKeys, new Vector2(MouseDelta.X, MouseDelta.Y), Renderer.Camera);
-                LastMouseDelta = MouseDelta;
-                MouseDelta = System.Drawing.Point.Empty;
+                var mouseDelta = ConsumePendingMouseDelta();
+                var wheelDelta = ConsumePendingMouseWheelDelta();
 
-                // Clear mouse wheel events after processing (they're one-time events)
-                CurrentlyPressedKeys &= ~(TrackedKeys.MouseWheelUp | TrackedKeys.MouseWheelDown);
+                Input.MouseSensitivity = Settings.Config.MouseSensitivity;
+                Input.Tick(frameTime, pressedKeys, new Vector2(mouseDelta.X, mouseDelta.Y), Renderer.Camera);
+                LastMouseDelta = mouseDelta;
 
                 GrabbedMouse = !Input.NoClip && !Paused;
             }
@@ -527,6 +535,37 @@ namespace GUI.Types.GLViewers
                     Text = $"Speed: {Input.Velocity.AsVector2().Length():0.0} u/s",
                     CenterHorizontal = true,
                 }, Renderer.Camera);
+            }
+
+            if (showVisDebug && Scene.VoxelVisibility != null)
+            {
+                var pvsPos = Renderer.LockedCullPosition ?? Renderer.Camera.Location;
+                var cluster = Scene.VoxelVisibility.GetClusterForPosition(pvsPos);
+                var y = 18f;
+
+                void AddLine(string text, Color32 color)
+                {
+                    TextRenderer.AddText(new ValveResourceFormat.Renderer.TextRenderer.TextRenderRequest
+                    {
+                        X = 4f,
+                        Y = y,
+                        Scale = 14f,
+                        Color = color,
+                        Text = text,
+                    });
+                    y += 16f;
+                }
+
+                AddLine(
+                    cluster <= 1 ? "No PVS at this position" : $"PVS cluster {cluster}",
+                    cluster <= 1 ? new Color32(255, 0, 0) : Color32.White
+                );
+
+                if (Scene.CurrentFramePvs != null)
+                {
+                    var visCount = Scene.CurrentFramePvs.Sum(b => BitOperations.PopCount(b));
+                    AddLine($"PVS visible: {visCount}/{Scene.VoxelVisibility.BaseClusterCount} clusters", Color32.White);
+                }
             }
 
             if (Renderer.Timings.Capture)

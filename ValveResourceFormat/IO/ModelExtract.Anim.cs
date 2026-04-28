@@ -36,6 +36,31 @@ partial class ModelExtract
     }
 
     /// <summary>
+    /// Produces a skeleton DMX file.
+    /// </summary>
+    public static byte[] ToDmxSkeleton(Skeleton skeleton, bool nmSkelAxisFixup = false)
+    {
+        using var dmx = new Datamodel.Datamodel("model", 22);
+
+        var dmeSkeleton = BuildDmeDagSkeleton(skeleton, out var transforms, nmSkelAxisFixup);
+
+        using var stream = new MemoryStream();
+
+        dmx.Root = new Element(dmx, "root", null, "DmElement")
+        {
+            ["skeleton"] = dmeSkeleton,
+            ["exportTags"] = new Element(dmx, "exportTags", null, "DmeExportTags")
+            {
+                ["app"] = "sfm", // maya
+                ["source"] = $"Generated with {StringToken.VRF_GENERATOR}",
+            }
+        };
+
+        dmx.Save(stream, "keyvalues2", 4);
+        return stream.ToArray();
+    }
+
+    /// <summary>
     /// Converts an animation to DMX format.
     /// </summary>
     public static byte[] ToDmxAnim(Model model, Animation anim)
@@ -44,10 +69,11 @@ partial class ModelExtract
     /// <summary>
     /// Converts an animation to DMX format using skeleton and flex controllers.
     /// </summary>
-    public static byte[] ToDmxAnim(Skeleton skeleton, FlexController[] flexControllers, Animation anim)
+    public static byte[] ToDmxAnim(Skeleton skeleton, FlexController[] flexControllers, Animation anim, bool nmSkelAxisFixup = false)
     {
         using var dmx = new Datamodel.Datamodel("model", 22);
 
+        var rootMotionBone = skeleton["root_motion"];
         var dmeSkeleton = BuildDmeDagSkeleton(skeleton, out var transforms);
 
         var animationList = new DmeAnimationList();
@@ -69,7 +95,19 @@ partial class ModelExtract
                 };
                 anim.DecodeFrame(frame);
                 frames[i] = frame;
+
+                if (nmSkelAxisFixup && rootMotionBone != null)
+                {
+                    foreach (var root in rootMotionBone.Children)
+                    {
+                        frame.Bones[root.Index].Position = Vector3.Transform(frame.Bones[root.Index].Position, NmSkelRotationFixup);
+
+                        var q = frame.Bones[root.Index].Angle * NmSkelRotationFixup;
+                        frame.Bones[root.Index].Angle = new(q.Y, q.Z, q.X, q.W);
+                    }
+                }
             }
+
 
             ProcessRootMotionChannel(anim, dmeSkeleton, clip);
             ProcessBoneChannels(skeleton, anim, transforms, clip, frames);
@@ -96,15 +134,15 @@ partial class ModelExtract
         return stream.ToArray();
     }
 
-    private static DmeModel BuildDmeDagSkeleton(Skeleton skeleton, out DmeTransform[] transforms)
+    private static Quaternion NmSkelRotationFixup = new(-0.5f, -0.5f, -0.5f, 0.5f);
+
+    private static DmeModel BuildDmeDagSkeleton(Skeleton skeleton, out DmeTransform[] transforms, bool nmSkelAxisFixup = false)
     {
         var dmeSkeleton = new DmeModel();
         var children = new ElementArray();
 
         transforms = new DmeTransform[skeleton.Bones.Length];
         var boneDags = new DmeJoint[skeleton.Bones.Length];
-
-        dmeSkeleton.JointList.Add(dmeSkeleton);
 
         foreach (var bone in skeleton.Bones)
         {
@@ -134,6 +172,24 @@ partial class ModelExtract
             else
             {
                 dmeSkeleton.Children.Add(boneDag);
+            }
+        }
+
+        var rootMotionBone = skeleton["root_motion"];
+
+        if (nmSkelAxisFixup && rootMotionBone != null)
+        {
+            // dmeSkeleton.AxisSystem.UpAxis = 2;
+            // dmeSkeleton.AxisSystem.ForwardParity = -1;
+            // dmeSkeleton.AxisSystem.CoordSys = 2;
+
+            var inverseNmSkelFixup = Quaternion.Inverse(NmSkelRotationFixup);
+            transforms[rootMotionBone.Index].Orientation *= inverseNmSkelFixup;
+
+            foreach (var root in rootMotionBone.Children)
+            {
+                transforms[root.Index].Position = Vector3.Transform(root.Position, NmSkelRotationFixup);
+                transforms[root.Index].Orientation *= NmSkelRotationFixup;
             }
         }
 

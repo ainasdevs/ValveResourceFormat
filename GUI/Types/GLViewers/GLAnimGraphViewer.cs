@@ -2,6 +2,7 @@ using System.IO;
 using GUI.Utils;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.ResourceTypes;
+using ValveResourceFormat.Serialization.KeyValues;
 
 namespace GUI.Types.GLViewers
 {
@@ -9,7 +10,7 @@ namespace GUI.Types.GLViewers
     {
         public GLAnimGraphViewer(VrfGuiContext vrfGuiContext, RendererContext rendererContext, AnimGraph animGraph) : base(vrfGuiContext, rendererContext)
         {
-            var animGraphAssociatedModel = animGraph.Data.GetProperty<string>("m_modelName");
+            var animGraphAssociatedModel = animGraph.Data.Root.GetStringProperty("m_modelName");
             var modelResource = rendererContext.FileLoader.LoadFileCompiled(animGraphAssociatedModel) ?? rendererContext.FileLoader.LoadFileCompiled("models/dev/error.vmdl");
 
             if (modelResource?.DataBlock is not Model model)

@@ -30,6 +30,10 @@ internal abstract class GLBaseControl : IDisposable
     protected TrackedKeys CurrentlyPressedKeys;
     public Point LastMouseDelta { get; protected set; }
 
+    private readonly Lock inputStateLock = new();
+    private Point pendingMouseDelta;
+    private int pendingMouseWheelDelta;
+
     public bool GrabbedMouse
     {
         get;
@@ -158,7 +162,10 @@ internal abstract class GLBaseControl : IDisposable
 
     protected virtual void OnKeyDown(object? sender, KeyEventArgs e)
     {
-        CurrentlyPressedKeys |= RemapKey(e.KeyCode);
+        using (inputStateLock.EnterScope())
+        {
+            CurrentlyPressedKeys |= RemapKey(e.KeyCode);
+        }
 
         e.Handled = true;
         e.SuppressKeyPress = true;
@@ -216,6 +223,7 @@ internal abstract class GLBaseControl : IDisposable
 
     private void OnKeyUp(object? sender, KeyEventArgs e)
     {
+        using var _ = inputStateLock.EnterScope();
         CurrentlyPressedKeys &= ~RemapKey(e.KeyCode);
     }
 
@@ -248,16 +256,16 @@ internal abstract class GLBaseControl : IDisposable
 
     private static TrackedKeys RemapKey(Keys key) => key switch
     {
-        Keys.W => TrackedKeys.Forward,
-        Keys.A => TrackedKeys.Left,
-        Keys.S => TrackedKeys.Back,
-        Keys.D => TrackedKeys.Right,
-        Keys.Q => TrackedKeys.Up,
-        Keys.Z => TrackedKeys.Down,
-        Keys.Up => TrackedKeys.Forward,
-        Keys.Down => TrackedKeys.Back,
-        Keys.Left => TrackedKeys.Left,
-        Keys.Right => TrackedKeys.Right,
+        Keys.W => TrackedKeys.W,
+        Keys.A => TrackedKeys.A,
+        Keys.S => TrackedKeys.S,
+        Keys.D => TrackedKeys.D,
+        Keys.Q => TrackedKeys.Q,
+        Keys.Z => TrackedKeys.Z,
+        Keys.Up => TrackedKeys.W,
+        Keys.Down => TrackedKeys.S,
+        Keys.Left => TrackedKeys.A,
+        Keys.Right => TrackedKeys.D,
         Keys.ControlKey => TrackedKeys.Control,
         Keys.ShiftKey or Keys.LShiftKey => TrackedKeys.Shift,
         Keys.Menu or Keys.LMenu => TrackedKeys.Alt,
@@ -350,6 +358,7 @@ internal abstract class GLBaseControl : IDisposable
 
     protected virtual void OnMouseUp(object? sender, MouseEventArgs e)
     {
+        using var _ = inputStateLock.EnterScope();
         if (e.Button == MouseButtons.Left)
         {
             CurrentlyPressedKeys &= ~TrackedKeys.MouseLeft;
@@ -362,6 +371,7 @@ internal abstract class GLBaseControl : IDisposable
 
         if ((CurrentlyPressedKeys & TrackedKeys.MouseLeftOrRight) == 0)
         {
+            pendingMouseDelta = Point.Empty;
             MouseDelta = Point.Empty;
         }
     }
@@ -378,6 +388,8 @@ internal abstract class GLBaseControl : IDisposable
             return;
         }
 
+        using var _ = inputStateLock.EnterScope();
+
         var position = GLControl.PointToScreen(new Point(e.X, e.Y));
         var topLeft = GLControl.PointToScreen(Point.Empty);
         var bottomRight = topLeft + GLControl.Size;
@@ -389,38 +401,47 @@ internal abstract class GLBaseControl : IDisposable
 
         var positionWrapped = position;
 
+        var delta = Point.Empty;
+
         if (position.X <= topLeft.X)
         {
-            MouseDelta.X--;
+            delta.X--;
             positionWrapped.X = bottomRight.X - 1;
         }
         else if (position.X >= bottomRight.X)
         {
-            MouseDelta.X++;
+            delta.X++;
             positionWrapped.X = topLeft.X + 1;
         }
 
         if (position.Y <= topLeft.Y)
         {
-            MouseDelta.Y--;
+            delta.Y--;
             positionWrapped.Y = bottomRight.Y - 1;
         }
         else if (position.Y >= bottomRight.Y)
         {
-            MouseDelta.Y++;
+            delta.Y++;
             positionWrapped.Y = topLeft.Y + 1;
         }
 
         if (positionWrapped != position)
         {
             // When wrapping cursor, add only 1px delta movement above
+            pendingMouseDelta.X += delta.X;
+            pendingMouseDelta.Y += delta.Y;
+
             MousePreviousPosition = positionWrapped;
             Cursor.Position = positionWrapped;
             return;
         }
 
-        MouseDelta.X += position.X - MousePreviousPosition.X;
-        MouseDelta.Y += position.Y - MousePreviousPosition.Y;
+        delta.X += position.X - MousePreviousPosition.X;
+        delta.Y += position.Y - MousePreviousPosition.Y;
+
+        pendingMouseDelta.X += delta.X;
+        pendingMouseDelta.Y += delta.Y;
+
         MousePreviousPosition = position;
 
         if (GrabbedMouse)
@@ -435,6 +456,7 @@ internal abstract class GLBaseControl : IDisposable
     protected virtual void OnMouseWheel(object? sender, MouseEventArgs e)
     {
         // Track mouse wheel state
+        using var _ = inputStateLock.EnterScope();
         if (e.Delta > 0)
         {
             CurrentlyPressedKeys |= TrackedKeys.MouseWheelUp;
@@ -443,6 +465,36 @@ internal abstract class GLBaseControl : IDisposable
         {
             CurrentlyPressedKeys |= TrackedKeys.MouseWheelDown;
         }
+
+        pendingMouseWheelDelta += e.Delta;
+    }
+
+    protected Point ConsumePendingMouseDelta()
+    {
+        using var _ = inputStateLock.EnterScope();
+        var delta = pendingMouseDelta;
+        pendingMouseDelta = Point.Empty;
+        MouseDelta = Point.Empty;
+        return delta;
+    }
+
+    protected int ConsumePendingMouseWheelDelta()
+    {
+        using var _ = inputStateLock.EnterScope();
+        var wheelDelta = pendingMouseWheelDelta;
+        pendingMouseWheelDelta = 0;
+        return wheelDelta;
+    }
+
+    protected TrackedKeys ConsumeCurrentlyPressedKeysForUpdate()
+    {
+        using var _ = inputStateLock.EnterScope();
+        var keys = CurrentlyPressedKeys;
+
+        // Clear mouse wheel events after processing (they're one-time events)
+        CurrentlyPressedKeys &= ~(TrackedKeys.MouseWheelUp | TrackedKeys.MouseWheelDown);
+
+        return keys;
     }
 
     private void OnGlControlPaint(object? sender, EventArgs e)

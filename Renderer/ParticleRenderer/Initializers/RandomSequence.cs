@@ -3,8 +3,8 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
     /// <summary>
     /// Initializes the particle animation sequence to a random value between a min and max sequence index.
     /// Supports sequential (linear), shuffled (random), or weighted distribution modes.
-    /// Corresponds to <c>C_INIT_RandomSequence</c>.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_INIT_RandomSequence">C_INIT_RandomSequence</seealso>
     class RandomSequence : ParticleFunctionInitializer
     {
         private readonly int sequenceMin;
@@ -21,7 +21,7 @@ namespace ValveResourceFormat.Renderer.Particles.Initializers
             shuffle = parse.Boolean("m_bShuffle", shuffle);
         }
 
-        public override Particle Initialize(ref Particle particle, ParticleSystemRenderState particleSystemState)
+        public override Particle Initialize(ref Particle particle, ParticleCollection particles, ParticleSystemRenderState particleSystemState)
         {
             if (shuffle)
             {

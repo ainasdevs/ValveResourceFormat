@@ -1,13 +1,14 @@
 using System.Buffers;
 using OpenTK.Graphics.OpenGL;
+using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Renderer.Particles.Renderers
 {
     /// <summary>
     /// Renders particles as camera-facing or orientation-aligned textured quads (sprites),
     /// with support for sprite sheet animation, blend modes, and per-particle color and alpha.
-    /// Corresponds to <c>C_OP_RenderSprites</c>.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/particles/C_OP_RenderSprites">C_OP_RenderSprites</seealso>
     internal class RenderSprites : ParticleFunctionRenderer
     {
         private const string ShaderName = "vrf.particle_sprite";
@@ -58,7 +59,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
 
             if (parse.Data.ContainsKey("m_hTexture"))
             {
-                textureName = parse.Data.GetProperty<string>("m_hTexture");
+                textureName = parse.Data.GetStringProperty("m_hTexture");
             }
             else
             {
@@ -66,7 +67,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                 if (textures.Length > 0)
                 {
                     // TODO: Support more than one texture
-                    textureName = textures[0].Data.GetProperty<string>("m_hTexture");
+                    textureName = textures[0].Data.GetStringProperty("m_hTexture");
                 }
             }
 
@@ -195,34 +196,41 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                     {
                         var sequence = spriteSheetData.Sequences[particle.Sequence % spriteSheetData.Sequences.Length];
 
-                        var animationTime = animationType switch
-                        {
-                            ParticleAnimationType.ANIMATION_TYPE_FIXED_RATE => particle.Age,
-                            ParticleAnimationType.ANIMATION_TYPE_FIT_LIFETIME => particle.NormalizedAge,
-                            ParticleAnimationType.ANIMATION_TYPE_MANUAL_FRAMES => particle.Age, // literally dont know what to do with this one
-                            _ => particle.Age,
-                        };
-
                         var frameId = 0;
 
                         if (sequence.Frames.Length > 1)
                         {
-                            if (animateInFps)
+                            if (animationType == ParticleAnimationType.ANIMATION_TYPE_MANUAL_FRAMES)
                             {
-                                frameId = (int)(animationRate * animationTime);
+                                frameId = particle.ManualAnimationFrame;
+                            }
+                            else if (animateInFps)
+                            {
+                                frameId = (int)(animationRate * particle.Age);
                             }
                             else
                             {
+                                var animationTime = animationType switch
+                                {
+                                    ParticleAnimationType.ANIMATION_TYPE_FIXED_RATE => particle.Age,
+                                    ParticleAnimationType.ANIMATION_TYPE_FIT_LIFETIME => particle.NormalizedAge,
+                                    _ => particle.Age,
+                                };
+
                                 frameId = (int)(animationTime * animationRate * sequence.FramesPerSecond);
                             }
 
                             if (sequence.Clamp)
                             {
-                                frameId = Math.Min(frameId, sequence.Frames.Length - 1);
+                                frameId = Math.Clamp(frameId, 0, sequence.Frames.Length - 1);
                             }
                             else
                             {
                                 frameId %= sequence.Frames.Length;
+                                if (frameId < 0)
+                                {
+                                    frameId += sequence.Frames.Length;
+                                }
                             }
                         }
 
@@ -313,6 +321,12 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
 
         public override void SetRenderMode(string renderMode)
         {
+        }
+
+        public void Delete()
+        {
+            GL.DeleteVertexArray(vaoHandle);
+            GL.DeleteBuffer(vertexBufferHandle);
         }
     }
 }

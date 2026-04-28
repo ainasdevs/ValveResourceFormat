@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using ValveKeyValue;
 using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
@@ -205,21 +206,21 @@ namespace ValveResourceFormat.IO
                         // TODO: Refactor this into a SoundExtract?
                         if (resource.GetBlockByType(BlockType.CTRL) is BinaryKV3 ctrlData)
                         {
-                            var wrappedData = new KVObject("root");
-                            wrappedData.AddProperty("VrfExportedSound", ctrlData.Data);
+                            var wrappedData = KVObject.Collection();
+                            wrappedData.Add("VrfExportedSound", ctrlData.Data);
                             contentFile.AdditionalFiles.Add(new ContentFile
                             {
                                 FileName = Path.ChangeExtension(resource.FileName, "vsnd") ?? "exported.vsnd",
-                                Data = Encoding.UTF8.GetBytes(new KV3File(wrappedData).ToString())
+                                Data = Encoding.UTF8.GetBytes(wrappedData.ToKV3String())
                             });
                         }
                     }
                     else if (resource.GetBlockByType(BlockType.CTRL) is BinaryKV3 ctrlData)
                     {
                         // TODO: We may want to cleanup m_vSound (recursively) since it contains random garbage if not actually used
-                        var wrappedData = new KVObject("root");
-                        wrappedData.AddProperty("VrfExportedSound", ctrlData.Data);
-                        contentFile.Data = Encoding.UTF8.GetBytes(new KV3File(wrappedData).ToString());
+                        var wrappedData = KVObject.Collection();
+                        wrappedData.Add("VrfExportedSound", ctrlData.Data);
+                        contentFile.Data = Encoding.UTF8.GetBytes(wrappedData.ToKV3String());
                     }
 
                     break;
@@ -358,7 +359,7 @@ namespace ValveResourceFormat.IO
         /// Determines whether the resource is a child resource.
         /// </summary>
         public static bool IsChildResource(Resource resource)
-            => resource.EditInfo?.SearchableUserData?.GetProperty<long>("IsChildResource") == 1;
+            => resource.EditInfo?.SearchableUserData?.GetIntegerProperty("IsChildResource") == 1;
 
         /// <summary>
         /// Gets the appropriate file extension for the extracted resource.

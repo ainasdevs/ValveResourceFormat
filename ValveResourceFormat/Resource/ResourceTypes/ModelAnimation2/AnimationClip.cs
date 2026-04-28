@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using ValveKeyValue;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.ResourceTypes.ModelAnimation;
 using ValveResourceFormat.Serialization.KeyValues;
@@ -73,6 +74,11 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation2
         /// </summary>
         public AnimationClip[] SecondaryAnimations { get; private set; } = [];
 
+        /// <summary>
+        /// Gets a value indicating whether this clip contains transforms that are to be blended additively.
+        /// </summary>
+        public bool IsAdditive { get; private set; }
+
         /// <inheritdoc/>
         public override void Read(BinaryReader reader)
         {
@@ -93,11 +99,12 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation2
             SkeletonName = clipData.GetStringProperty("m_skeleton");
             NumFrames = clipData.GetInt32Property("m_nNumFrames");
             Duration = clipData.GetFloatProperty("m_flDuration");
+            IsAdditive = clipData.GetBooleanProperty("m_bIsAdditive");
 
             CompressedPoseData = clipData.GetArray<byte>("m_compressedPoseData");
 
             var settings = clipData.GetArray("m_trackCompressionSettings");
-            TrackCompressionSettings = new TrackCompressionSetting[settings.Length];
+            TrackCompressionSettings = new TrackCompressionSetting[settings.Count];
 
             var i = 0;
             foreach (var setting in settings)
@@ -115,9 +122,9 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation2
                     TranslationRangeZ = new QuantizationRange(rangeZ.GetFloatProperty("m_flRangeStart"), rangeZ.GetFloatProperty("m_flRangeLength")),
                     ScaleRange = new QuantizationRange(scaleRange.GetFloatProperty("m_flRangeStart"), scaleRange.GetFloatProperty("m_flRangeLength")),
                     ConstantRotation = new Quaternion(constantRotation[0], constantRotation[1], constantRotation[2], constantRotation[3]),
-                    IsRotationStatic = setting.GetProperty<bool>("m_bIsRotationStatic"),
-                    IsTranslationStatic = setting.GetProperty<bool>("m_bIsTranslationStatic"),
-                    IsScaleStatic = setting.GetProperty<bool>("m_bIsScaleStatic"),
+                    IsRotationStatic = setting.GetBooleanProperty("m_bIsRotationStatic"),
+                    IsTranslationStatic = setting.GetBooleanProperty("m_bIsTranslationStatic"),
+                    IsScaleStatic = setting.GetBooleanProperty("m_bIsScaleStatic"),
                 };
             }
 
@@ -125,13 +132,14 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation2
             Debug.Assert(CompressedPoseOffsets.Length == NumFrames);
 
             var secondaryAnims = clipData.GetArray("m_secondaryAnimations") ?? [];
-            SecondaryAnimations = new AnimationClip[secondaryAnims.Length];
-            for (var j = 0; j < secondaryAnims.Length; j++)
+            SecondaryAnimations = new AnimationClip[secondaryAnims.Count];
+            for (var j = 0; j < secondaryAnims.Count; j++)
             {
                 var secondaryAnim = new AnimationClip()
                 {
                     Resource = Resource,
-                    Name = $"{Name}.secondary_{j}"
+                    // No longer making the name unique, glTF animations can apply to multiple skeletons
+                    Name = Name,
                 };
                 secondaryAnim.ReadClip(secondaryAnims[j]);
                 SecondaryAnimations[j] = secondaryAnim;

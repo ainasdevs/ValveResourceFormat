@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Linq;
 using Microsoft.Extensions.Logging;
+using ValveKeyValue;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Renderer.Particles;
@@ -10,11 +11,11 @@ namespace ValveResourceFormat.Renderer.Particles;
 /// </summary>
 record struct ParticleDefinitionParser(KVObject Data, ILogger Logger)
 {
-    private readonly T GetValueOrDefault<T>(string key, Func<string, T> parsingMethod, T @default)
+    private readonly T GetValueOrDefault<T>(string key, Func<string, T?> parsingMethod, T @default)
     {
         if (Data.ContainsKey(key))
         {
-            return parsingMethod(key);
+            return parsingMethod(key) ?? @default;
         }
 
         return @default;
@@ -46,7 +47,7 @@ record struct ParticleDefinitionParser(KVObject Data, ILogger Logger)
     /// <summary>Reads a long property, returning <paramref name="default"/> if the key is absent.</summary>
     public readonly long Long(string key, long @default = default) => GetValueOrDefault(key, Long, @default);
 
-    private readonly bool Boolean(string k) => Data.GetProperty<bool>(k);
+    private readonly bool Boolean(string k) => Data.GetBooleanProperty(k);
     /// <summary>Reads a bool property, returning <paramref name="default"/> if the key is absent.</summary>
     public readonly bool Boolean(string key, bool @default = default) => GetValueOrDefault(key, Boolean, @default);
 
@@ -78,13 +79,18 @@ record struct ParticleDefinitionParser(KVObject Data, ILogger Logger)
 
     /// <summary>Reads and constructs an <see cref="INumberProvider"/> from the property at <paramref name="key"/>, returning <paramref name="default"/> if the key is absent.</summary>
     public readonly INumberProvider NumberProvider(string key, INumberProvider @default) => GetValueOrDefault(key, NumberProvider, @default);
-    private readonly INumberProvider NumberProvider(string key)
+    private readonly INumberProvider? NumberProvider(string key)
     {
-        var property = Data.GetProperty<object>(key);
+        var pfParameters = Data.GetSubCollection(key);
 
-        if (property is KVObject pfParameters)
+        if (pfParameters.IsNull)
         {
-            var type = pfParameters.GetProperty<string>("m_nType");
+            return null;
+        }
+
+        if (pfParameters.IsCollection)
+        {
+            var type = pfParameters.GetStringProperty("m_nType");
             var parse = new ParticleDefinitionParser(pfParameters, Logger);
 
             switch (type)
@@ -134,7 +140,7 @@ record struct ParticleDefinitionParser(KVObject Data, ILogger Logger)
         }
         else
         {
-            return new LiteralNumberProvider((float)Convert.ToDouble(property, CultureInfo.InvariantCulture));
+            return new LiteralNumberProvider((float)pfParameters);
         }
     }
 
@@ -142,11 +148,11 @@ record struct ParticleDefinitionParser(KVObject Data, ILogger Logger)
     public readonly IVectorProvider VectorProvider(string key, IVectorProvider @default) => GetValueOrDefault(key, VectorProvider, @default);
     private readonly IVectorProvider VectorProvider(string key)
     {
-        var property = Data.GetProperty<object>(key);
+        var pvecParameters = Data.GetSubCollection(key);
 
-        if (property is KVObject pvecParameters && pvecParameters.ContainsKey("m_nType"))
+        if (pvecParameters.IsCollection && pvecParameters.ContainsKey("m_nType"))
         {
-            var type = pvecParameters.GetProperty<string>("m_nType");
+            var type = pvecParameters.GetStringProperty("m_nType");
             var parse = new ParticleDefinitionParser(pvecParameters, Logger);
 
             switch (type)
@@ -173,12 +179,14 @@ record struct ParticleDefinitionParser(KVObject Data, ILogger Logger)
                     return new FloatInterpolationVectorProvider(parse, false);
                 case "PVEC_TYPE_FLOAT_INTERP_GRADIENT":
                     return new ColorGradientVectorProvider(parse);
+                case "PVEC_TYPE_RANDOM_UNIFORM":
+                    return new RandomUniformVectorProvider(parse);
+                case "PVEC_TYPE_RANDOM_UNIFORM_OFFSET":
+                    return new RandomUniformOffsetVectorProvider(parse);
                 /* UNSUPPORTED:
                  * PVEC_TYPE_NAMED_VALUE - new in dota
                  * PVEC_TYPE_PARTICLE_VELOCITY - new in dota
                  * PVEC_TYPE_CP_RELATIVE_RANDOM_DIR - new in dota. presumably relative dir but the value is random per particle?
-                 * PVEC_TYPE_RANDOM_UNIFORM - new in dota. uses vRandomMin and vRandomMax
-                 * PVEC_TYPE_RANDOM_UNIFORM_OFFSET - new in dota
                  */
                 default:
                     if (pvecParameters.ContainsKey("m_vLiteralValue"))
@@ -198,11 +206,11 @@ record struct ParticleDefinitionParser(KVObject Data, ILogger Logger)
     public readonly ITransformProvider TransformInput(string key, ITransformProvider @default) => GetValueOrDefault(key, TransformInput, @default);
     private readonly ITransformProvider TransformInput(string key)
     {
-        var property = Data.GetProperty<object>(key);
+        var transformParameters = Data.GetSubCollection(key);
 
-        if (property is KVObject transformParameters)
+        if (transformParameters.IsCollection)
         {
-            var type = transformParameters.GetProperty<string>("m_nType");
+            var type = transformParameters.GetStringProperty("m_nType", "PT_TYPE_CONTROL_POINT");
             var parse = new ParticleDefinitionParser(transformParameters, Logger);
 
             switch (type)

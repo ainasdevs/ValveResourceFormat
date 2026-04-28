@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using ValveKeyValue;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.CompiledShader;
@@ -64,11 +65,13 @@ public class VfxRenderStateInfoPixelShader : VfxRenderStateInfo
     /// <summary>
     /// Describes the rasterizer state configuration.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/rendersystemdx11/RsRasterizerStateDesc_t">RsRasterizerStateDesc_t</seealso>
     public class RsRasterizerStateDesc
     {
         /// <summary>
         /// Specifies the fill mode for rendering.
         /// </summary>
+        /// <seealso href="https://s2v.app/SchemaExplorer/cs2/rendersystemdx11/RsFillMode_t">RsFillMode_t</seealso>
         public enum RsFillMode : byte
         {
 #pragma warning disable CS1591
@@ -80,6 +83,7 @@ public class VfxRenderStateInfoPixelShader : VfxRenderStateInfo
         /// <summary>
         /// Specifies the cull mode for rendering.
         /// </summary>
+        /// <seealso href="https://s2v.app/SchemaExplorer/cs2/rendersystemdx11/RsCullMode_t">RsCullMode_t</seealso>
         public enum RsCullMode : byte
         {
 #pragma warning disable CS1591
@@ -145,25 +149,9 @@ public class VfxRenderStateInfoPixelShader : VfxRenderStateInfo
     /// <summary>
     /// Describes the depth and stencil state configuration.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/rendersystemdx11/RsDepthStencilStateDesc_t">RsDepthStencilStateDesc_t</seealso>
     public class RsDepthStencilStateDesc
     {
-        /// <summary>
-        /// Specifies comparison functions.
-        /// </summary>
-        public enum RsComparison : byte
-        {
-#pragma warning disable CS1591
-            Never = 0,
-            Less = 1,
-            Equal = 2,
-            LessEqual = 3,
-            Greater = 4,
-            NotEqual = 5,
-            GreaterEqual = 6,
-            Always = 7,
-#pragma warning restore CS1591
-        }
-
         /// <summary>
         /// Specifies stencil operations.
         /// </summary>
@@ -328,6 +316,7 @@ public class VfxRenderStateInfoPixelShader : VfxRenderStateInfo
     /// <summary>
     /// Describes the blend state configuration for render targets.
     /// </summary>
+    /// <seealso href="https://s2v.app/SchemaExplorer/cs2/rendersystemdx11/RsBlendStateDesc_t">RsBlendStateDesc_t</seealso>
     public class RsBlendStateDesc
     {
         /// <summary>Gets the maximum number of render targets.</summary>
