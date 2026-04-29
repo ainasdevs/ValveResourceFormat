@@ -482,6 +482,20 @@ namespace ValveResourceFormat.ResourceTypes
         }
 
         /// <summary>
+        /// Gets the per-mesh bitmask array indicating which mesh groups each mesh belongs to.
+        /// Index corresponds to mesh index; each bit position maps to a group index in <see cref="GetMeshGroups"/>.
+        /// </summary>
+        public ulong[] GetMeshGroupMasks()
+            => Data.GetUnsignedIntegerArray("m_refMeshGroupMasks");
+
+        /// <summary>
+        /// Gets the default mesh group mask bitmask.
+        /// Each set bit selects a group index from <see cref="GetMeshGroups"/> as active by default.
+        /// </summary>
+        public ulong GetDefaultMeshGroupMask()
+            => Data.GetUnsignedIntegerProperty("m_nDefaultMeshGroupMask");
+
+        /// <summary>
         /// Gets the mesh groups defined in the model.
         /// </summary>
         /// <returns>Enumerable of mesh group names.</returns>

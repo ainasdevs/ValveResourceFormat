@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using SharpGLTF.Memory;
 using SharpGLTF.Schema2;
@@ -82,6 +83,18 @@ namespace ValveResourceFormat.IO
         /// The filter does not apply when exporting a vmesh resource.
         /// </summary>
         public HashSet<string> MeshFilter { get; } = [];
+
+        /// <summary>
+        /// Gets the list of regex patterns for material paths to exclude during export.
+        /// Draw calls whose effective material path matches any pattern are skipped entirely (no geometry emitted).
+        /// </summary>
+        public List<Regex> ExcludedMaterialPatterns { get; } = [];
+
+        /// <summary>
+        /// Gets the list of regex-based material remapping rules.
+        /// Each entry replaces the material path if the pattern matches, before any other processing.
+        /// </summary>
+        public List<(Regex Pattern, string Replacement)> MaterialRemapPatterns { get; } = [];
 
         private string DstDir = string.Empty;
         private CancellationToken CancellationToken;
@@ -475,15 +488,31 @@ namespace ValveResourceFormat.IO
             }
         }
 
-        private static string? GetSkinPathFromModel(VModel model, string skinName)
+        private static Dictionary<string, string>? BuildMaterialReplacementTable(VModel model, string materialGroupName)
         {
-            var materialGroupForSkin = model.GetMaterialGroups()
-                .SingleOrDefault(group => group.Name == skinName);
+            var groups = model.GetMaterialGroups().ToArray();
+            if (groups.Length == 0)
+            {
+                return null;
+            }
 
-            // Given these are at the model level, and otherwise pull materials from drawcalls
-            // on the mesh, not sure how they correlate if there's more than one here
-            // So just take the first one and hope for the best
-            return materialGroupForSkin.Materials?[0];
+            var defaultGroup = groups[0];
+            var targetGroup = groups.FirstOrDefault(g => g.Name == materialGroupName);
+            if (targetGroup.Materials == null)
+            {
+                return null;
+            }
+
+            var table = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < defaultGroup.Materials.Length && i < targetGroup.Materials.Length; i++)
+            {
+                if (!string.Equals(defaultGroup.Materials[i], targetGroup.Materials[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    table[defaultGroup.Materials[i]] = targetGroup.Materials[i];
+                }
+            }
+
+            return table.Count > 0 ? table : null;
         }
 
         /// <summary>
@@ -700,7 +729,9 @@ namespace ValveResourceFormat.IO
             // Swap Rotate upright, scale inches to meters.
             transform *= TRANSFORMSOURCETOGLTF;
 
-            var skinMaterialPath = skinName != null ? GetSkinPathFromModel(model, skinName) : null;
+            var materialReplacementTable = skinName != null
+                ? BuildMaterialReplacementTable(model, skinName)
+                : null;
 
             foreach (var m in LoadModelMeshes(model, name))
             {
@@ -718,7 +749,7 @@ namespace ValveResourceFormat.IO
                 }
 
                 var boneRemapTable = model.GetRemapTable(m.MeshIndex);
-                var node = AddMeshNode(exportedModel, scene, meshName, tintColor, m.Mesh, m.Mesh.VBIB, joints, boneRemapTable, skinMaterialPath, entity);
+                var node = AddMeshNode(exportedModel, scene, meshName, tintColor, m.Mesh, m.Mesh.VBIB, joints, boneRemapTable, materialReplacementTable, entity);
                 if (node != null)
                 {
                     node.WorldMatrix = transform;
@@ -786,7 +817,7 @@ namespace ValveResourceFormat.IO
 
         private Node? AddMeshNode(ModelRoot exportedModel, Scene scene, string name, Vector4 tintColor,
             VMesh mesh, Blocks.VBIB vbib, Node[]? joints, int[]? boneRemapTable = null,
-            string? skinMaterialPath = null, EntityLump.Entity? entity = null)
+            Dictionary<string, string>? materialReplacementTable = null, EntityLump.Entity? entity = null)
         {
             if (mesh.Data.GetArray("m_sceneObjects").Count == 0)
             {
@@ -801,7 +832,7 @@ namespace ValveResourceFormat.IO
                 return newNode;
             }
 
-            exportedMesh = CreateGltfMesh(name, mesh, vbib, exportedModel, boneRemapTable, skinMaterialPath, tintColor);
+            exportedMesh = CreateGltfMesh(name, mesh, vbib, exportedModel, boneRemapTable, materialReplacementTable, tintColor);
             ExportedMeshes.Add(name, exportedMesh);
 
             if (entity != null && ExportExtras)

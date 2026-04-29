@@ -28,7 +28,7 @@ public partial class GltfModelExporter
     private readonly record struct ExportedMaterialData(Material Material, bool IsOverlay);
     private readonly Dictionary<ExportedMaterial, ExportedMaterialData> ExportedMaterials = [];
 
-    private Mesh CreateGltfMesh(string meshName, VMesh vmesh, VBIB vbib, ModelRoot exportedModel, int[]? boneRemapTable, string? skinMaterialPath, Vector4 tintColor)
+    private Mesh CreateGltfMesh(string meshName, VMesh vmesh, VBIB vbib, ModelRoot exportedModel, int[]? boneRemapTable, Dictionary<string, string>? materialReplacementTable, Vector4 tintColor)
     {
         ProgressReporter?.Report($"Creating mesh: {meshName}");
 
@@ -46,7 +46,7 @@ public partial class GltfModelExporter
         {
             foreach (var drawCall in sceneObject.GetArray("m_drawCalls"))
             {
-                var primitive = CreateMeshFromDrawCall(drawCall, mesh, vbib, vertexBufferAccessors, exportedModel, skinMaterialPath, tintColor);
+                var primitive = CreateMeshFromDrawCall(drawCall, mesh, vbib, vertexBufferAccessors, exportedModel, materialReplacementTable, tintColor);
 
                 if (vmesh.MorphData != null)
                 {
@@ -54,9 +54,19 @@ public partial class GltfModelExporter
                     if (flexData != null)
                     {
                         var vertexCount = drawCall.GetInt32Property("m_nVertexCount");
-                        AddMorphTargetsToPrimitive(vmesh.MorphData, flexData, primitive, exportedModel, vertexOffset, vertexCount);
+
+                        if (primitive != null)
+                        {
+                            AddMorphTargetsToPrimitive(vmesh.MorphData, flexData, primitive, exportedModel, vertexOffset, vertexCount);
+                        }
+
                         vertexOffset += vertexCount;
                     }
+                }
+
+                if (primitive == null)
+                {
+                    continue;
                 }
             }
         }
@@ -281,10 +291,34 @@ public partial class GltfModelExporter
         }).ToArray();
     }
 
-    private MeshPrimitive CreateMeshFromDrawCall(KVObject drawCall, Mesh mesh, VBIB vbib, Dictionary<string,
-        Accessor>[] vertexBufferAccessors, ModelRoot exportedModel, string? skinMaterialPath, Vector4 parentTintColor)
+    private MeshPrimitive? CreateMeshFromDrawCall(KVObject drawCall, Mesh mesh, VBIB vbib, Dictionary<string,
+        Accessor>[] vertexBufferAccessors, ModelRoot exportedModel, Dictionary<string, string>? materialReplacementTable, Vector4 parentTintColor)
     {
         CancellationToken.ThrowIfCancellationRequested();
+
+        var drawCallMaterialPath = drawCall.GetStringProperty("m_material") ?? drawCall.GetStringProperty("m_pMaterial");
+
+        // Apply material group replacement table (from entity skin property)
+        var effectiveMaterialPath = materialReplacementTable != null
+            && materialReplacementTable.TryGetValue(drawCallMaterialPath, out var replacedPath)
+            ? replacedPath
+            : drawCallMaterialPath;
+
+        // Apply regex-based material remapping
+        foreach (var (pattern, replacement) in MaterialRemapPatterns)
+        {
+            if (pattern.IsMatch(effectiveMaterialPath))
+            {
+                effectiveMaterialPath = replacement;
+                break;
+            }
+        }
+
+        if (ExcludedMaterialPatterns.Count > 0
+            && ExcludedMaterialPatterns.Any(pattern => pattern.IsMatch(effectiveMaterialPath)))
+        {
+            return null;
+        }
 
         var indexBufferInfo = drawCall.GetSubCollection("m_indexBuffer");
         var indexBufferIndex = indexBufferInfo.GetInt32Property("m_hBuffer");
@@ -366,7 +400,7 @@ public partial class GltfModelExporter
             modelTintColor *= dcTintColorWithAlpha;
         }
 
-        var materialPath = skinMaterialPath ?? drawCall.GetStringProperty("m_material") ?? drawCall.GetStringProperty("m_pMaterial");
+        var materialPath = effectiveMaterialPath;
 
         var materialNameTrimmed = Path.GetFileNameWithoutExtension(materialPath);
         var materialHashKey = new ExportedMaterial(materialPath, modelTintColor);
@@ -504,7 +538,7 @@ public partial class GltfModelExporter
             var mesh = exportedModel.CreateMesh(meshName);
             mesh.Extras = new JsonObject();
 
-            CreateMeshFromDrawCall(drawCall, mesh, vbib, vertexBufferAccessors, exportedModel, skinMaterialPath: null, tintColor);
+            CreateMeshFromDrawCall(drawCall, mesh, vbib, vertexBufferAccessors, exportedModel, materialReplacementTable: null, tintColor);
 
             var newNode = scene.CreateNode(name).WithMesh(mesh);
             newNode.WorldMatrix = transform * TRANSFORMSOURCETOGLTF;
