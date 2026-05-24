@@ -262,7 +262,7 @@ namespace ValveResourceFormat.ResourceTypes
         private int[]? CompressedMips;
         private bool IsActuallyCompressedMips;
 
-        private float[]? RadianceCoefficients;
+        public float[]? RadianceCoefficients { get; private set; }
 
         /// <summary>
         /// Gets the actual width of the texture, using NonPow2Width if available and valid, otherwise Width.
@@ -963,6 +963,67 @@ namespace ValveResourceFormat.ResourceTypes
             SkipMipmaps(mipLevel);
 
             ReadTexture(mipLevel, output);
+        }
+
+        /// <summary>
+        /// Read raw compressed block data for a single depth slice of a volume texture.
+        /// Returns BC6H/BC7/DXT blocks without decoding to pixels.
+        /// </summary>
+        public byte[] ReadRawVolumeSliceData(uint mipLevel, uint depthSlice)
+        {
+            Debug.Assert(Reader is not null);
+
+            var (width, height, depth) = CalculateTextureSizesForMipLevel(mipLevel);
+            var fullSize = CalculateBufferSizeForMipLevel(width, height, depth);
+            var sliceSize = fullSize / depth;
+
+            var buf = ArrayPool<byte>.Shared.Rent(fullSize);
+
+            try
+            {
+                var span = buf.AsSpan(0, fullSize);
+
+                Reader.BaseStream.Position = DataOffset;
+                SkipMipmaps(mipLevel);
+                ReadTexture(mipLevel, span);
+
+                var offset = sliceSize * (int)depthSlice;
+                return span.Slice(offset, sliceSize).ToArray();
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buf);
+            }
+        }
+
+        /// <summary>
+        /// Read raw compressed block data for a single cubemap face at the given mip level and array index.
+        /// Returns BC6H/BC7/DXT blocks without decoding to pixels.
+        /// </summary>
+        public byte[] ReadRawFaceData(uint mipLevel, uint arrayIndex, CubemapFace face)
+        {
+            Debug.Assert(Reader is not null);
+
+            var fullSize = CalculateBufferSizeForMipLevel(mipLevel);
+            var faceSize = fullSize / (6 * Depth);
+
+            var buf = ArrayPool<byte>.Shared.Rent(fullSize);
+
+            try
+            {
+                var span = buf.AsSpan(0, fullSize);
+
+                Reader.BaseStream.Position = DataOffset;
+                SkipMipmaps(mipLevel);
+                ReadTexture(mipLevel, span);
+
+                var faceOffset = faceSize * (int)arrayIndex * 6 + faceSize * (int)face;
+                return span.Slice(faceOffset, faceSize).ToArray();
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buf);
+            }
         }
 
         private int CalculateJpegSize()

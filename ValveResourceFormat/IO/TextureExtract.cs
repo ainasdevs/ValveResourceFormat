@@ -139,7 +139,7 @@ public sealed class TextureExtract
             return new ContentFile() { Data = rawImage };
         }
 
-        Func<SKBitmap, byte[]> ImageEncode = ExportExr ? ToExrImage : ToPngImage;
+        Func<SKBitmap, byte[]> ImageEncode = ExportExr ? (b => ToExrImage(b)) : ToPngImage;
 
         //
         // Multiple images path
@@ -576,20 +576,20 @@ public sealed class TextureExtract
     /// <summary>
     /// Converts a bitmap to EXR image bytes.
     /// </summary>
-    public static byte[] ToExrImage(SKBitmap bitmap)
+    public static byte[] ToExrImage(SKBitmap bitmap, bool asFp16 = false)
     {
         using var pixels = bitmap.PeekPixels();
-        return ToExrImage(pixels);
+        return ToExrImage(pixels, asFp16);
     }
 
     /// <summary>
     /// Converts pixmap data to EXR image bytes.
     /// </summary>
-    public static byte[] ToExrImage(SKPixmap pixels)
+    public static byte[] ToExrImage(SKPixmap pixels, bool asFp16 = false)
     {
         var pixelSpan = pixels.GetPixelSpan<SKColorF>();
         var floatSpan = MemoryMarshal.Cast<SKColorF, float>(pixelSpan);
-        var result = Exr.SaveEXRToMemory(floatSpan, pixels.Width, pixels.Height, components: 4, asFp16: false, out var exrData);
+        var result = Exr.SaveEXRToMemory(floatSpan, pixels.Width, pixels.Height, components: 4, asFp16, out var exrData);
         if (result != ResultCode.Success)
         {
             throw new InvalidOperationException($"Got result {result} while saving EXR image");
