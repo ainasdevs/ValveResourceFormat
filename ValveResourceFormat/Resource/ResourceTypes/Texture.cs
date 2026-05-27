@@ -997,6 +997,24 @@ namespace ValveResourceFormat.ResourceTypes
         }
 
         /// <summary>
+        /// Read raw compressed block data for a single mip level of a 2D texture.
+        /// Returns block-compressed data (BC5/BC6H/BC7/DXT) without decoding.
+        /// </summary>
+        public byte[] ReadRawMipData(uint mipLevel)
+        {
+            Debug.Assert(Reader is not null);
+
+            var size = CalculateBufferSizeForMipLevel(mipLevel);
+            var buf = new byte[size];
+
+            Reader.BaseStream.Position = DataOffset;
+            SkipMipmaps(mipLevel);
+            ReadTexture(mipLevel, buf);
+
+            return buf;
+        }
+
+        /// <summary>
         /// Read raw compressed block data for a single cubemap face at the given mip level and array index.
         /// Returns BC6H/BC7/DXT blocks without decoding to pixels.
         /// </summary>
