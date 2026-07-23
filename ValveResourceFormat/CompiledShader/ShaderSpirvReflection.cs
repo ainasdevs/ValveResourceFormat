@@ -153,8 +153,12 @@ public static partial class ShaderSpirvReflection
     /// <param name="vulkanSource">The Vulkan shader source containing SPIR-V bytecode.</param>
     /// <param name="backend">The target shader language backend.</param>
     /// <param name="code">The decompiled shader code.</param>
+    /// <param name="nameMap">
+    /// Optional collector for resource names assigned during reflection. Names are recorded before SPIRV-Cross
+    /// emits the target source, so callers receive the mapping even if backend compilation later fails.
+    /// </param>
     /// <returns>True if decompilation succeeded, false otherwise.</returns>
-    public static bool ReflectSpirv(VfxShaderFileVulkan vulkanSource, Backend backend, out string code)
+    public static bool ReflectSpirv(VfxShaderFileVulkan vulkanSource, Backend backend, out string code, SpirvNameMap? nameMap = null)
     {
         static bool Error(out string code, spvc_context context)
         {
@@ -227,14 +231,14 @@ public static partial class ShaderSpirvReflection
                     return Error(out code, context);
                 }
 
-                RenameResource(compiler, resources, SpirvResourceType.SeparateImage, vulkanSource);
-                RenameResource(compiler, resources, SpirvResourceType.SeparateSamplers, vulkanSource);
+                RenameResource(compiler, resources, SpirvResourceType.SeparateImage, vulkanSource, nameMap);
+                RenameResource(compiler, resources, SpirvResourceType.SeparateSamplers, vulkanSource, nameMap);
 
-                RenameResource(compiler, resources, SpirvResourceType.StorageBuffer, vulkanSource);
-                RenameResource(compiler, resources, SpirvResourceType.UniformBuffer, vulkanSource);
+                RenameResource(compiler, resources, SpirvResourceType.StorageBuffer, vulkanSource, nameMap);
+                RenameResource(compiler, resources, SpirvResourceType.UniformBuffer, vulkanSource, nameMap);
 
-                RenameResource(compiler, resources, SpirvResourceType.StageInput, vulkanSource);
-                RenameResource(compiler, resources, SpirvResourceType.StageOutput, vulkanSource);
+                RenameResource(compiler, resources, SpirvResourceType.StageInput, vulkanSource, nameMap);
+                RenameResource(compiler, resources, SpirvResourceType.StageOutput, vulkanSource, nameMap);
             }
 
             result = SpirvCrossApi.spvc_compiler_compile(compiler, out var compiledCode);
@@ -342,7 +346,7 @@ public static partial class ShaderSpirvReflection
     }
 
     private static void RenameResource(spvc_compiler compiler, spvc_resources resources, SpirvResourceType resourceType,
-        VfxShaderFile shaderFile)
+        VfxShaderFile shaderFile, SpirvNameMap? nameMap)
     {
         var staticComboData = shaderFile.ParentCombo;
         var program = staticComboData?.ParentProgramData;
@@ -504,6 +508,11 @@ public static partial class ShaderSpirvReflection
 
             SpirvCrossApi.spvc_compiler_set_name(compiler, resource.id, name);
 
+            if (nameMap is not null)
+            {
+                nameMap.Names[resource.id] = name;
+            }
+
             if (resourceType is SpirvResourceType.UniformBuffer)
             {
                 var bufferRanges = SpirvCrossApi.spvc_compiler_get_active_buffer_ranges(compiler, resource.id);
@@ -525,6 +534,11 @@ public static partial class ShaderSpirvReflection
                         {
                             SpirvCrossApi.spvc_compiler_set_member_name(compiler, resource.base_type_id, bufferRange.index,
                                 memberNameBytes);
+                        }
+
+                        if (nameMap is not null)
+                        {
+                            nameMap.MemberNames[(resource.base_type_id, bufferRange.index)] = memberName;
                         }
                     }
                 }

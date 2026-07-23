@@ -699,7 +699,7 @@ public sealed class ShaderExtract
                 else if (gpuSource is VfxShaderFileVulkan spirv && !spirv.IsEmpty() && ShaderUtilHelpers.IsSpirvCrossAvailable())
                 {
                     variant0Source.Append(spirv.GetDecompiledFile());
-                    variant0Source.AppendLine("// ---------  SPIRV -> HLSL end  --------- ");
+                    variant0Source.AppendLine("// ---------  SPIRV -> GLSL end  --------- ");
                 }
             }
 

@@ -1,8 +1,3 @@
-// SPIR-V reflection failed for backend HLSL:
-// cbuffer ID 5618 (name: _Globals_), member index 10 (name: g_vSpecularColor) cannot be expressed with either HLSL packing layout or packoffset.
-//
-// Re-attempting reflection with the GLSL backend.
-
 // VRF-TEST
 // SPIR-V source (24200 bytes), GLSL reflection with SPIRV-Cross by KhronosGroup
 // Static combos: S_TRANSLUCENT

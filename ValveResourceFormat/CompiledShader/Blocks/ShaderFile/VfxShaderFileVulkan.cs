@@ -221,42 +221,27 @@ public class VfxShaderFileVulkan : VfxShaderFile
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Decompiles SPIR-V bytecode to HLSL or GLSL using SPIRV-Cross reflection, attempting multiple backends until successful.
+    /// Decompiles SPIR-V bytecode to GLSL using SPIRV-Cross reflection.
     /// </remarks>
     public override string GetDecompiledFile()
     {
-        using var buffer = new StringWriter(CultureInfo.InvariantCulture);
-
-        var backendsToTry = new[] { Backend.HLSL, Backend.GLSL, /* Backend.MSL, */ };
-        for (var i = 0; i < backendsToTry.Length; i++)
+        if (ShaderSpirvReflection.ReflectSpirv(this, Backend.GLSL, out var code))
         {
-            var backend = backendsToTry[i];
-            var success = ShaderSpirvReflection.ReflectSpirv(this, backend, out var code);
-            if (success)
+            return code;
+        }
+
+        using var buffer = new StringWriter(CultureInfo.InvariantCulture);
+        buffer.WriteLine("// SPIR-V reflection failed for backend GLSL:");
+
+        foreach (var line in code.AsSpan().EnumerateLines())
+        {
+            if (line.Length == 0)
             {
-                buffer.Write(code);
-                break;
+                continue;
             }
 
-            buffer.WriteLine($"// SPIR-V reflection failed for backend {backend}:");
-
-            foreach (var line in code.AsSpan().EnumerateLines())
-            {
-                if (line.Length == 0)
-                {
-                    continue;
-                }
-
-                buffer.Write("// ");
-                buffer.WriteLine(line);
-            }
-
-            if (i < backendsToTry.Length - 1)
-            {
-                buffer.WriteLine("//");
-                buffer.WriteLine($"// Re-attempting reflection with the {backendsToTry[i + 1]} backend.");
-                buffer.WriteLine();
-            }
+            buffer.Write("// ");
+            buffer.WriteLine(line);
         }
 
         return buffer.ToString();

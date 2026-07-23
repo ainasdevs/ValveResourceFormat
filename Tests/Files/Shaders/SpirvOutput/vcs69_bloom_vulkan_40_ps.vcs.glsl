@@ -1,39 +1,23 @@
 // VRF-TEST
-// SPIR-V source (904 bytes), HLSL reflection with SPIRV-Cross by KhronosGroup
+// SPIR-V source (904 bytes), GLSL reflection with SPIRV-Cross by KhronosGroup
 
-cbuffer _Globals_ : register(b0, space1)
+#version 460
+
+struct _1017
 {
-    float4 _Globals_1_g_vInvTexDim : packoffset(c0);
+    vec4 g_vInvTexDim;
 };
 
-Texture2D<float4> g_tInputBuffer : register(t30, space1);
-SamplerState AddressU_Clamp_AddressV_Clamp_Filter_MinMagLinearMipPoint : register(s14, space1);
+layout(set = 1) uniform _1017 _Globals_;
 
-static float4 gl_FragCoord;
-static float4 output_0;
+layout(set = 1, binding = 30) uniform texture2D g_tInputBuffer;
+layout(set = 1, binding = 14) uniform sampler AddressU_Clamp_AddressV_Clamp_Filter_MinMagLinearMipPoint;
 
-struct PS_INPUT
+layout(location = 0) out vec4 output_0;
+
+void main()
 {
-    float4 gl_FragCoord : SV_Position;
-};
-
-struct PS_OUTPUT
-{
-    float4 output_0 : SV_Target0;
-};
-
-void MainPs_inner()
-{
-    output_0 = g_tInputBuffer.SampleLevel(AddressU_Clamp_AddressV_Clamp_Filter_MinMagLinearMipPoint, (gl_FragCoord.xy * _Globals_1_g_vInvTexDim.xy).xy, 0.0f);
+    output_0 = textureLod(sampler2D(g_tInputBuffer, AddressU_Clamp_AddressV_Clamp_Filter_MinMagLinearMipPoint), (gl_FragCoord.xy * _Globals_.g_vInvTexDim.xy).xy, 0.0);
 }
 
-PS_OUTPUT MainPs(PS_INPUT stage_input)
-{
-    gl_FragCoord = stage_input.gl_FragCoord;
-    gl_FragCoord.w = 1.0 / gl_FragCoord.w;
-    MainPs_inner();
-    PS_OUTPUT stage_output;
-    stage_output.output_0 = output_0;
-    return stage_output;
-}
 

@@ -438,7 +438,8 @@ namespace ValveResourceFormat.CompiledShader
             return VfxVariableTypeToString[t];
         }
 
-        internal static bool IsSpirvCrossAvailable()
+        /// <summary>Returns whether the SPIRV-Cross native binary is available on the current platform.</summary>
+        public static bool IsSpirvCrossAvailable()
         {
             // https://github.com/amerkoleci/Vortice.Vulkan/issues/66
             var isLinuxArm64 = RuntimeInformation.IsOSPlatform(OSPlatform.Linux) && RuntimeInformation.ProcessArchitecture == Architecture.Arm64;
