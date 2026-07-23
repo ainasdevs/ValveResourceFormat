@@ -2,12 +2,14 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer.Buffers;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.ResourceTypes.ModelAnimation;
 using ValveResourceFormat.ResourceTypes.ModelAnimation2;
 using ValveResourceFormat.ResourceTypes.ModelData.Attachments;
 using ValveResourceFormat.Serialization.KeyValues;
+using ValveResourceFormat.Utils;
 
 namespace ValveResourceFormat.Renderer.SceneNodes
 {
@@ -41,7 +43,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         public AnimationController AnimationController { get; }
 
         /// <summary>
-        /// A collection of animations available for sequential playback on this model.
+        /// A collection of animations available for playback on this model.
         /// </summary>
         public Dictionary<string, Animation> Animations { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -49,6 +51,9 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         /// Attachment points from model data.
         /// </summary>
         public Dictionary<string, Attachment> Attachments { get; }
+
+        /// <summary>Gets the list of nodes attached to this model and the attachment points used.</summary>
+        public List<(SceneNode Node, string AttachmentName, Vector3 Offset, Quaternion Rotation)> AttachedNodes { get; } = [];
 
         /// <summary>Gets the name of the currently active material group (skin).</summary>
         public string ActiveMaterialGroup => activeMaterialGroup.Name;
@@ -71,7 +76,10 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         private readonly (string Name, string[] Materials)[] materialGroups;
         private readonly string[] meshGroups;
         private readonly long[]? meshGroupMasks;
-        private readonly List<(int MeshIndex, string MeshName, long LoDMask)> meshNamesForLod1;
+        private readonly ModelLodInfo lodInfo;
+        private readonly List<(int MeshIndex, string MeshName, long LoDMask)> referenceMeshes;
+        private int? lodOverride;
+        private int resolvedLod;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ModelSceneNode"/> class and loads its meshes and animations.
@@ -91,7 +99,9 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 meshGroupMasks = model.Data.GetIntegerArray("m_refMeshGroupMasks");
             }
 
-            meshNamesForLod1 = model.GetReferenceMeshNamesAndLoD().Where(m => (m.LoDMask & 1) != 0).ToList();
+            lodInfo = model.LodInfo;
+            referenceMeshes = model.GetReferenceMeshNamesAndLoD().ToList();
+            resolvedLod = lodInfo.LowestLevel;
 
             AnimationController = new(model.Skeleton, model.FlexControllers);
             boneCount = model.Skeleton.Bones.Length;
@@ -111,15 +121,9 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                     AnimationController.RegisterExternalSkeleton(skeletonName, skeleton);
                 }
 
-                var animGraphs = model.Data.GetArray("m_animGraph2Refs");
-
-                // just in case there is any recursive or duplicate references
-                var visitedResources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                foreach (var animGraphRef in animGraphs)
+                foreach (var clipName in AnimationGraphLoader.GetClipNames(model, Scene.RendererContext.FileLoader))
                 {
-                    var graphName = animGraphRef.GetStringProperty("m_hGraph");
-                    LoadAnimGraphResources(graphName, visitedResources);
+                    LoadAnimationClip(clipName);
                 }
             }
 
@@ -136,6 +140,8 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             LoadAnimations(model, embeddedAnimationsOnly: isWorldPreview);
 
             SetCharacterEyeRenderParams();
+            Attachments = model.Attachments;
+            AnimationController.TwistConstraints = ParseTwistConstraints(model);
         }
 
         readonly struct CharacterEyeParameters
@@ -224,7 +230,11 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         /// <inheritdoc/>
         public override void Update(Scene.UpdateContext context)
         {
-            if (!AnimationController.Update(context.Timestep))
+            UpdateAutoLod(context.Camera);
+            var animationUpdated = AnimationController.Update(context.Timestep);
+            UpdateAttachments(context);
+
+            if (!animationUpdated)
             {
                 return;
             }
@@ -299,6 +309,68 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             }
         }
 
+        private void UpdateAttachments(Scene.UpdateContext context)
+        {
+            foreach (var attachment in AttachedNodes)
+            {
+                var child = attachment.Node;
+                var oldBounds = child.BoundingBox;
+
+                // keep the child's own scale; the parent drives the rest of its transform
+                var localTransform = Matrix4x4.CreateScale(GetScale(child.Transform)) * Matrix4x4.CreateFromQuaternion(attachment.Rotation) * Matrix4x4.CreateTranslation(attachment.Offset);
+                child.Transform = localTransform * GetAttachmentOrSelfTransform(attachment.AttachmentName);
+                child.Update(context);
+
+                if (child.LayerEnabled)
+                {
+                    child.Scene.DynamicOctree.Update(child, oldBounds);
+                }
+            }
+        }
+
+        // The parent anchor for an attached child: the attachment point's world transform, the world
+        // transform of a bone with that name when no attachment matches, or the model's own transform when
+        // no name is given or it matches neither. Rigid (no scale) because Source 2 does not propagate the
+        // parent's scale to attachment-parented children.
+        private Matrix4x4 GetAttachmentOrSelfTransform(string attachmentName)
+        {
+            if (!string.IsNullOrEmpty(attachmentName))
+            {
+                if (Attachments.ContainsKey(attachmentName))
+                {
+                    return GetRigidTransform(GetAttachmentTransform(attachmentName));
+                }
+
+                var boneIndex = AnimationController.Skeleton.GetBoneIndex(attachmentName);
+                if (boneIndex != -1)
+                {
+                    return GetRigidTransform(AnimationController.Pose[boneIndex] * Transform);
+                }
+            }
+
+            return GetRigidTransform(Transform);
+        }
+
+        /// <summary>
+        /// Whether the given name resolves to an anchor on this model: an attachment point,
+        /// or a bone when no attachment has that name.
+        /// </summary>
+        public bool HasAttachmentOrBone(string name)
+            => Attachments.ContainsKey(name) || AnimationController.Skeleton.GetBoneIndex(name) != -1;
+
+        // Rotation and translation only, with scale removed.
+        private static Matrix4x4 GetRigidTransform(Matrix4x4 transform)
+        {
+            Matrix4x4.Decompose(transform, out _, out var rotation, out var translation);
+            return Matrix4x4.CreateFromQuaternion(rotation) * Matrix4x4.CreateTranslation(translation);
+        }
+
+        private static Vector3 GetScale(Matrix4x4 transform)
+        {
+            Matrix4x4.Decompose(transform, out var scale, out _, out _);
+            return scale;
+        }
+
         /// <inheritdoc/>
         public override IEnumerable<string> GetSupportedRenderModes()
             => meshRenderers.SelectMany(static renderer => renderer.GetSupportedRenderModes());
@@ -352,15 +424,23 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 ? model.GetEmbeddedAnimations()
                 : model.GetAllAnimations(Scene.RendererContext.FileLoader)).ToList();
 
-            Animations.EnsureCapacity(animations.Count);
-            foreach (var anim in animations)
-            {
-                Animations[anim.Name] = anim;
-            }
+            AddAnimations(animations);
 
             if (Animations.Count != 0)
             {
                 SetupBoneMatrixBuffers();
+            }
+        }
+
+        /// <summary>
+        /// Adds the given animations to the collection of available animations for this model.
+        /// </summary>
+        public void AddAnimations(List<Animation> animations)
+        {
+            Animations.EnsureCapacity(animations.Count);
+            foreach (var anim in animations)
+            {
+                Animations[anim.Name] = anim;
             }
         }
 
@@ -395,47 +475,10 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             return true;
         }
 
-        private bool LoadAnimGraphResources(string graphName, HashSet<string> visited)
-        {
-            var resource = Scene.RendererContext.FileLoader.LoadFileCompiled(graphName);
-            if (resource?.DataBlock is not BinaryKV3 graphData)
-            {
-                return false;
-            }
-
-            var graphResources = graphData.Data.Root.GetArray<string>("m_resources");
-            if (graphResources == null)
-            {
-                return false;
-            }
-
-            var clipExt = ResourceType.NmClip.GetExtension()!;
-            var graphExt = ResourceType.NmGraph.GetExtension()!;
-
-            foreach (var graphResource in graphResources)
-            {
-                if (!visited.Add(graphResource))
-                {
-                    continue;
-                }
-
-                if (graphResource.EndsWith(clipExt, StringComparison.OrdinalIgnoreCase))
-                {
-                    LoadAnimationClip(graphResource);
-                }
-                else if (graphResource.EndsWith(graphExt, StringComparison.OrdinalIgnoreCase))
-                {
-                    LoadAnimGraphResources(graphResource, visited);
-                }
-            }
-
-            return true;
-        }
-
         private void LoadMeshes(Model model)
         {
-            // Get embedded meshes
-            foreach (var embeddedMesh in model.GetEmbeddedMeshesAndLoD().Where(m => (m.LoDMask & 1) != 0))
+            // All LoD levels are loaded; the active one is picked at render time.
+            foreach (var embeddedMesh in model.GetEmbeddedMeshesAndLoD())
             {
                 embeddedMesh.Mesh.LoadExternalMorphData(Scene.RendererContext.FileLoader);
                 model.SetExternalMorphData(embeddedMesh.Mesh.MorphData);
@@ -443,8 +486,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 meshRenderers.Add(new RenderableMesh(embeddedMesh.Mesh, embeddedMesh.MeshIndex, Scene, model, materialTable, embeddedMesh.Mesh.MorphData));
             }
 
-            // Load referred meshes from file (only load meshes with LoD 1)
-            foreach (var refMesh in GetLod1RefMeshes())
+            foreach (var refMesh in referenceMeshes)
             {
                 var newResource = Scene.RendererContext.FileLoader.LoadFileCompiled(refMesh.MeshName);
                 if (newResource?.DataBlock is not Mesh mesh)
@@ -473,10 +515,10 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         }
 
         /// <summary>Activates the animation with the given name, or stops animation if not found.</summary>
-        public void SetAnimationByName(string animationName)
+        public void SetAnimationByName(string animationName, float blendTime = 0f)
         {
             Animations.TryGetValue(animationName, out var activeAnimation);
-            SetAnimation(activeAnimation);
+            SetAnimation(activeAnimation, blendTime);
         }
 
         /// <summary>
@@ -504,10 +546,12 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             return false;
         }
 
-        /// <summary>Activates the given animation instance, or clears the active animation when <see langword="null"/>.</summary>
-        public void SetAnimation(Animation? activeAnimation)
+        /// <summary>Activates the given animation instance with a blend-in time, or clears the active animation when <see langword="null"/>.</summary>
+        /// <param name="activeAnimation">The animation to activate, or <see langword="null"/> to clear.</param>
+        /// <param name="blendTime">The time in seconds to blend from the current animation to the new one.</param>
+        public void SetAnimation(Animation? activeAnimation, float blendTime = 0f)
         {
-            AnimationController.SetAnimation(activeAnimation);
+            AnimationController.SetAnimation(activeAnimation, blendTime);
             UpdateBoundingBox();
 
             if (activeAnimation != default)
@@ -526,6 +570,47 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                     renderer.SetBoneMatricesBuffer(null);
                 }
             }
+        }
+
+        /// <summary>
+        /// Attaches another <see cref="SceneNode"/> to this model with optional attachment point, offset and rotation.
+        /// </summary>
+        /// <param name="node">The child model to attach.</param>
+        /// <param name="attachmentName">The attachment point name.</param>
+        /// <param name="offset">The local offset from the attachment point.</param>
+        /// <param name="rotation">The local rotation from the attachment point.</param>
+        public void AttachNode(SceneNode node,
+            string attachmentName = "",
+            Vector3 offset = default,
+            Quaternion rotation = default)
+        {
+            node.Parent = this;
+            AttachedNodes.RemoveAll(entry => entry.Node == node);
+            AttachedNodes.Add((node, attachmentName, offset, rotation));
+        }
+
+        /// <summary>
+        /// Places <paramref name="child"/> once at the named attachment point or bone (or the model's own
+        /// transform when no name is given), with <paramref name="offset"/> applied in that anchor's frame.
+        /// Unlike <see cref="AttachNode"/>, the child does not track the model afterwards. Works for any scene node.
+        /// </summary>
+        public void PlaceNode(SceneNode child, string attachmentName, Vector3 offset)
+        {
+            child.Transform = Matrix4x4.CreateTranslation(offset) * GetAttachmentOrSelfTransform(attachmentName);
+        }
+
+        /// <summary>
+        /// Attaches <paramref name="node"/> so it keeps its current world position relative to this model,
+        /// following the model if it later moves. Used for plain <c>parentname</c> parenting (no attachment point),
+        /// where the child stays where it was authored instead of snapping onto the parent.
+        /// </summary>
+        /// <param name="node">The child to attach.</param>
+        public void AttachNodeKeepingTransform(SceneNode node)
+        {
+            Matrix4x4.Invert(GetRigidTransform(Transform), out var anchorInverse);
+            var local = GetRigidTransform(node.Transform) * anchorInverse;
+            Matrix4x4.Decompose(local, out _, out var rotation, out var offset);
+            AttachNode(node, offset: offset, rotation: rotation);
         }
 
         /// <summary>
@@ -562,9 +647,9 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         }
 
 #pragma warning disable CA1024 // Use properties where appropriate
-        /// <summary>Returns the external reference mesh names and their LoD masks for LoD level 1.</summary>
-        public IEnumerable<(int MeshIndex, string MeshName, long LoDMask)> GetLod1RefMeshes()
-            => meshNamesForLod1;
+        /// <summary>Returns every external reference mesh name and its LoD mask, across all levels.</summary>
+        public IEnumerable<(int MeshIndex, string MeshName, long LoDMask)> GetReferenceMeshes()
+            => referenceMeshes;
 
         /// <summary>Returns all mesh group names defined by this model.</summary>
         public IEnumerable<string> GetMeshGroups()
@@ -575,51 +660,105 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             => activeMeshGroups;
 #pragma warning restore CA1024 // Use properties where appropriate
 
-        private IEnumerable<bool> GetActiveMeshMaskForGroup(string groupName)
-        {
-            if (meshGroupMasks == null)
-            {
-                return [];
-            }
-
-            var groupIndex = Array.IndexOf(meshGroups, groupName);
-            if (groupIndex >= 0)
-            {
-                return meshGroupMasks.Select(mask => (mask & 1L << groupIndex) != 0);
-            }
-            else
-            {
-                return meshGroupMasks.Select(_ => false);
-            }
-        }
-
         /// <summary>
         /// Sets which mesh groups are active, rebuilding the renderable mesh list accordingly.
         /// </summary>
         public void SetActiveMeshGroups(IEnumerable<string> setMeshGroups)
         {
             activeMeshGroups = new HashSet<string>(meshGroups.Intersect(setMeshGroups));
+            RebuildRenderableMeshes();
+        }
 
-            RenderableMeshes.Clear();
+        /// <summary>Gets the LoD level currently being rendered (auto-selected or forced).</summary>
+        public int ActiveLod => resolvedLod;
 
-            if (meshGroups.Length > 1)
+        /// <summary>Gets whether the LoD level is being chosen automatically by distance, rather than forced.</summary>
+        public bool IsAutoLod => lodOverride == null;
+
+        /// <summary>
+        /// Sets the LoD level to display, rebuilding the renderable mesh list accordingly.
+        /// Pass <see langword="null"/> to enable automatic distance-based selection.
+        /// </summary>
+        public void SetActiveLod(int? lod)
+        {
+            lodOverride = lod;
+
+            // A forced level stays put; Auto starts at the lowest populated level and UpdateAutoLod takes over.
+            resolvedLod = lod ?? lodInfo.LowestLevel;
+            RebuildRenderableMeshes();
+        }
+
+        /// <summary>
+        /// In automatic mode, picks the LoD level from the screen-size metric: the model drops to LoD
+        /// <c>n</c> once the metric passes <c>m_lodGroupSwitchDistances[n]</c>. Depends on FOV and
+        /// resolution, not on how big the model is.
+        /// </summary>
+        private void UpdateAutoLod(Camera camera)
+        {
+            if (lodOverride != null || lodInfo.AvailableLevels.Count <= 1 || lodInfo.SwitchDistances.Count <= 1)
             {
-                foreach (var group in activeMeshGroups)
-                {
-                    var meshMask = GetActiveMeshMaskForGroup(group).ToArray();
+                return;
+            }
 
-                    foreach (var meshRenderer in meshRenderers)
-                    {
-                        if (meshMask[meshRenderer.MeshIndex])
-                        {
-                            RenderableMeshes.Add(meshRenderer);
-                        }
-                    }
+            var target = lodInfo.SelectLevel(ComputeLodMetric(camera));
+
+            if (target != resolvedLod)
+            {
+                resolvedLod = target;
+                RebuildRenderableMeshes();
+            }
+        }
+
+        /// <summary>
+        /// Computes the LoD metric: <c>100 / on-screen size of a unit sphere at the model origin</c>.
+        /// It depends only on camera distance and FOV/viewport height, so where the model sits on
+        /// screen doesn't matter and looking around won't flip LoDs.
+        /// </summary>
+        private float ComputeLodMetric(Camera camera)
+        {
+            var distance = MathF.Sqrt(GetCameraDistance(camera));
+
+            // Size on screen of a unit sphere at this distance. M22 is the projection's
+            // 1/tan(vFov/2) y-scale, so the pixel height is windowHeight * M22 / distance.
+            var unitSphereSize = distance > 0f
+                ? camera.WindowSize.Y * camera.ProjectionMatrix.M22 / distance
+                : float.MaxValue;
+
+            return unitSphereSize > 0f ? 100f / unitSphereSize : 0f;
+        }
+
+        private bool IsMeshInActiveLod(int meshIndex)
+            => lodInfo.IsMeshInLevel(meshIndex, resolvedLod);
+
+        private bool IsMeshInActiveGroup(int meshIndex)
+        {
+            if (meshGroups.Length <= 1 || meshGroupMasks == null)
+            {
+                return true;
+            }
+
+            foreach (var group in activeMeshGroups)
+            {
+                var groupIndex = Array.IndexOf(meshGroups, group);
+                if (groupIndex >= 0 && (meshGroupMasks[meshIndex] & 1L << groupIndex) != 0)
+                {
+                    return true;
                 }
             }
-            else
+
+            return false;
+        }
+
+        private void RebuildRenderableMeshes()
+        {
+            RenderableMeshes.Clear();
+
+            foreach (var meshRenderer in meshRenderers)
             {
-                RenderableMeshes.AddRange(meshRenderers);
+                if (IsMeshInActiveLod(meshRenderer.MeshIndex) && IsMeshInActiveGroup(meshRenderer.MeshIndex))
+                {
+                    RenderableMeshes.Add(meshRenderer);
+                }
             }
         }
 
@@ -648,6 +787,79 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         public override void Delete()
         {
             boneMatricesGpu?.Delete();
+        }
+
+        /// <summary>
+        /// Parses tilt-twist constraints from the model's keyvalues.
+        /// </summary>
+        protected static TiltTwistConstraint[] ParseTwistConstraints(Model model)
+        {
+            var keyvalues = model.KeyValues;
+            if (!keyvalues.ContainsKey("BoneConstraintList"))
+            {
+                return [];
+            }
+
+            var boneConstraintList = keyvalues.GetArray("BoneConstraintList");
+            var constraints = new List<TiltTwistConstraint>();
+
+            foreach (var constraintData in boneConstraintList)
+            {
+                var className = constraintData.GetStringProperty("_class");
+                if (className != "CTiltTwistConstraint")
+                {
+                    continue;
+                }
+
+                var upVec = constraintData.GetFloatArray("m_vUpVector");
+
+                var constraint = new TiltTwistConstraint
+                {
+                    Name = constraintData.GetStringProperty("m_name"),
+                    UpVector = new Vector3(upVec[0], upVec[1], upVec[2]),
+                    TargetAxis = (int)constraintData.GetIntegerProperty("m_nTargetAxis"),
+                    SlaveAxis = (int)constraintData.GetIntegerProperty("m_nSlaveAxis"),
+                };
+
+                // Parse slaves
+                var slaves = constraintData.GetArray("m_slaves");
+                constraint.Slaves = slaves.Select(s =>
+                {
+                    var quat = s.GetFloatArray("m_qBaseOrientation");
+                    var pos = s.GetFloatArray("m_vBasePosition");
+
+                    return new TiltTwistConstraintSlave
+                    {
+                        BaseOrientation = new Quaternion(quat[0], quat[1], quat[2], quat[3]),
+                        BasePosition = new Vector3(pos[0], pos[1], pos[2]),
+                        BoneHash = s.GetUInt32Property("m_nBoneHash"),
+                        Weight = s.GetFloatProperty("m_flWeight"),
+                        Name = s.GetStringProperty("m_sName"),
+                    };
+                }).ToArray();
+
+                // Parse targets
+                var targets = constraintData.GetArray("m_targets");
+                constraint.Targets = targets.Select(t =>
+                {
+                    var quat = t.GetFloatArray("m_qOffset");
+                    var pos = t.GetFloatArray("m_vOffset");
+
+                    return new TiltTwistConstraintTarget
+                    {
+                        Offset = new Quaternion(quat[0], quat[1], quat[2], quat[3]),
+                        PositionOffset = new Vector3(pos[0], pos[1], pos[2]),
+                        BoneHash = t.GetUInt32Property("m_nBoneHash"),
+                        Name = t.GetStringProperty("m_sName"),
+                        Weight = t.GetFloatProperty("m_flWeight"),
+                        IsAttachment = t.GetBooleanProperty("m_bIsAttachment"),
+                    };
+                }).ToArray();
+
+                constraints.Add(constraint);
+            }
+
+            return [.. constraints];
         }
     }
 }

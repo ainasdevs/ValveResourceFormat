@@ -26,7 +26,7 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets or sets the compaction buffer index used for GPU-driven draw count, or -1 if not compacted.</summary>
         public int CompactionIndex { get; set; } = -1;
 
-        /// <summary>Gets or sets whether any fragment of this aggregate is visible this frame.</summary>
+        /// <summary>Gets whether any fragment of this aggregate is visible this frame.</summary>
         public bool AnyChildrenVisible { get; internal set; }
 
         /// <summary>Gets the per-instance transform matrices used for instanced drawing.</summary>
@@ -47,7 +47,7 @@ namespace ValveResourceFormat.Renderer
         public sealed class Fragment : SceneNode
         {
             /// <summary>Gets the aggregate that owns this fragment.</summary>
-            public required SceneAggregate Parent { get; init; }
+            public required new SceneAggregate Parent { get; init; }
 
             /// <summary>Gets the shared renderable mesh used to issue this fragment's draw call.</summary>
             public required RenderableMesh RenderMesh { get; init; }
@@ -58,7 +58,10 @@ namespace ValveResourceFormat.Renderer
             /// <summary>Gets or sets the per-fragment tint color.</summary>
             public Vector4 Tint { get; set; } = Vector4.One;
 
-            /// <inheritdoc/>
+            /// <summary>Initializes a new fragment of the given aggregate with the specified local bounds.</summary>
+            /// <param name="scene">Owning scene.</param>
+            /// <param name="parent">The scene aggregate this fragment belongs to.</param>
+            /// <param name="bounds">The local bounding box of the fragment.</param>
             public Fragment(Scene scene, SceneAggregate parent, AABB bounds) : base(scene)
             {
                 Parent = parent;
@@ -88,7 +91,7 @@ namespace ValveResourceFormat.Renderer
             }
             else
             {
-                var refMeshes = model.GetReferenceMeshNamesAndLoD().Where(m => (m.LoDMask & 1) != 0).ToList();
+                var refMeshes = model.GetReferenceMeshNamesForLod(model.LodInfo.LowestLevel).ToList();
                 var refMesh = refMeshes.First();
 
                 if (refMeshes.Count > 1)
@@ -161,6 +164,15 @@ namespace ValveResourceFormat.Renderer
 
             CanDrawIndirect = RenderMesh.DrawCallsOpaque.Count > 0;
 
+            // Keep only the fragments at the lowest present LoD level (usually LoD0, though some
+            // aggregates leave it empty). A mask of 0 means no LoD, so the fragment always renders.
+            var combinedLodMask = 0u;
+            foreach (var fragmentData in aggregateMeshes)
+            {
+                combinedLodMask |= fragmentData.GetUInt32Property("m_nLODGroupMask");
+            }
+            var lowestLodBit = combinedLodMask == 0 ? 0u : 1u << ModelLodInfo.LowestSetLevel(combinedLodMask);
+
             // CS2 goes from aggregate mesh -> draw call (many meshes can share one draw call)
             foreach (var fragmentData in aggregateMeshes)
             {
@@ -172,7 +184,8 @@ namespace ValveResourceFormat.Renderer
                 var flags = fragmentData.GetEnumValue<ObjectTypeFlags>("m_objectFlags", normalize: true);
                 var lodGroupMask = fragmentData.GetUInt32Property("m_nLODGroupMask");
 
-                if (lodGroupMask > 1)
+                var isHighestDetailMesh = lodGroupMask == 0 || (lodGroupMask & lowestLodBit) != 0;
+                if (!isHighestDetailMesh)
                 {
                     continue;
                 }

@@ -1,3 +1,7 @@
+using ValveResourceFormat.IO;
+using ValveResourceFormat.Renderer.SceneNodes;
+using ValveResourceFormat.ResourceTypes;
+
 namespace ValveResourceFormat.Renderer.Input;
 
 /// <summary>
@@ -66,7 +70,10 @@ public class UserInput
     private const float MaxOrbitDistance = 10000f;
     private const float OrbitZoomSpeed = 0.1f;
 
-    private readonly PlayerMovement PlayerMovement;
+    /// <summary>
+    /// Gets the <see cref="PlayerMovement"/> helper that processes WASD movement in walk mode.
+    /// </summary>
+    public PlayerMovement PlayerMovement { get; }
     /// <summary>Gets a value indicating whether the camera is in noclip (free-flight) mode rather than FPS movement mode.</summary>
     public bool NoClip { get; private set; } = true;
 
@@ -88,6 +95,8 @@ public class UserInput
     private Vector2 MouseDelta2D;
     private Vector2 MouseDeltaPitchYaw;
 
+    /// <summary>Gets or sets whether the viewport camera should have acceleration/deceleration when starting or stopping to move</summary>
+    public bool SmoothCameraEnabled { get; set; } = true;
     /// <summary>
     /// Initializes a new <see cref="UserInput"/> attached to the given renderer.
     /// </summary>
@@ -95,7 +104,7 @@ public class UserInput
     public UserInput(Renderer renderer)
     {
         Renderer = renderer;
-        Camera = new Camera(renderer.RendererContext);
+        Camera = new Camera(renderer.RendererContext.FieldOfView);
         PlayerMovement = new PlayerMovement(this);
     }
 
@@ -164,7 +173,7 @@ public class UserInput
             m_yaw * mouseDelta.X
         );
 
-        var fovRatio = Renderer.RendererContext.FieldOfView / float.RadiansToDegrees(2f * MathF.Atan(3f / 4f));
+        var fovRatio = Renderer.RendererContext.FieldOfView / 90f;
         MouseDeltaPitchYaw *= fovRatio;
         MouseDeltaPitchYaw *= MouseSensitivity;
         MouseDeltaPitchYaw = Vector2.DegreesToRadians(MouseDeltaPitchYaw);
@@ -237,6 +246,8 @@ public class UserInput
             Camera.ClampRotation();
         }
 
+        Viewmodel?.ProcessInput(this, Renderer.Uptime);
+
         var finalCamera = GetInterpolatedCamera();
 
         renderCamera.SetLocationPitchYaw(finalCamera.Location, finalCamera.Pitch, finalCamera.Yaw);
@@ -247,6 +258,8 @@ public class UserInput
 
     private CameraLite CameraPositionAngles
         => new(Camera.Location, Camera.Pitch, Camera.Yaw);
+
+    private ViewmodelSceneNode? Viewmodel { get; set; }
 
     /// <summary>
     /// Switches to noclip mode and begins a smooth camera transition from the current position.
@@ -472,9 +485,16 @@ public class UserInput
         }
 
         // Apply acceleration or deceleration
-        var hasInput = targetVelocity.LengthSquared() > 0.01f;
-        var smoothingFactor = hasInput ? Acceleration : Deceleration;
-        Velocity = Vector3.Lerp(Velocity, targetVelocity, 1f - MathF.Exp(-smoothingFactor * deltaTime));
+        if (SmoothCameraEnabled)
+        {
+            var hasInput = targetVelocity.LengthSquared() > 0.01f;
+            var smoothingFactor = hasInput ? Acceleration : Deceleration;
+            Velocity = Vector3.Lerp(Velocity, targetVelocity, 1f - MathF.Exp(-smoothingFactor * deltaTime));
+        }
+        else
+        {
+            Velocity = targetVelocity;
+        }
 
         // Apply velocity to camera position
         Camera.Location += Velocity * deltaTime;
@@ -495,5 +515,14 @@ public class UserInput
         OrbitDistance *= 1f + delta * OrbitZoomSpeed;
         OrbitDistance = Math.Clamp(OrbitDistance, MinOrbitDistance, MaxOrbitDistance);
         TransitionCamera(transitionDuration: 0.5f);
+    }
+
+    /// <summary>
+    /// Try and load a game viewmodel to display in walk mode.
+    /// </summary>
+    public bool TryLoadViewmodel(Scene scene)
+    {
+        Viewmodel = ViewmodelSceneNode.TryLoadCs2Viewmodel(scene);
+        return Viewmodel != null;
     }
 }

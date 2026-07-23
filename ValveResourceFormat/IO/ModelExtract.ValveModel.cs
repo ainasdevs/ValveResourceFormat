@@ -221,7 +221,10 @@ partial class ModelExtract
     }
     #endregion
 
-    internal static Vector3 ToEulerAngles(Quaternion q)
+    /// <summary>
+    /// Converts a quaternion to Euler angles in degrees.
+    /// </summary>
+    public static Vector3 ToEulerAngles(Quaternion q)
     {
         Vector3 angles = new();
 
@@ -255,7 +258,7 @@ partial class ModelExtract
         {
             var boneDefinitionNode = MakeNode(
                 "Bone",
-                ("name", bone.Name),
+                ("name", GetExportBoneName(bone)),
                 ("origin", ToKVArray(bone.Position)),
                 ("angles", ToKVArray(ToEulerAngles(bone.Angle))),
                 ("do_not_discard", true)
@@ -340,6 +343,7 @@ partial class ModelExtract
         var materialGroupList = MakeLazyList("MaterialGroupList");
         var renderMeshList = MakeLazyList("RenderMeshList");
         var bodyGroupList = MakeLazyList("BodyGroupList");
+        var lodGroupList = MakeLazyList("LODGroupList");
         var animationList = MakeLazyList("AnimationList");
         var physicsShapeList = MakeLazyList("PhysicsShapeList");
         var attachmentList = MakeLazyList("AttachmentList");
@@ -475,6 +479,66 @@ partial class ModelExtract
                 }
             }
 
+            {
+                // LOD groups. m_refLODGroupMasks says which level each mesh belongs to (bit N => level N) and
+                // m_lodGroupSwitchDistances gives each level's switch value. Emit one LODGroup per populated
+                // level so a recompile rebuilds the original LoD structure, and collect meshes that live in
+                // every level into a single LODGroupAll rather than repeating them in each group.
+                var lodInfo = model.LodInfo;
+
+                for (var lodLevel = 0; lodLevel < lodInfo.SwitchDistances.Count; lodLevel++)
+                {
+                    var meshReferences = KVObject.Array();
+
+                    foreach (var renderMesh in RenderMeshesToExtract)
+                    {
+                        if (!lodInfo.IsMeshInLevel(renderMesh.Index, lodLevel) || lodInfo.IsMeshInAllLevels(renderMesh.Index))
+                        {
+                            continue;
+                        }
+
+                        var meshReference = KVObject.Collection();
+                        meshReference.Add("mesh_name", renderMesh.Name);
+                        meshReferences.Add(meshReference);
+                    }
+
+                    // Skip levels with no meshes (e.g. a misconfigured empty LoD0).
+                    if (meshReferences.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    lodGroupList.Value.Add(MakeNode("LODGroup",
+                        ("switch_threshold", lodInfo.SwitchDistances[lodLevel]),
+                        ("mesh_references", meshReferences)
+                    ));
+                }
+
+                if (lodInfo.SwitchDistances.Count > 0)
+                {
+                    var allLevelReferences = KVObject.Array();
+
+                    foreach (var renderMesh in RenderMeshesToExtract)
+                    {
+                        if (!lodInfo.IsMeshInAllLevels(renderMesh.Index))
+                        {
+                            continue;
+                        }
+
+                        var meshReference = KVObject.Collection();
+                        meshReference.Add("mesh_name", renderMesh.Name);
+                        allLevelReferences.Add(meshReference);
+                    }
+
+                    if (allLevelReferences.Count > 0)
+                    {
+                        lodGroupList.Value.Add(MakeNode("LODGroupAll",
+                            ("mesh_references", allLevelReferences)
+                        ));
+                    }
+                }
+            }
+
             var mesh = RenderMeshesToExtract.First();
             var attachments = mesh.Mesh.Attachments;
 
@@ -510,6 +574,48 @@ partial class ModelExtract
                 }
 
                 attachmentList.Value.Add(node);
+            }
+        }
+
+        // Material groups / skins.
+        if (model.GetMaterialGroups().ToList() is { Count: > 0 } materialGroups)
+        {
+            var defaultMaterials = materialGroups[0].Materials;
+
+            materialGroupList.Value.Add(MakeNode("DefaultMaterialGroup",
+                ("name", materialGroups[0].Name ?? "default"),
+                ("remaps", KVObject.Array())
+            ));
+
+            for (var groupIndex = 1; groupIndex < materialGroups.Count; groupIndex++)
+            {
+                var variantMaterials = materialGroups[groupIndex].Materials;
+                if (variantMaterials.Length == 0)
+                {
+                    continue;
+                }
+
+                var remaps = KVObject.Array();
+                var pairCount = Math.Min(defaultMaterials.Length, variantMaterials.Length);
+                for (var i = 0; i < pairCount; i++)
+                {
+                    var fromMaterial = defaultMaterials[i];
+                    var toMaterial = variantMaterials[i];
+                    if (string.Equals(fromMaterial, toMaterial, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    remaps.Add(MakeNode("BaseMaterialRemap",
+                        ("from", fromMaterial),
+                        ("to", toMaterial)
+                    ));
+                }
+
+                materialGroupList.Value.Add(MakeNode("MaterialGroup",
+                    ("name", materialGroups[groupIndex].Name ?? groupIndex.ToString(CultureInfo.InvariantCulture)),
+                    ("remaps", remaps)
+                ));
             }
         }
 
@@ -606,13 +712,28 @@ partial class ModelExtract
                 }
 
                 var childrenKV = KVObject.Array();
+
+                foreach (var localHierarchy in animation.Anim.LocalHierarchy)
+                {
+                    childrenKV.Add(MakeNode("LocalHierarchy",
+                        ("bone_name", localHierarchy.Bone),
+                        ("new_parent_bone_name", localHierarchy.NewParent),
+                        ("start_frame", localHierarchy.StartFrame),
+                        ("peak_frame", localHierarchy.PeakFrame),
+                        ("tail_frame", localHierarchy.TailFrame),
+                        ("end_frame", localHierarchy.EndFrame)
+                    ));
+                }
+
                 if (animation.Anim.HasMovementData())
                 {
                     var flags = animation.Anim.Movements[0].MotionFlags;
                     var extractMotion = MakeNode("ExtractMotion",
                         ("extract_tx", flags.HasFlag(ModelAnimationMotionFlags.TX)),
                         ("extract_ty", flags.HasFlag(ModelAnimationMotionFlags.TY)),
-                        ("extract_tz", flags.HasFlag(ModelAnimationMotionFlags.TZ)),
+                        // never extract vertical. on recompile it makes the compiler counter-bake the root
+                        // and float the whole model up. the engine doesn't apply vertical root motion.
+                        ("extract_tz", false),
                         ("extract_rz", flags.HasFlag(ModelAnimationMotionFlags.RZ)),
                         ("linear", flags.HasFlag(ModelAnimationMotionFlags.Linear)),
                         ("quadratic", false),

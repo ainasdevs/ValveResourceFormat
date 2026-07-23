@@ -99,12 +99,12 @@ namespace GUI.Types.GLViewers
                 pitch = -1.0f * float.RadiansToDegrees(Renderer.Camera.Pitch);
                 yaw = float.RadiansToDegrees(Renderer.Camera.Yaw);
 
-                Clipboard.SetText($"setpos {loc.X:F6} {loc.Y:F6} {loc.Z:F6}; setang {pitch:F6} {yaw:F6} 0.0");
+                AppClipboard.SetText($"setpos {loc.X:F6} {loc.Y:F6} {loc.Z:F6}; setang {pitch:F6} {yaw:F6} 0.0");
 
                 return;
             }
 
-            var text = Clipboard.GetText();
+            var text = AppClipboard.GetText();
             var pos = Regexes.SetPos().Match(text);
             var ang = Regexes.SetAng().Match(text);
 
@@ -201,6 +201,7 @@ namespace GUI.Types.GLViewers
                 }
 
                 NavMeshSceneNode.AddNavNodesToScene(LoadedWorld.NavMesh, Scene);
+                CS2BombDamageSceneNode.AddBakedBombDamageToScene(LoadedWorld.BombDamage, Scene);
 
                 if (LoadedWorld.CameraMatrices.Count > 0)
                 {
@@ -209,6 +210,8 @@ namespace GUI.Types.GLViewers
                     Input.Camera.SetFromTransformMatrix(CameraMatrices[0]);
                     cameraSet = true;
                 }
+
+                Input.TryLoadViewmodel(Scene);
             }
 
             if (!cameraSet)
@@ -294,7 +297,7 @@ namespace GUI.Types.GLViewers
 
                 foreach (var node in Scene.AllNodes)
                 {
-                    if (node.LayerName?.StartsWith("LightProbeGrid", StringComparison.Ordinal) == true)
+                    if (node.LayerName?.StartsWith("Internal -", StringComparison.Ordinal) == true)
                     {
                         continue;
                     }
@@ -348,17 +351,27 @@ namespace GUI.Types.GLViewers
 
                     UiControl.AddCheckBox("Show Fog", Scene.FogEnabled, v => Scene.FogEnabled = v);
                     UiControl.AddCheckBox("Color Correction", Renderer.Postprocess.ColorCorrectionEnabled, v => Renderer.Postprocess.ColorCorrectionEnabled = v);
-                    UiControl.AddCheckBox("Occlusion Culling", Scene.EnableOcclusionCulling, (v) => Scene.EnableOcclusionCulling = v);
 
                     // TODO: PVS culling is not implemented yet
                     // if (Scene.VoxelVisibility != null)
                     // {
                     //     UiControl.AddCheckBox("PVS Culling", Scene.EnablePvsCulling, v => Scene.EnablePvsCulling = v);
                     // }
-                    UiControl.AddCheckBox("Gpu Culling", Scene.EnableIndirectDraws, v =>
+
+                    CheckBox? occlusionCullingCheckBox = null;
+
+                    UiControl.AddCheckBox("GPU Culling", Scene.EnableIndirectDraws, v =>
                     {
                         Scene.EnableIndirectDraws = v;
+                        if (occlusionCullingCheckBox != null)
+                        {
+                            occlusionCullingCheckBox.Enabled = v;
+                        }
                     });
+
+                    occlusionCullingCheckBox = UiControl.AddCheckBox("GPU Occlusion Culling", Scene.EnableOcclusionCulling, (v) => Scene.EnableOcclusionCulling = v);
+                    occlusionCullingCheckBox.Enabled = Scene.EnableIndirectDraws;
+
 
                     UiControl.AddCheckBox("Depth Prepass", Scene.EnableDepthPrepass, (v) => Scene.EnableDepthPrepass = v);
 

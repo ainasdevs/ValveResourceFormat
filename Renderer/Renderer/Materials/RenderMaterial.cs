@@ -78,7 +78,11 @@ namespace ValveResourceFormat.Renderer.Materials
     [DebuggerDisplay("{Material.Name} ({Shader.Name})")]
     public class RenderMaterial
     {
-        private const int TextureUnitStart = (int)ReservedTextureSlots.Last + 1;
+        /// <summary>
+        /// First non-reserved texture unit. Material (per-draw) textures bind here and above so the
+        /// globally bound <see cref="ReservedTextureSlots"/> textures stay intact.
+        /// </summary>
+        public const int TextureUnitStart = (int)ReservedTextureSlots.Last + 1;
 
         /// <summary>Gets a value used to bucket this material into draw-call sort bins; derived from the shader program handle and a random offset.</summary>
         public int SortId { get; }
@@ -121,13 +125,14 @@ namespace ValveResourceFormat.Renderer.Materials
         private BlendMode blendMode;
         private bool isRenderBackfaces;
         private bool hasDepthBias;
+        private bool disableDepthTest;
         private int textureUnit;
         private readonly List<int> boundSamplerUnits = [];
 
         /// <summary>Initializes a new instance of the <see cref="RenderMaterial"/> class from a parsed material resource, loading its shader and applying render state.</summary>
         /// <param name="material">The parsed Source 2 material data.</param>
         /// <param name="rendererContext">The renderer context used to load shaders and textures.</param>
-        /// <param name="shaderArguments">Optional caller-supplied static combo overrides that take precedence over the material's own arguments.</param>
+        /// <param name="shaderArguments">Optional caller-supplied static combo values used as a base; the material's own shader arguments are merged in afterward and take precedence on conflicting keys.</param>
         [SetsRequiredMembers]
         public RenderMaterial(Material material, RendererContext rendererContext, Dictionary<string, byte>? shaderArguments)
             : this(material)
@@ -226,6 +231,7 @@ namespace ValveResourceFormat.Renderer.Materials
             IsToolsMaterial = material.IntAttributes.ContainsKey("tools.toolsmaterial");
             DoNotCastShadows = material.IntAttributes.GetValueOrDefault("F_DO_NOT_CAST_SHADOWS") == 1;
             isRenderBackfaces = material.IntParams.GetValueOrDefault("F_RENDER_BACKFACES") == 1;
+            disableDepthTest = material.IntParams.GetValueOrDefault("F_DISABLE_Z_BUFFERING") == 1;
 
             if (material.ShaderName == "csgo_water_fancy.vfx")
             {
@@ -358,6 +364,10 @@ namespace ValveResourceFormat.Renderer.Materials
             {
                 EvalCsgoEnvironmentColorMatrices(shader);
             }
+            else if (Material.ShaderName.EndsWith("static_overlay.vfx", StringComparison.Ordinal))
+            {
+                EvalStaticOverlayColorAdjust(shader);
+            }
 
             SetRenderState();
         }
@@ -437,6 +447,32 @@ namespace ValveResourceFormat.Renderer.Materials
             }
         }
 
+        private void EvalStaticOverlayColorAdjust(Shader shader)
+        {
+            if (!shader.Default.Matrices.ContainsKey("g_mTextureColorAdjust"))
+            {
+                return;
+            }
+
+            var csb = new Vector3(
+                Material.FloatParams.GetValueOrDefault("g_fTextureColorContrast", 1f),
+                Material.FloatParams.GetValueOrDefault("g_fTextureColorSaturation", 1f),
+                Material.FloatParams.GetValueOrDefault("g_fTextureColorBrightness", 1f));
+
+            var tint = Material.VectorParams.GetValueOrDefault("g_vTextureColorCorrectionTint", Vector4.One);
+
+            var textureAverageColor = Vector3.One;
+            if (Textures.TryGetValue("g_tColor", out var colorTexture))
+            {
+                textureAverageColor = colorTexture.Reflectivity.AsVector3();
+            }
+
+            var ccMatrix = VfxEvalFunctions.MatrixColorCorrect2(csb, textureAverageColor);
+            var tintMatrix = VfxEvalFunctions.MatrixColorTint2(tint.AsVector3(), 1f);
+
+            shader.SetUniform4x4("g_mTextureColorAdjust", Matrix4x4.Multiply(tintMatrix, ccMatrix));
+        }
+
         /// <summary>Restores render state and unbinds textures after the draw call for this material has completed.</summary>
         public void PostRender()
         {
@@ -471,17 +507,23 @@ namespace ValveResourceFormat.Renderer.Materials
                     GL.Enable(EnableCap.Blend);
                 }
 
-                if (blendMode >= BlendMode.Mod2x)
+                switch (blendMode)
                 {
-                    GL.BlendFunc(BlendingFactor.DstColor, BlendingFactor.SrcColor);
-                }
-                else if (blendMode >= BlendMode.Additive)
-                {
-                    GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One);
-                }
-                else
-                {
-                    GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                    case BlendMode.Additive:
+                        GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.One);
+                        break;
+                    case BlendMode.Multiply:
+                        GL.BlendFunc(BlendingFactor.Zero, BlendingFactor.SrcColor);
+                        break;
+                    case BlendMode.Mod2x:
+                        GL.BlendFunc(BlendingFactor.DstColor, BlendingFactor.SrcColor);
+                        break;
+                    case BlendMode.ModThenAdd:
+                        GL.BlendFunc(BlendingFactor.DstColor, BlendingFactor.OneMinusSrcAlpha);
+                        break;
+                    default:
+                        GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+                        break;
                 }
             }
 
@@ -494,6 +536,11 @@ namespace ValveResourceFormat.Renderer.Materials
             if (isRenderBackfaces)
             {
                 GL.Disable(EnableCap.CullFace);
+            }
+
+            if (disableDepthTest)
+            {
+                GL.Disable(EnableCap.DepthTest);
             }
         }
 
@@ -523,6 +570,11 @@ namespace ValveResourceFormat.Renderer.Materials
             if (isRenderBackfaces)
             {
                 GL.Enable(EnableCap.CullFace);
+            }
+
+            if (disableDepthTest)
+            {
+                GL.Enable(EnableCap.DepthTest);
             }
         }
     }

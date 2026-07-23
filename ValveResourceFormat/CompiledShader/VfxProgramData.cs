@@ -37,7 +37,7 @@ namespace ValveResourceFormat.CompiledShader
         public string? ShaderName { get; private set; }
 
         /// <summary>
-        /// The resource this VfxProgramData was read from.
+        /// The resource this <see cref="VfxProgramData"/> was read from.
         /// Starting from VCS version 70.
         /// </summary>
         public Resource? Resource { get; private set; }
@@ -138,13 +138,13 @@ namespace ValveResourceFormat.CompiledShader
         /// The sorted dictionary enables retrieval both by order (using ElementAt) and by ID (using indexer).
         /// </summary>
         /// <remarks>
-        /// Zframe data assigned to the ZFrameDataDescription class are key pieces of
+        /// Zframe data assigned to the <see cref="VfxStaticComboVcsEntry"/> class are key pieces of
         /// information needed to decompress and retrieve zframes (to save processing zframes are only
-        /// decompressed on request). This information is organised in zframesLookup by their zframeId's.
+        /// decompressed on request). This information is organised in <see cref="StaticComboEntries"/> by their zframeId's.
         /// Because the zframes appear in the file in ascending order, storing their data in a
         /// sorted dictionary enables retrieval based on the order they are seen; by calling
-        /// zframesLookup.ElementAt(zframeIndex). We also retrieve them based on their id using
-        /// zframesLookup[zframeId]. Both methods are useful in different contexts (be aware not to mix them up).
+        /// StaticComboEntries.ElementAt(zframeIndex). We also retrieve them based on their id using
+        /// StaticComboEntries[zframeId]. Both methods are useful in different contexts (be aware not to mix them up).
         /// </remarks>
         public SortedDictionary<long, VfxStaticComboVcsEntry> StaticComboEntries { get; } = [];
 
@@ -344,7 +344,7 @@ namespace ValveResourceFormat.CompiledShader
             StaticComboArray = new VfxCombo[staticCombosCount];
             for (var i = 0; i < staticCombosCount; i++)
             {
-                VfxCombo nextSfBlock = new(DataReader, i);
+                VfxCombo nextSfBlock = new(DataReader, i, VcsVersion);
                 StaticComboArray[i] = nextSfBlock;
             }
 
@@ -362,7 +362,7 @@ namespace ValveResourceFormat.CompiledShader
             DynamicComboArray = new VfxCombo[dynamicCombosCount];
             for (var i = 0; i < dynamicCombosCount; i++)
             {
-                VfxCombo nextDBlock = new(DataReader, i);
+                VfxCombo nextDBlock = new(DataReader, i, VcsVersion);
                 DynamicComboArray[i] = nextDBlock;
             }
 
@@ -495,7 +495,7 @@ namespace ValveResourceFormat.CompiledShader
             StaticComboArray = new VfxCombo[staticCombos.Count];
             for (var i = 0; i < staticCombos.Count; i++)
             {
-                StaticComboArray[i] = new VfxCombo(staticCombos[i], i);
+                StaticComboArray[i] = new VfxCombo(staticCombos[i], i, VcsVersion);
             }
 
             // CalculateComboIds(StaticComboArray);
@@ -511,7 +511,7 @@ namespace ValveResourceFormat.CompiledShader
             DynamicComboArray = new VfxCombo[dynamicCombos.Count];
             for (var i = 0; i < dynamicCombos.Count; i++)
             {
-                DynamicComboArray[i] = new VfxCombo(dynamicCombos[i], i);
+                DynamicComboArray[i] = new VfxCombo(dynamicCombos[i], i, VcsVersion);
             }
 
             // CalculateComboIds(DynamicComboArray);
@@ -573,7 +573,7 @@ namespace ValveResourceFormat.CompiledShader
         private static void ThrowIfNotSupported(int vcsFileVersion)
         {
             const int earliest = 59;
-            const int latest = 70;
+            const int latest = 71;
 
             if (vcsFileVersion < earliest || vcsFileVersion > latest)
             {

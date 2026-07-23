@@ -395,7 +395,7 @@ namespace ValveResourceFormat.Renderer.Shaders
             throw new ShaderCompilerException($"{errorType} {shaderFile} (original={originalShaderName}):\n\n{info}");
         }
 
-        /// <summary>Returns the bare shader name from a full shader file path by stripping the <see cref="ShaderFileExtension"/> suffix.</summary>
+        /// <summary>Returns the bare shader name from a full shader file path by stripping the trailing stage extension (<c>.vert.slang</c>, <c>.frag.slang</c>, or <c>.comp.slang</c>).</summary>
         /// <param name="shaderFilePath">The full path or file name of the shader (e.g. <c>/path/complex.vert.slang</c>).</param>
         /// <returns>The shader name without directory or extension (e.g. <c>complex</c>).</returns>
         public static string ShaderNameFromPath(string shaderFilePath)
@@ -417,6 +417,7 @@ namespace ValveResourceFormat.Renderer.Shaders
             "tools_sprite.vfx" => "sprite",
             "global_lit_simple.vfx" => "global_lit_simple",
             "vr_black_unlit.vfx" or "csgo_black_unlit.vfx" => "vr_black_unlit",
+            "vr_unlit.vfx" => "vr_unlit",
             "vr_standard.vfx" => "vr_standard",
             "water_dota.vfx" => "water",
             "csgo_water_fancy.vfx" => "water_csgo",

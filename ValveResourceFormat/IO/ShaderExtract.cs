@@ -40,7 +40,7 @@ public sealed class ShaderExtract
         public bool NoHungarianTypeGuessing { get; init; }
         /// <summary>Gets a value indicating whether to write parameters in raw format.</summary>
         public bool WriteParametersRaw { get; init; }
-        /// <summary>Gets or sets a value indicating whether static combos can be read.</summary>
+        /// <summary>Gets a value indicating whether static combos can be read.</summary>
         public bool CanReadStaticCombos
         {
             get => StaticComboReadingCap != 0;
@@ -951,9 +951,9 @@ public sealed class ShaderExtract
                     VfxVariableType.Int => ((int)attribute.ConstValue).ToString(CultureInfo.InvariantCulture),
                     VfxVariableType.Float => ((float)attribute.ConstValue).ToString(CultureInfo.InvariantCulture),
                     VfxVariableType.String => (string)attribute.ConstValue,
-                    VfxVariableType.Float2 => ((Vector2)attribute.ConstValue).ToString().Trim('<', '>'),
-                    VfxVariableType.Float3 => ((Vector3)attribute.ConstValue).ToString().Trim('<', '>'),
-                    VfxVariableType.Float4 => ((Vector4)attribute.ConstValue).ToString().Trim('<', '>'),
+                    VfxVariableType.Float2 => ((Vector2)attribute.ConstValue).ToString("G", CultureInfo.InvariantCulture).Trim('<', '>'),
+                    VfxVariableType.Float3 => ((Vector3)attribute.ConstValue).ToString("G", CultureInfo.InvariantCulture).Trim('<', '>'),
+                    VfxVariableType.Float4 => ((Vector4)attribute.ConstValue).ToString("G", CultureInfo.InvariantCulture).Trim('<', '>'),
 
                     _ => attribute.ConstValue.ToString(),
                 };
@@ -968,7 +968,7 @@ public sealed class ShaderExtract
             }
             else
             {
-                throw new InvalidOperationException("Whats the value of this attribute then?");
+                throw new InvalidOperationException("What's the value of this attribute then?");
             }
 
             var attributeType = attribute.VfxType switch

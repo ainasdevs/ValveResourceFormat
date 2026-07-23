@@ -37,10 +37,10 @@ namespace ValveResourceFormat.Renderer.Particles.PreEmissionOperators
             }
 
             var targetRotation = randomize
-                ? ParticleCollection.RandomBetweenPerComponent(Random.Shared.Next(), rotation, rotationB)
+                ? ParticleCollection.RandomBetweenPerComponent(rotation, rotationB)
                 : rotation;
 
-            var targetOrientation = GetOrientationFromQAngle(targetRotation);
+            var targetOrientation = EntityTransformHelper.QAngleToForwardDirection(targetRotation);
 
             if (!useWorldLocation)
             {
@@ -63,12 +63,6 @@ namespace ValveResourceFormat.Renderer.Particles.PreEmissionOperators
 
             particleSystemState.SetControlPointOrientation(cp, outputOrientation);
             hasRunBefore = true;
-        }
-
-        private static Vector3 GetOrientationFromQAngle(Vector3 qAngle)
-        {
-            var rotationMatrix = ValveResourceFormat.Utils.EntityTransformHelper.CreateRotationMatrixFromEulerAngles(qAngle);
-            return Vector3.Normalize(Vector3.Transform(new Vector3(1, 0, 0), rotationMatrix));
         }
     }
 }

@@ -24,6 +24,8 @@ internal class ThumbnailTextureRenderer : ThumbnailRenderer
         var textureData = (Texture)(resource.DataBlock!);
         var size = (int)Size;
 
+        var isCubemap = (textureData.Flags & VTexFlags.CUBE_TEXTURE) != 0;
+
         // Find the highest mip level that is still higher than the thumbnail size
         var mipLevel = 0;
 
@@ -37,7 +39,11 @@ internal class ThumbnailTextureRenderer : ThumbnailRenderer
             mipLevel = i;
         }
 
-        using var bitmap = textureData.GenerateBitmap(mipLevel: (uint)mipLevel);
+        using var decoded = textureData.GenerateBitmap(mipLevel: (uint)mipLevel);
+
+        // A raw cubemap face decodes 90° counter-clockwise, so rotate it upright.
+        using var rotated = isCubemap ? RotateClockwise90(decoded) : null;
+        var bitmap = rotated ?? decoded;
 
         var originalWidth = bitmap.Width;
         var originalHeight = bitmap.Height;
@@ -67,10 +73,22 @@ internal class ThumbnailTextureRenderer : ThumbnailRenderer
         var canvas = surface.Canvas;
         var offsetX = (size - renderWidth) / 2;
         var offsetY = (size - renderHeight) / 2;
-        canvas.DrawBitmap(resizedBitmap, offsetX, offsetY);
+        canvas.DrawBitmap(resizedBitmap, offsetX, offsetY, SKSamplingOptions.Default);
 
         using var snapshot = surface.Snapshot();
         using var finalBitmap = SKBitmap.FromImage(snapshot);
         return finalBitmap.ToBitmap();
+    }
+
+    private static SKBitmap RotateClockwise90(SKBitmap source)
+    {
+        var rotated = new SKBitmap(source.Height, source.Width, source.ColorType, source.AlphaType);
+
+        using var canvas = new SKCanvas(rotated);
+        canvas.Translate(rotated.Width, 0);
+        canvas.RotateDegrees(90);
+        canvas.DrawBitmap(source, 0, 0, SKSamplingOptions.Default);
+
+        return rotated;
     }
 }

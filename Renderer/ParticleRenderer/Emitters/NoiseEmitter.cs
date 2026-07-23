@@ -38,6 +38,8 @@ namespace ValveResourceFormat.Renderer.Particles.Emitters
             this.particleEmitCallback = particleEmitCallback;
 
             time = 0f;
+            // Source 2 starts the accumulator at 1 so short or slow emitters (rate * duration <= 1) still emit
+            particlesToEmit = 1f;
 
             IsFinished = false;
         }
@@ -48,7 +50,7 @@ namespace ValveResourceFormat.Renderer.Particles.Emitters
             particleEmitCallback = null;
         }
 
-        public override void Emit(float frameTime)
+        public override void Emit(float frameTime, ParticleSystemRenderState particleSystemState)
         {
             if (IsFinished)
             {
@@ -57,19 +59,20 @@ namespace ValveResourceFormat.Renderer.Particles.Emitters
 
             time += frameTime;
 
-            var nextStartTime = startTime.NextNumber();
-            var nextEmissionDuration = emissionDuration.NextNumber();
+            var nextStartTime = startTime.NextNumber(particleSystemState);
+            var nextEmissionDuration = emissionDuration.NextNumber(particleSystemState);
 
             if (time >= nextStartTime && (nextEmissionDuration == 0f || time <= nextStartTime + nextEmissionDuration))
             {
-                // Calculate current emission rate based on noise
-                var noise = Noise.Simplex1D(time * noiseScale.NextNumber());
-                var valueScale = emissionMax.NextNumber() - emissionMin.NextNumber();
-                var valueBase = emissionMin.NextNumber();
-                var emissionRate = valueBase + noise * valueScale;
+                // Calculate current emission rate based on noise, remapped from [-1, 1] to [0, 1]
+                var noise = (Noise.Simplex1D(time * noiseScale.NextNumber(particleSystemState)) * 0.5f) + 0.5f;
+                var emissionMinValue = emissionMin.NextNumber(particleSystemState);
+                var emissionMaxValue = emissionMax.NextNumber(particleSystemState);
+                var emissionRate = emissionMinValue + noise * (emissionMaxValue - emissionMinValue);
 
-                // Aggregate emission into num of particles to emit
-                particlesToEmit += Math.Clamp(emissionRate, 0, emissionMax.NextNumber()) * frameTime; // Limit the amount of particles to emit at once in case of refocus
+                // Aggregate emission into num of particles to emit. The noise remap already targets
+                // the min/max range, so no upper clamp (an inverted range must not kill the emitter).
+                particlesToEmit += Math.Max(0f, emissionRate) * frameTime;
 
                 // If nr of particles to emit is > 0, emit it
                 while (particlesToEmit > 1.0f)

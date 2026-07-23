@@ -721,7 +721,7 @@ namespace ValveResourceFormat.Blocks
 
                 case DXGI_FORMAT.R16G16B16A16_UNORM:
                     {
-                        for (var i = 0; i < weights.Length - 1; i += 2)
+                        for (var i = 0; i < weights.Length; i += 2)
                         {
                             weights[i] = new Vector4(data[offset], data[offset + 1], data[offset + 2], data[offset + 3]) / 255f;
                             weights[i + 1] = new Vector4(data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7]) / 255f;
@@ -840,7 +840,7 @@ namespace ValveResourceFormat.Blocks
                 var derivedNormalZ = 1.0f - MathF.Abs(nPackedFrameX) - MathF.Abs(nPackedFrameY); // Project onto x+y+z=1
                 var unpackedNormal = new Vector3(nPackedFrameX, nPackedFrameY, derivedNormalZ);
 
-                // If Z is negative, X and Y has had extra amounts (TODO: find the logic behind this value) added into them so they would add up to over 1.0
+                // If Z is negative, X and Y have had extra amounts (TODO: find the logic behind this value) added into them so they would add up to over 1.0
                 // Thus, we take the negative components of Z and add them back into XY to get the correct original values.
                 var negativeZCompensation = Math.Clamp(-derivedNormalZ, 0.0f, 1.0f); // Isolate the negative 0..1 range of derived Z
 

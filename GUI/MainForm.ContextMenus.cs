@@ -3,6 +3,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using GUI.Controls;
 using GUI.Forms;
@@ -197,7 +198,7 @@ namespace GUI
 
             if (sb.Length > 0)
             {
-                Clipboard.SetText(sb.ToString());
+                AppClipboard.SetText(sb.ToString());
             }
         }
 
@@ -213,7 +214,7 @@ namespace GUI
             OpenFile(newContext, selectedNode.PackageEntry, null, withoutViewer: true);
         }
 
-        private void OpenWithDefaultAppToolStripMenuItem_Click(object sender, EventArgs e)
+        private async void OpenWithDefaultAppToolStripMenuItem_Click(object sender, EventArgs e)
         {
             if (sender is not ToolStripMenuItem { Owner: ContextMenuStrip { SourceControl: var control } })
             {
@@ -277,12 +278,11 @@ namespace GUI
                 return;
             }
 
-            if (selectedFiles.Count > 5 && MessageBox.Show(
+            if (selectedFiles.Count > 5 && !await AppMessageDialogs.ConfirmAsync(
                 $"You are trying to open {selectedFiles.Count} files in the default app for each of these files, are you sure you want to continue?",
                 "Trying to open many files in the default app",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question
-            ) != DialogResult.Yes)
+                buttons: ConfirmButtons.YesNo
+            ).ConfigureAwait(true))
             {
                 return;
             }
@@ -329,7 +329,7 @@ namespace GUI
 
                 if (tab != null)
                 {
-                    tab.ImageIndex = Icons["Info"];
+                    tab.ImageIndex = AppIcons.Icons["Info"];
                     mainTabs.TabPages.Add(tab);
                     mainTabs.SelectTab(tab);
                 }
@@ -369,17 +369,17 @@ namespace GUI
             return (guiContext, selectedNode);
         }
 
-        private void DecompileToolStripMenuItem_Click(object sender, EventArgs e)
+        private async void DecompileToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            ExtractFiles(sender, true);
+            await ExtractFiles(sender, true).ConfigureAwait(true);
         }
 
-        private void ExtractToolStripMenuItem_Click(object sender, EventArgs e)
+        private async void ExtractToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            ExtractFiles(sender, false);
+            await ExtractFiles(sender, false).ConfigureAwait(true);
         }
 
-        private static void ExtractFiles(object sender, bool decompile)
+        private static async Task ExtractFiles(object sender, bool decompile)
         {
             if (sender is not ToolStripMenuItem { Owner: ContextMenuStrip { SourceControl: var owner } })
             {
@@ -391,7 +391,7 @@ namespace GUI
             {
                 if (tree.SelectedNode is IBetterBaseItem treeNode && tree.VrfGuiContext != null)
                 {
-                    ExportFile.ExtractFilesFromTreeNode(treeNode, tree.VrfGuiContext, decompile);
+                    await ExportFile.ExtractFilesFromTreeNode(treeNode, tree.VrfGuiContext, decompile).ConfigureAwait(true);
                 }
             }
             // Clicking context menu item in right side of the package view
@@ -411,7 +411,7 @@ namespace GUI
                 }
                 else if (selectedItems.Count == 1)
                 {
-                    ExportFile.ExtractFilesFromTreeNode((IBetterBaseItem)selectedItems[0], listView.VrfGuiContext, decompile);
+                    await ExportFile.ExtractFilesFromTreeNode((IBetterBaseItem)selectedItems[0], listView.VrfGuiContext, decompile).ConfigureAwait(true);
                 }
             }
             // Clicking context menu item when right clicking a tab
@@ -426,7 +426,7 @@ namespace GUI
 
                 if (exportData.PackageEntry != null)
                 {
-                    ExportFile.ExtractFileFromPackageEntry(exportData.PackageEntry, exportData.VrfGuiContext, decompile);
+                    await ExportFile.ExtractFileFromPackageEntry(exportData.PackageEntry, exportData.VrfGuiContext, decompile).ConfigureAwait(true);
                 }
                 else
                 {
@@ -434,12 +434,15 @@ namespace GUI
 
                     try
                     {
-                        ExportFile.ExtractFileFromStream(Path.GetFileName(exportData.VrfGuiContext.FileName), fileStream, exportData.VrfGuiContext, decompile);
+                        await ExportFile.ExtractFileFromStream(Path.GetFileName(exportData.VrfGuiContext.FileName), fileStream, exportData.VrfGuiContext, decompile).ConfigureAwait(true);
                         fileStream = null; // ExtractFileFromStream should dispose it when done, not `using` here in case there's some threading
                     }
                     finally
                     {
-                        fileStream?.Dispose();
+                        if (fileStream != null)
+                        {
+                            await fileStream.DisposeAsync().ConfigureAwait(true);
+                        }
                     }
                 }
             }
@@ -480,7 +483,7 @@ namespace GUI
                     ToolTipText = "New VPK"
                 };
                 tab.Controls.Add(contents);
-                tab.ImageIndex = ExtensionIcons["vpk"];
+                tab.ImageIndex = AppIcons.ExtensionIcons["vpk"];
                 mainTabs.TabPages.Add(tab);
                 mainTabs.SelectTab(tab);
 
@@ -493,7 +496,7 @@ namespace GUI
 
         }
 
-        private void RegisterVpkFileAssociationToolStripMenuItem_Click(object sender, EventArgs e) => SettingsControl.RegisterFileAssociation();
+        private async void RegisterVpkFileAssociationToolStripMenuItem_Click(object sender, EventArgs e) => await SettingsControl.RegisterFileAssociationAsync().ConfigureAwait(true);
 
         private void OnVpkCreateFolderToolStripMenuItem_Click(object sender, EventArgs e)
         {
@@ -508,7 +511,7 @@ namespace GUI
 
             if (directory.IndexOfAny(Path.GetInvalidPathChars()) != -1)
             {
-                MessageBox.Show("Entered folder name contains invalid characters.", "Invalid characters");
+                _ = AppMessageDialogs.ShowMessageAsync("Entered folder name contains invalid characters.", "Invalid characters", MessageIcon.Warning);
                 return;
             }
 
@@ -520,21 +523,12 @@ namespace GUI
 
         private void OnVpkAddNewFolderToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            using var openDialog = new FolderBrowserDialog
-            {
-                Description = "Choose which folder to pack into a VPK",
-                UseDescriptionForTitle = true,
-                SelectedPath = Settings.Config.OpenDirectory,
-                AddToRecent = true,
-            };
+            var inputDirectory = AppFileDialogs.PickFolder("Choose which folder to pack into a VPK", AppFileDialogs.RememberIn.OpenDirectory);
 
-            if (openDialog.ShowDialog() != DialogResult.OK)
+            if (inputDirectory == null)
             {
                 return;
             }
-
-            var inputDirectory = openDialog.SelectedPath;
-            Settings.Config.OpenDirectory = inputDirectory;
 
             if (mainTabs.SelectedTab?.Controls[nameof(TreeViewWithSearchResults)] is TreeViewWithSearchResults treeViewWithSearchResults)
             {
@@ -544,29 +538,16 @@ namespace GUI
 
         private void OnVpkAddNewFileToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            using var openDialog = new OpenFileDialog
-            {
-                Title = "Choose which files to add to the VPK",
-                InitialDirectory = Settings.Config.OpenDirectory,
-                AddToRecent = true,
-                Multiselect = true,
-            };
+            var files = AppFileDialogs.OpenFiles("Choose which files to add to the VPK", null);
 
-            if (openDialog.ShowDialog() != DialogResult.OK || openDialog.FileNames.Length < 1)
+            if (files == null)
             {
                 return;
             }
 
-            var inputDirectory = openDialog.FileNames;
-            var directory = Path.GetDirectoryName(openDialog.FileName);
-            if (directory != null)
-            {
-                Settings.Config.OpenDirectory = directory;
-            }
-
             if (mainTabs.SelectedTab?.Controls[nameof(TreeViewWithSearchResults)] is TreeViewWithSearchResults treeViewWithSearchResults)
             {
-                treeViewWithSearchResults.Viewer.AddFiles(openDialog.FileNames);
+                treeViewWithSearchResults.Viewer.AddFiles(files);
             }
         }
 
@@ -580,31 +561,18 @@ namespace GUI
 
         private void OnSaveVPKToDiskToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            using var saveDialog = new SaveFileDialog
-            {
-                InitialDirectory = Settings.Config.SaveDirectory,
-                AddToRecent = true,
-                Title = "Save VPK package",
-                DefaultExt = "vpk",
-                Filter = "Valve Pak|*.vpk"
-            };
+            var fileName = AppFileDialogs.SaveFile("Save VPK package", null, "vpk", "Valve Pak|*.vpk");
 
-            if (saveDialog.ShowDialog() != DialogResult.OK)
+            if (fileName == null)
             {
                 return;
             }
 
-            var directory = Path.GetDirectoryName(saveDialog.FileName);
-            if (directory != null)
-            {
-                Settings.Config.SaveDirectory = directory;
-            }
-
-            Log.Info(nameof(MainForm), $"Packing to '{saveDialog.FileName}'...");
+            Log.Info(nameof(MainForm), $"Packing to '{fileName}'...");
 
             if (mainTabs.SelectedTab?.Controls[nameof(TreeViewWithSearchResults)] is TreeViewWithSearchResults treeViewWithSearchResults)
             {
-                treeViewWithSearchResults.Viewer.SaveToFile(saveDialog.FileName);
+                treeViewWithSearchResults.Viewer.SaveToFile(fileName);
             }
         }
 

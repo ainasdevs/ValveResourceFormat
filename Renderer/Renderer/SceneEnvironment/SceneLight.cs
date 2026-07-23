@@ -68,7 +68,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
     /// <summary>
     ///     Light index to a baked lightmap.
-    ///     Range: 0..255 for GameLightmapVersion 1 and 0..3 for GameLightmapVersion 2.
+    ///     Range: 0..255 for LightmapGameVersion 1 and 0..3 for LightmapGameVersion 2.
     /// </summary>
     public int StationaryLightIndex { get; set; } = -1;
 
@@ -181,13 +181,15 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     public Vector3[]? PrecomputedSubObbAngles { get; set; }
 
     // Precomputed barn light faces (1 for a barn light, 1-6 for an omni light)
-    /// <summary>Gets the precomputed face data array (1 face for barn lights, 1–6 for omni lights).</summary>
+    /// <summary>Gets the precomputed face data array (1 face for barn lights, 1-6 for omni lights).</summary>
     public BarnFaceData[] BarnFaces { get; private set; } = [];
 
     // Marks a barn light dirty. This will recalculate all faces.
     /// <summary>Gets or sets whether this light's face data needs to be recomputed.</summary>
     public bool IsDirty { get; set; } = true;
-    internal bool WillDrawShadows { get; set; }
+
+    internal int AdaptiveShadowSize { get; set; }
+    internal bool WasDropped { get; set; }
 
     /// <summary>
     /// Returns whether this light will produce energy based on its properties.
@@ -387,11 +389,11 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     }
 
     /// <summary>
-    /// Returns the shadow map pixel dimensions for this light, accounting for aspect ratio.
+    /// Returns the shadow map pixel dimensions for this light at the given long-axis resolution, accounting for aspect ratio.
     /// </summary>
-    public (int W, int H) GetShadowFaceDimensions()
+    /// <param name="size">Target resolution in texels along the longer axis.</param>
+    public (int W, int H) GetShadowFaceDimensions(int size)
     {
-        var size = ShadowMapSize;
         if (Entity == EntityType.Omni2)
         {
             return (size, size);

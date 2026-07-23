@@ -43,8 +43,8 @@ namespace ValveResourceFormat.Renderer
             /// <summary>Gets or sets the scene being rendered.</summary>
             public required Scene Scene { get; set; }
 
-            /// <summary>Gets the camera providing view and projection matrices.</summary>
-            public required Camera Camera { get; init; }
+            /// <summary>Gets or sets the camera providing view and projection matrices.</summary>
+            public required Camera Camera { get; set; }
 
             /// <summary>Gets or sets the framebuffer that is the render target.</summary>
             public required Framebuffer Framebuffer { get; set; }
@@ -121,13 +121,13 @@ namespace ValveResourceFormat.Renderer
 
         private Shader? DepthPyramidShader;
         private Shader? DepthPyramidNpotShader;
-        /// <summary>Gets or sets the hierarchical depth pyramid texture used for GPU occlusion culling.</summary>
+        /// <summary>Gets the hierarchical depth pyramid texture used for GPU occlusion culling.</summary>
         public RenderTexture? DepthPyramid { get; internal set; }
 
-        /// <summary>Gets or sets the view-projection matrix that was used when the depth pyramid was last generated.</summary>
+        /// <summary>Gets the view-projection matrix that was used when the depth pyramid was last generated.</summary>
         public Matrix4x4 DepthPyramidViewProjection { get; internal set; }
 
-        /// <summary>Gets or sets whether the depth pyramid is current and safe to use for occlusion culling this frame.</summary>
+        /// <summary>Gets whether the depth pyramid is current and safe to use for occlusion culling this frame.</summary>
         public bool DepthPyramidValid { get; internal set; }
 
         /// <summary>Gets the renderer context providing shared GPU resources and shader loading.</summary>
@@ -148,9 +148,8 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets or sets whether a depth-only prepass is performed before the opaque pass to reduce overdraw.</summary>
         public bool EnableDepthPrepass { get; set; }
 
-        /// <summary>Gets or sets whether CPU-side occlusion culling is enabled.</summary>
+        /// <summary>Gets or sets whether GPU occlusion culling is enabled.</summary>
         public bool EnableOcclusionCulling { get; set; } = true;
-        internal bool EnableOcclusionQueries { get; set; }
 
         /// <summary>Gets or sets whether occlusion culling debug visualization is active.</summary>
         public bool OcclusionDebugEnabled { get; set; }
@@ -212,9 +211,8 @@ namespace ValveResourceFormat.Renderer
             EnableIndirectDraws = LightingInfo.LightingData.IsSkybox == 0u;
 
             // set render lists to their max capacity
-            CollectSceneDrawCalls(new Camera(RendererContext), Frustum.CreateEmpty());
-            SetupSceneShadows(new Camera(RendererContext), -1);
-            // LightingInfo.BinBarnLights(Frustum.CreateEmpty(), Vector3.Zero);
+            CollectSceneDrawCalls(new Camera(), Frustum.CreateEmpty());
+            SetupSceneShadows(new Camera(), -1);
         }
 
         /// <summary>
@@ -357,8 +355,7 @@ namespace ValveResourceFormat.Renderer
                     return false;
                 }
 
-                var value = node.EntityData[keyToFind];
-                return value != null
+                return node.EntityData.TryGetValue(keyToFind, out var value)
                     && value.ValueType == ValveKeyValue.KVValueType.String
                     && valueToFind.Equals((string)value, StringComparison.OrdinalIgnoreCase);
             }
@@ -385,6 +382,11 @@ namespace ValveResourceFormat.Renderer
 
             foreach (var node in dynamicNodes)
             {
+                if (node.Parent != null)
+                {
+                    continue; // child nodes are updated by their parent
+                }
+
                 var oldBox = node.BoundingBox;
                 node.Update(updateContext);
 
@@ -445,7 +447,8 @@ namespace ValveResourceFormat.Renderer
                 var instanceTint = Vector4.One;
                 if (node is SceneAggregate.Fragment fragment)
                 {
-                    instanceTint = fragment.RenderMesh.Tint * fragment.DrawCall.TintColor * fragment.Tint;
+                    // Content can author out-of-range tints; the packed byte color can only represent [0, 1].
+                    instanceTint = Vector4.Clamp(fragment.RenderMesh.Tint * fragment.DrawCall.TintColor * fragment.Tint, Vector4.Zero, Vector4.One);
                 }
 
                 uint transformIndex;
@@ -648,7 +651,7 @@ namespace ValveResourceFormat.Renderer
             lpvBuffer.Update();
         }
 
-        /// <summary>Updates and binds the lighting, environment map, light probe, and barn light buffers to their reserved GPU binding slots.</summary>
+        /// <summary>Updates the lighting buffer, then binds the lighting, environment map, light probe, and barn light buffers to their reserved GPU binding slots.</summary>
         public void SetSceneBuffers()
         {
             Debug.Assert(lightingBuffer is not null && envMapBuffer is not null && lpvBuffer is not null);
@@ -673,11 +676,8 @@ namespace ValveResourceFormat.Renderer
         {
             var currentFrustum = frustum.GetHashCode();
 
-            // Optimization: Do not clear static culled results from last frame if:
-            // 1. Frustum did not change
-            // 2. Did not run occlusion queries
-
-            if (LastFrustum != currentFrustum || occlusionDirty)
+            // Optimization: Do not clear static culled results from last frame if the frustum did not change
+            if (LastFrustum != currentFrustum)
             {
                 LastFrustum = currentFrustum;
 
@@ -716,7 +716,16 @@ namespace ValveResourceFormat.Renderer
             [RenderPass.Outline] = [],
         };
 
-        private Dictionary<DepthOnlyProgram, List<MeshBatchRenderer.Request>> depthOnlyDraws { get; } = new()
+        /// <summary>
+        /// Draw calls for first-person layer geometry.
+        /// </summary>
+        private readonly Dictionary<RenderPass, List<MeshBatchRenderer.Request>> viewmodelRenderLists = new()
+        {
+            [RenderPass.Opaque] = [],
+            [RenderPass.Translucent] = [],
+        };
+
+        private DepthOnlyDrawBuckets depthOnlyDraws { get; } = new()
         {
             [DepthOnlyProgram.Static] = [],
             [DepthOnlyProgram.Animated] = [],
@@ -760,14 +769,18 @@ namespace ValveResourceFormat.Renderer
                 renderPass = RenderPass.Opaque;
             }
 
-            var queueList = renderLists[renderPass];
+            var isViewmodelLayer = request.Node.RenderAsViewmodel && viewmodelRenderLists.ContainsKey(renderPass);
+
+            var queueList = isViewmodelLayer
+                ? viewmodelRenderLists[renderPass]
+                : renderLists[renderPass];
 
             if (renderPass == RenderPass.Translucent)
             {
                 WantsSceneColor |= request.Call.Material.Shader.ReservedTexturesUsed.Contains("g_tSceneColor");
                 WantsSceneDepth |= request.Call.Material.Shader.ReservedTexturesUsed.Contains("g_tSceneDepth");
 
-                if (request.Call.Material.IsCs2Water)
+                if (!isViewmodelLayer && request.Call.Material.IsCs2Water)
                 {
                     queueList = renderLists[RenderPass.Water];
                 }
@@ -788,6 +801,11 @@ namespace ValveResourceFormat.Renderer
                 bucket.Clear();
             }
 
+            foreach (var bucket in viewmodelRenderLists.Values)
+            {
+                bucket.Clear();
+            }
+
             foreach (var bucket in depthOnlyDraws.Values)
             {
                 bucket.Clear();
@@ -798,6 +816,8 @@ namespace ValveResourceFormat.Renderer
 
             var frustum = cullFrustum ??= camera.ViewFrustum;
             var cullResults = GetFrustumCullResults(frustum);
+
+            PerfStats.Active.Count(Counter.SceneObjectInView, cullResults.Count);
 
             // Collect mesh calls
             foreach (var node in cullResults)
@@ -874,6 +894,11 @@ namespace ValveResourceFormat.Renderer
                 }
                 else
                 {
+                    if (node is SceneLight light)
+                    {
+                        PerfStats.Active.CountLightInView(light);
+                    }
+
                     var customRender = new MeshBatchRenderer.Request
                     {
                         DistanceFromCamera = node is PhysSceneNode
@@ -882,8 +907,16 @@ namespace ValveResourceFormat.Renderer
                         Node = node,
                     };
 
-                    renderLists[RenderPass.Opaque].Add(customRender);
-                    renderLists[RenderPass.Translucent].Add(customRender);
+                    if (node.RenderAsViewmodel)
+                    {
+                        viewmodelRenderLists[RenderPass.Opaque].Add(customRender);
+                        viewmodelRenderLists[RenderPass.Translucent].Add(customRender);
+                    }
+                    else
+                    {
+                        renderLists[RenderPass.Opaque].Add(customRender);
+                        renderLists[RenderPass.Translucent].Add(customRender);
+                    }
 
                     if (node.IsSelected)
                     {
@@ -973,12 +1006,12 @@ namespace ValveResourceFormat.Renderer
 
             if (includeStatic)
             {
-                StaticOctree.Root.QueryNoOcclusion(frustum, CulledShadowNodes);
+                StaticOctree.Root.Query(frustum, CulledShadowNodes);
             }
 
             if (includeDynamic)
             {
-                DynamicOctree.Root.QueryNoOcclusion(frustum, CulledShadowNodes);
+                DynamicOctree.Root.Query(frustum, CulledShadowNodes);
             }
 
             foreach (var node in CulledShadowNodes)
@@ -1082,7 +1115,6 @@ namespace ValveResourceFormat.Renderer
         {
             CompactMeshletDraws = false;
             DrawMeshletsIndirect = EnableIndirectDraws && SceneMeshletCount > 0 && IndirectDrawsGpu != null;
-            EnableOcclusionQueries = EnableOcclusionCulling && !DrawMeshletsIndirect;
 
             if (DrawMeshletsIndirect)
             {
@@ -1134,8 +1166,8 @@ namespace ValveResourceFormat.Renderer
                 FrustumCullShader.SetUniform1("g_nDepthPyramidMaxMip", DepthPyramid.NumMipLevels - 1);
                 FrustumCullShader.SetUniform1("g_nDepthPyramidWidth", DepthPyramid.Width);
                 FrustumCullShader.SetUniform1("g_nDepthPyramidHeight", DepthPyramid.Height);
-                FrustumCullShader.SetUniform1("g_flDepthRangeMin", 0.05f);
-                FrustumCullShader.SetUniform1("g_flDepthRangeMax", 1.0f);
+                FrustumCullShader.SetUniform1("g_flDepthRangeMin", Renderer.DepthRange.Scene.Near);
+                FrustumCullShader.SetUniform1("g_flDepthRangeMax", Renderer.DepthRange.Scene.Far);
 
                 // Bind depth pyramid as texture for sampling
                 GL.ActiveTexture(TextureUnit.Texture0);
@@ -1259,11 +1291,15 @@ namespace ValveResourceFormat.Renderer
         {
             renderContext.RenderPass = RenderPass.DepthOnly;
 
+            PerfStats.Active.SuspendTriangleCounter();
+
             foreach (var (program, calls) in drawCalls)
             {
                 renderContext.ReplacementShader = depthOnlyShaders[(int)program];
                 MeshBatchRenderer.Render(calls, renderContext);
             }
+
+            PerfStats.Active.ResumeTriangleCounter();
         }
 
         /// <summary>
@@ -1289,12 +1325,16 @@ namespace ValveResourceFormat.Renderer
                 {
                     GL.ColorMask(false, false, false, false);
 
+                    PerfStats.Active.SuspendTriangleCounter();
+
                     renderContext.RenderPass = RenderPass.DepthOnly;
                     foreach (var (program, calls) in depthOnlyDraws)
                     {
                         renderContext.ReplacementShader = depthOnlyShaders[(int)program];
                         MeshBatchRenderer.Render(calls, renderContext);
                     }
+
+                    PerfStats.Active.ResumeTriangleCounter();
 
                     GL.ColorMask(true, true, true, true);
                 }
@@ -1332,192 +1372,6 @@ namespace ValveResourceFormat.Renderer
             }
         }
 
-        private bool occlusionDirty;
-
-        static void ClearOccludedStateRecursive(Octree.Node node)
-        {
-            foreach (var child in node.Children)
-            {
-                child.OcclusionCulled = false;
-                child.OcclusionQuerySubmitted = false;
-                ClearOccludedStateRecursive(child);
-            }
-        }
-
-        /// <summary>
-        /// Submits GPU occlusion queries for static octree nodes using proxy geometry, to be retrieved the following frame.
-        /// </summary>
-        /// <param name="renderContext">The render context providing the camera position.</param>
-        /// <param name="depthOnlyShader">The depth-only shader used to render the proxy bounding boxes.</param>
-        public void RenderOcclusionProxies(RenderContext renderContext, Shader depthOnlyShader)
-        {
-            using var _ = new GLDebugGroup("Occlusion Tests");
-            occlusionDirty = true;
-
-            GL.ColorMask(false, false, false, false);
-            GL.DepthMask(false);
-            GL.Disable(EnableCap.CullFace);
-
-            depthOnlyShader.Use();
-            GL.BindVertexArray(RendererContext.MeshBufferCache.EmptyVAO);
-
-            var maxTests = 1024;
-            var startDepth = 3;
-            var maxDepth = 8;
-            TestOctantsRecursive(StaticOctree.Root, renderContext.Camera.Location, ref maxTests, startDepth, maxDepth);
-
-            GL.UseProgram(0);
-            GL.BindVertexArray(0);
-
-            GL.ColorMask(true, true, true, true);
-            GL.DepthMask(true);
-            GL.Enable(EnableCap.CullFace);
-        }
-
-        private static void TestOctantsRecursive(Octree.Node parentNode, Vector3 cameraPosition, ref int maxTests, int startDepth, int maxDepth)
-        {
-            Span<bool> testChildren = stackalloc bool[8];
-
-            if (maxTests < 0 || maxDepth < 0)
-            {
-                return;
-            }
-
-            for (var i = 0; i < parentNode.Children.Length; i++)
-            {
-                var node = parentNode.Children[i];
-                if (node.FrustumCulled)
-                {
-                    node.OcclusionCulled = false;
-                    node.OcclusionQuerySubmitted = false;
-                    continue;
-                }
-
-                // This skips leaf octants, not sure if helps
-                // if (!node.HasChildren)
-                // {
-                //     continue;
-                // }
-
-                if (node.Region.Intersects(new AABB(cameraPosition, 4f)))
-                {
-                    // if the camera is inside the octant, we can skip the occlusion test, however we still need to test the children
-                    testChildren[i] = true;
-                    node.OcclusionCulled = false;
-                    node.OcclusionQuerySubmitted = false;
-                    continue;
-                }
-
-                if (!node.OcclusionCulled)
-                {
-                    testChildren[i] = true;
-                }
-
-                if (startDepth > 0)
-                {
-                    continue;
-                }
-
-                // Queried on a previous frame, waiting for result
-                if (node.OcclusionQuerySubmitted)
-                {
-                    //TryGetOcclusionTestResult(node);
-                    continue;
-                }
-
-                // Octree node passed frustum test, contains subregions, and was not waiting for a previous query
-                maxTests = SubmitOctreeNodeQuery(maxTests, maxDepth, node);
-            }
-
-            for (var i = 0; i < parentNode.Children.Length; i++)
-            {
-                if (testChildren[i])
-                {
-                    TestOctantsRecursive(parentNode.Children[i], cameraPosition, ref maxTests, startDepth - 1, maxDepth - 1);
-                }
-            }
-        }
-
-        private static int SubmitOctreeNodeQuery(int maxTests, int maxDepth, Octree.Node octreeNode)
-        {
-            if (octreeNode.OcclusionQueryHandle == -1)
-            {
-                octreeNode.OcclusionQueryHandle = GL.GenQuery();
-            }
-
-            octreeNode.OcclusionQuerySubmitted = true;
-            maxTests--;
-
-            GL.VertexAttrib4(
-                0,
-                octreeNode.Region.Min.X,
-                octreeNode.Region.Min.Y,
-                octreeNode.Region.Min.Z,
-                octreeNode.Region.Size.X
-            );
-
-#if DEBUG
-            GL.VertexAttribI2(1, maxDepth, maxTests);
-#endif
-
-            GL.BeginQuery(QueryTarget.AnySamplesPassedConservative, octreeNode.OcclusionQueryHandle);
-            GL.DrawArrays(PrimitiveType.Triangles, 0, 36);
-            GL.EndQuery(QueryTarget.AnySamplesPassedConservative);
-
-            return maxTests;
-        }
-
-        /// <summary>
-        /// Retrieves non-blocking GPU occlusion query results from the previous frame and marks octree nodes as occluded or visible.
-        /// </summary>
-        public void GetOcclusionTestResults()
-        {
-            if (!occlusionDirty)
-            {
-                return;
-            }
-
-            if (!EnableOcclusionQueries)
-            {
-                ClearOccludedStateRecursive(StaticOctree.Root);
-                occlusionDirty = false;
-                LastFrustum = -1;
-                return;
-            }
-
-            static void CheckOcclusionQueries(Octree.Node root)
-            {
-                foreach (var child in root.Children)
-                {
-                    if (child.OcclusionQuerySubmitted)
-                    {
-                        TryGetOcclusionTestResult(child);
-                    }
-
-                    if (child.HasChildren)
-                    {
-                        CheckOcclusionQueries(child);
-                    }
-                }
-            }
-
-            CheckOcclusionQueries(StaticOctree.Root);
-        }
-
-        private static bool TryGetOcclusionTestResult(Octree.Node node)
-        {
-            var visible = -1;
-            GL.GetQueryObject(
-                node.OcclusionQueryHandle,
-                GetQueryObjectParam.QueryResultNoWait,
-                out visible
-            );
-
-            node.OcclusionCulled = visible == 0;
-            node.OcclusionQuerySubmitted = visible == -1;
-            return visible != -1;
-        }
-
         /// <summary>Renders all translucent draw calls collected during <see cref="CollectSceneDrawCalls"/>.</summary>
         /// <param name="renderContext">The render context for this pass.</param>
         public void RenderTranslucentLayer(RenderContext renderContext)
@@ -1527,6 +1381,34 @@ namespace ValveResourceFormat.Renderer
                 renderContext.RenderPass = RenderPass.Translucent;
                 MeshBatchRenderer.Render(renderLists[RenderPass.Translucent], renderContext);
             }
+        }
+
+        /// <summary>
+        /// Renders the opaque first-person viewmodel layer collected during <see cref="CollectSceneDrawCalls"/>.
+        /// Rendered before the main scene so its reserved near depth range can never be overtaken by world geometry.
+        /// </summary>
+        /// <param name="renderContext">The render context for this pass, expected to use the dedicated viewmodel camera and depth range.</param>
+        public void RenderViewmodelOpaqueLayer(RenderContext renderContext)
+        {
+            renderContext.RenderPass = RenderPass.Opaque;
+            MeshBatchRenderer.Render(viewmodelRenderLists[RenderPass.Opaque], renderContext);
+        }
+
+        /// <summary>
+        /// Renders the translucent first-person viewmodel layer collected during <see cref="CollectSceneDrawCalls"/>.
+        /// Rendered after the main scene (and 3D sky) translucent passes so it composites correctly on top of them.
+        /// </summary>
+        /// <param name="renderContext">The render context for this pass, expected to use the dedicated viewmodel camera and depth range.</param>
+        public void RenderViewmodelTranslucentLayer(RenderContext renderContext)
+        {
+            GL.DepthMask(false);
+            GL.Enable(EnableCap.Blend);
+
+            renderContext.RenderPass = RenderPass.Translucent;
+            MeshBatchRenderer.Render(viewmodelRenderLists[RenderPass.Translucent], renderContext);
+
+            GL.Disable(EnableCap.Blend);
+            GL.DepthMask(true);
         }
 
         /// <summary>Renders water draw calls collected during <see cref="CollectSceneDrawCalls"/>.</summary>
@@ -1552,6 +1434,29 @@ namespace ValveResourceFormat.Renderer
             renderContext.ReplacementShader = null;
         }
 
+
+        internal void ActivateLayer(string layerName)
+        {
+            foreach (var node in AllNodes)
+            {
+                if (node.LayerName == layerName)
+                {
+                    node.LayerEnabled = true;
+                }
+            }
+        }
+
+        internal void DeactivateLayer(string layerName)
+        {
+            foreach (var node in AllNodes)
+            {
+                if (node.LayerName == layerName)
+                {
+                    node.LayerEnabled = false;
+                }
+            }
+        }
+
         /// <summary>
         /// Enables or disables scene nodes based on whether their layer name is present in the given set.
         /// </summary>
@@ -1566,7 +1471,7 @@ namespace ValveResourceFormat.Renderer
                     continue;
                 }
 
-                if (renderer.LayerName.StartsWith("LightProbeGrid", StringComparison.Ordinal))
+                if (renderer.LayerName.StartsWith("Internal -", StringComparison.Ordinal))
                 {
                     continue;
                 }
@@ -1758,6 +1663,12 @@ namespace ValveResourceFormat.Renderer
 
             foreach (var node in AllNodes)
             {
+                if (node.Flags.HasFlag(ObjectTypeFlags.DisableVisCulling))
+                {
+                    node.LightProbeBinding = globalProbe;
+                    continue;
+                }
+
                 node.LightProbeBinding ??= globalProbe;
             }
         }
@@ -1833,7 +1744,7 @@ namespace ValveResourceFormat.Renderer
                     else
                     {
 #if DEBUG
-                        RendererContext.Logger.LogDebug("A envmap with handshake [{Handshake}] does not exist for node at {Center}", precomputedHandshake, node.BoundingBox.Center);
+                        RendererContext.Logger.LogDebug("An envmap with handshake [{Handshake}] does not exist for node at {Center}", precomputedHandshake, node.BoundingBox.Center);
 #endif
                     }
                 }
@@ -1882,6 +1793,12 @@ namespace ValveResourceFormat.Renderer
                 });
 
                 node.ShaderEnvMapVisibility = node.ShaderEnvMapVisibility.Store(node.EnvMaps);
+
+                // all cubemaps visible
+                if (node.Flags.HasFlag(ObjectTypeFlags.DisableVisCulling))
+                {
+                    node.ShaderEnvMapVisibility = node.ShaderEnvMapVisibility.Store(LightingInfo.EnvMaps);
+                }
 
 #if DEBUG
                 if (preComputed != default)

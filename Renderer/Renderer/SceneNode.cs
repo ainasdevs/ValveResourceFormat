@@ -29,21 +29,28 @@ namespace ValveResourceFormat.Renderer
         /// </summary>
         public string? LayerName { get; set; }
 
-        private bool layerEnabledField = true;
-
         /// <summary>
         /// Gets or sets whether this node's layer is enabled. Marks the parent octree dirty on change.
         /// </summary>
         public virtual bool LayerEnabled
         {
-            get => layerEnabledField;
-            set { layerEnabledField = value; Scene.MarkParentOctreeDirty(this); }
-        }
+            get => field;
+            set
+            {
+                var valueChanged = value != field;
+                field = value;
+                if (valueChanged)
+                {
+                    Scene.MarkParentOctreeDirty(this);
+                }
+            }
+        } = true;
 
         /// <summary>
-        /// Gets the world-space axis-aligned bounding box, computed from <see cref="LocalBoundingBox"/> and <see cref="Transform"/>.
+        /// Gets the world-space axis-aligned bounding box. Recomputed from <see cref="LocalBoundingBox"/> and
+        /// <see cref="Transform"/> when either is set; nodes whose content lives in world space set it directly.
         /// </summary>
-        public AABB BoundingBox { get; private set; }
+        public AABB BoundingBox { get; protected set; }
 
         /// <summary>
         /// Gets or sets the local-space axis-aligned bounding box. Setting this also updates <see cref="BoundingBox"/>.
@@ -51,7 +58,7 @@ namespace ValveResourceFormat.Renderer
         public AABB LocalBoundingBox
         {
             get => localBoundingBox;
-            protected set
+            set
             {
                 localBoundingBox = value;
                 BoundingBox = LocalBoundingBox.Transform(transform);
@@ -78,6 +85,12 @@ namespace ValveResourceFormat.Renderer
         /// </summary>
         public ObjectTypeFlags Flags { get; set; }
 
+        /// <summary>
+        /// Gets or sets whether this node's draw calls render in the dedicated first-person viewmodel
+        /// pass (own camera, own reserved near depth range).
+        /// </summary>
+        public bool RenderAsViewmodel { get; set; }
+
 #if DEBUG
         /// <summary>
         /// Gets a human-readable debug name including type, name, id, and position.
@@ -89,6 +102,11 @@ namespace ValveResourceFormat.Renderer
         /// Gets the scene this node belongs to.
         /// </summary>
         public Scene Scene { get; }
+
+        /// <summary>
+        /// The parent node.
+        /// </summary>
+        public SceneNode? Parent { get; set; }
 
         /// <summary>
         /// Gets the environment maps affecting this node.

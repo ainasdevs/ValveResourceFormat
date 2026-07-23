@@ -29,7 +29,6 @@
 #define GameVfx_vr_skin 0
 #define GameVfx_vr_standard 0
 #define GameVfx_vr_static_overlay 0
-#define GameVfx_vr_unlit 0
 #define GameVfx_vr_xen_foliage 0
 
 #include "common/utils.slang"
@@ -159,7 +158,7 @@ uniform sampler2D g_tTintMask;
 #define _metalnessTexture (defined(complex_vfx_common) && (F_METALNESS_TEXTURE == 1) && ((F_ALPHA_TEST == 1) || (F_TRANSLUCENT == 1))) || (GameVfx_csgo_weapon != 0) || (GameVfx_csgo_character != 0) || (GameVfx_csgo_vertexlitgeneric != 0)
 #define _ambientOcclusionTexture (((GameVfx_vr_simple != 0) && (F_AMBIENT_OCCLUSION_TEXTURE == 1) && (F_METALNESS_TEXTURE == 1)) || defined(complex_vfx_common) || (GameVfx_csgo_foliage != 0) || (GameVfx_csgo_weapon != 0) || (GameVfx_csgo_character != 0) || defined(csgo_generic_vfx_common) || (GameVfx_pbr != 0) || (GameVfx_csgo_simple_3layer_parallax != 0))
 
-#define unlit ((GameVfx_vr_unlit != 0) || (GameVfx_unlit != 0) || (GameVfx_csgo_unlitgeneric != 0) || (F_FULLBRIGHT == 1) || (F_UNLIT == 1) || (defined(static_overlay_vfx_common) && F_LIT == 0)) || (GameVfx_csgo_decalmodulate != 0)
+#define unlit ((GameVfx_unlit != 0) || (GameVfx_csgo_unlitgeneric != 0) || (F_FULLBRIGHT == 1) || (F_UNLIT == 1) || (defined(static_overlay_vfx_common) && F_LIT == 0)) || (GameVfx_csgo_decalmodulate != 0)
 #define alphatest (F_ALPHA_TEST == 1) || (((GameVfx_csgo_unlitgeneric != 0) || defined(static_overlay_vfx_common)) && (F_BLEND_MODE == 2)) || (GameVfx_csgo_decalmodulate != 0)
 #define translucent (F_TRANSLUCENT == 1) || (F_GLASS == 1) || (F_BLEND_MODE > 0 && F_BLEND_MODE != 2) || defined(glass_vfx_common) || (GameVfx_csgo_decalmodulate != 0) || (((GameVfx_csgo_unlitgeneric != 0) || defined(static_overlay_vfx_common)) && (F_BLEND_MODE == 1)) // need to set this up on the cpu side
 #define selfillum ((F_SELF_ILLUM == 1 && ((GameVfx_generic != 0) || defined(complex_vfx_common) || (GameVfx_csgo_vertexlitgeneric != 0) || (GameVfx_vr_skin != 0) || (GameVfx_csgo_weapon != 0))) || (GameVfx_csgo_unlitgeneric != 0))
@@ -182,6 +181,10 @@ uniform sampler2D g_tTintMask;
 
 #if (translucent)
     uniform float g_flOpacityScale = 1.0;
+#endif
+
+#if defined(static_overlay_vfx_common)
+    uniform mat4 g_mTextureColorAdjust; // evaluated on the CPU from g_fTextureColor* params
 #endif
 
 #if (selfillum)
@@ -324,7 +327,7 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
     // Parallax
     vec3 viewDirInv = -mat.ViewDir;
     float invDepth = 1.0 / dot(viewDirInv, mat.GeometricNormal);
-    float NdotV = clamp(dot(mat.ViewDir, mat.GeometricNormal), 0.0, 1.0);
+    float NdotV = clamp(dot(mat.ViewDir, mat.GeometricNormal), 0.0001, 1.0);
     float fresnel = clamp(pow(NdotV, 0.7), 0.0, 1.0);
     vec2 viewDirTs = vec2(dot(viewDirInv, mat.Tangent), dot(viewDirInv, mat.Bitangent));
     vec2 normalXY = vec2(mat.NormalMap.x, -mat.NormalMap.y);
@@ -361,6 +364,10 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
 #else
     vec4 color = texture(g_tColor, texCoord);
     vec4 normalTexture = texture(g_tNormal, texCoord);
+
+#if defined(static_overlay_vfx_common)
+    color.rgb = (vec4(color.rgb, 1.0) * g_mTextureColorAdjust).rgb;
+#endif
 
     // Blending
 #if defined(terrain_blend_common)
@@ -746,13 +753,12 @@ void main()
         outputColor.rgb = SrgbGammaToLinear(outputColor.rgb);
     }
 
-#if (blendMod2x || blendModThenAdd)
-    vec3 gammaOutput = SrgbLinearToGamma(outputColor.rgb);
-    #if (blendMod2x)
-        outputColor = vec4(mix(vec3(0.5), gammaOutput, vec3(outputColor.a)), outputColor.a);
-    #elif (blendModThenAdd)
-        outputColor = vec4(mix(vec3(0), outputColor.rgb, vec3(0.5)), outputColor.a);
-    #endif
+#if (GameVfx_csgo_decalmodulate != 0)
+    outputColor = vec4(mix(vec3(0.5), SrgbLinearToGamma(outputColor.rgb), vec3(outputColor.a)), outputColor.a);
+#elif (blendMod2x)
+    outputColor.rgb = mix(vec3(0.5), outputColor.rgb, vec3(outputColor.a));
+#elif (blendModThenAdd)
+    outputColor.rgb = mix(vec3(0.0), outputColor.rgb, vec3(outputColor.a));
 #endif
 
     if (HandleMaterialRenderModes(outputColor, mat)

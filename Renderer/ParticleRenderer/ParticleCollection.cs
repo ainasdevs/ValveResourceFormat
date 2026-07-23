@@ -26,6 +26,13 @@ namespace ValveResourceFormat.Renderer.Particles
         public int Count { get; private set; }
 
         /// <summary>
+        /// Duration of the previous simulation step. <see cref="Operators.BasicMovement"/> scales the Verlet inertia
+        /// term by the current-to-previous step ratio so momentum stays framerate-independent; 0 until
+        /// the first step completes.
+        /// </summary>
+        public float PreviousFrameTime { get; internal set; }
+
+        /// <summary>
         /// Initializes a new <see cref="ParticleCollection"/> with the given constant particle template and capacity.
         /// </summary>
         public ParticleCollection(Particle constants, int maxParticles)
@@ -85,7 +92,8 @@ namespace ValveResourceFormat.Renderer.Particles
         /// </summary>
         public static float RandomSingle(int particleId)
         {
-            return RandomFloats.List[particleId % RandomFloats.List.Length]; // TODO: Add seed
+            // Unsigned modulo keeps the index valid for any id, including ids that wrapped negative
+            return RandomFloats.List[(uint)particleId % RandomFloats.List.Length]; // TODO: Add seed
         }
 
         /// <summary>
@@ -113,6 +121,14 @@ namespace ValveResourceFormat.Renderer.Particles
                 RandomBetween(particleId, min.X, max.X),
                 RandomBetween(particleId + 1, min.Y, max.Y),
                 RandomBetween(particleId + 2, min.Z, max.Z));
+        }
+
+        /// <summary>
+        /// Returns a non-deterministic random vector with each component independently interpolated between the corresponding components of <paramref name="min"/> and <paramref name="max"/>.
+        /// </summary>
+        public static Vector3 RandomBetweenPerComponent(Vector3 min, Vector3 max)
+        {
+            return RandomBetweenPerComponent(Random.Shared.Next(), min, max);
         }
 
         /// <summary>

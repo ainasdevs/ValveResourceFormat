@@ -50,7 +50,7 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets the number of bones used by this mesh.</summary>
         public int MeshBoneCount { get; private set; }
 
-        /// <summary>Gets the number of bone weights per vertex (4 or 8).</summary>
+        /// <summary>Gets the number of bone weights per vertex (up to 8, or 0 when the mesh has no skeleton).</summary>
         public int BoneWeightCount { get; private set; }
 
         /// <summary>Gets the name of the source mesh resource.</summary>
@@ -109,7 +109,7 @@ namespace ValveResourceFormat.Renderer
             }
         }
 
-        /// <summary>Returns the union of all render mode names supported by the materials in this mesh.</summary>
+        /// <summary>Returns the render mode names supported by the materials in this mesh, concatenated across draw calls (may contain duplicates).</summary>
         public IEnumerable<string> GetSupportedRenderModes()
             => DrawCalls
                 .SelectMany(static drawCall => drawCall.Material.Shader.RenderModes);
@@ -371,10 +371,13 @@ namespace ValveResourceFormat.Renderer
             {
                 var indexBufferObject = objectDrawCall.GetSubCollection("m_indexBuffer");
                 var bufferIndex = indexBufferObject.GetUInt32Property("m_hBuffer");
+                var indexBindOffset = indexBufferObject.GetUInt32Property("m_nBindOffsetBytes");
+                Debug.Assert(indexBindOffset == 0, "Non-zero index buffer bind offset is not currently applied at draw time");
+
                 var indexBuffer = new IndexDrawBuffer
                 {
                     Handle = gpuVbib.IndexBuffers[(int)bufferIndex],
-                    Offset = indexBufferObject.GetUInt32Property("m_nBindOffsetBytes")
+                    Offset = indexBindOffset
                 };
                 drawCall.IndexBuffer = indexBuffer;
 
@@ -443,10 +446,13 @@ namespace ValveResourceFormat.Renderer
                         inputLayoutFields = [.. newInputLayout];
                     }
 
+                    var vertexBindOffset = vertexBufferObject.GetUInt32Property("m_nBindOffsetBytes");
+                    Debug.Assert(vertexBindOffset == 0, "Non-zero vertex buffer bind offset is not currently applied at draw time");
+
                     var vertexBuffer = new VertexDrawBuffer
                     {
                         Handle = gpuVbib.VertexBuffers[(int)bufferIndex],
-                        Offset = vertexBufferObject.GetUInt32Property("m_nBindOffsetBytes"),
+                        Offset = vertexBindOffset,
                         ElementSizeInBytes = vertexBufferVbib.ElementSizeInBytes,
                         InputLayoutFields = inputLayoutFields,
                     };

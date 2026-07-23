@@ -1,18 +1,16 @@
 using OpenTK.Graphics.OpenGL;
-using PrimitiveType = OpenTK.Graphics.OpenGL.PrimitiveType;
 
 namespace ValveResourceFormat.Renderer.SceneNodes
 {
     /// <summary>
-    /// Scene node that renders a single line segment between two points.
+    /// Scene node that renders a list of line segments.
     /// </summary>
     public class LineSceneNode : SceneNode
     {
-        readonly Shader shader;
-        readonly int vaoHandle;
+        readonly LineBuffer lineBuffer;
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="LineSceneNode"/> class.
+        /// Initializes a new instance of the <see cref="LineSceneNode"/> class rendering a single line segment.
         /// </summary>
         /// <param name="scene">The scene this node belongs to.</param>
         /// <param name="start">The start position of the line.</param>
@@ -20,26 +18,36 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         /// <param name="startColor">The color at the start of the line.</param>
         /// <param name="endColor">The color at the end of the line.</param>
         public LineSceneNode(Scene scene, Vector3 start, Vector3 end, Color32 startColor, Color32 endColor)
+            : this(scene, [new(start, startColor), new(end, endColor)])
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="LineSceneNode"/> class rendering a list of line segments.
+        /// </summary>
+        /// <param name="scene">The scene this node belongs to.</param>
+        /// <param name="vertices">Pairs of vertices, one pair per line segment.</param>
+        public LineSceneNode(Scene scene, SimpleVertex[] vertices)
             : base(scene)
         {
-            LocalBoundingBox = new AABB(start, end);
+            var boundsMin = vertices.Length > 0 ? vertices[0].Position : Vector3.Zero;
+            var boundsMax = boundsMin;
+            foreach (var vertex in vertices)
+            {
+                boundsMin = Vector3.Min(boundsMin, vertex.Position);
+                boundsMax = Vector3.Max(boundsMax, vertex.Position);
+            }
 
-            SimpleVertex[] vertices = [new(start, startColor), new(end, endColor)];
+            LocalBoundingBox = new AABB(boundsMin, boundsMax);
 
-            shader = Scene.RendererContext.ShaderLoader.LoadShader("vrf.default");
+            lineBuffer = new LineBuffer(Scene.RendererContext, nameof(LineSceneNode));
+            lineBuffer.Upload(vertices, BufferUsageHint.StaticDraw);
+        }
 
-            GL.CreateVertexArrays(1, out vaoHandle);
-            GL.CreateBuffers(1, out int vboHandle);
-            GL.VertexArrayVertexBuffer(vaoHandle, 0, vboHandle, 0, SimpleVertex.SizeInBytes);
-            SimpleVertex.BindDefaultShaderLayout(vaoHandle, shader.Program);
-
-            GL.NamedBufferData(vboHandle, 2 * SimpleVertex.SizeInBytes, vertices, BufferUsageHint.StaticDraw);
-
-#if DEBUG
-            var vaoLabel = nameof(LineSceneNode);
-            GL.ObjectLabel(ObjectLabelIdentifier.VertexArray, vaoHandle, vaoLabel.Length, vaoLabel);
-            GL.ObjectLabel(ObjectLabelIdentifier.Buffer, vboHandle, vaoLabel.Length, vaoLabel);
-#endif
+        /// <inheritdoc/>
+        public override void Delete()
+        {
+            lineBuffer.Delete();
         }
 
         /// <inheritdoc/>
@@ -50,16 +58,14 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 return;
             }
 
-            var renderShader = context.ReplacementShader ?? shader;
+            var renderShader = context.ReplacementShader ?? lineBuffer.Shader;
             renderShader.Use();
             renderShader.SetUniform3x4("transform", Transform);
             renderShader.SetBoneAnimationData(false);
 
-            GL.BindVertexArray(vaoHandle);
-            GL.DrawArraysInstancedBaseInstance(PrimitiveType.Lines, 0, 2, 1, Id);
+            lineBuffer.Draw(Id);
 
             GL.UseProgram(0);
-            GL.BindVertexArray(0);
         }
     }
 }

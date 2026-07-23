@@ -30,8 +30,8 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         {
             if (particles.Count == 0)
             {
+                light.IsDirty = light.IsDirty || light.BrightnessScale != 0f;
                 light.BrightnessScale = 0f;
-                light.IsDirty = true;
                 return;
             }
 
@@ -39,12 +39,12 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             UpdateLight(light, ref particle, systemRenderState);
         }
 
-        public override void Render(ParticleCollection particles, ParticleSystemRenderState systemRenderState, Matrix4x4 modelViewMatrix)
+        public override void Render(ParticleCollection particles, ParticleSystemRenderState systemRenderState, Camera camera)
         {
             // Light rendering is handled externally by the scene/light system.
         }
 
-        public void Delete()
+        public override void Delete()
         {
             scene.LightingInfo.BarnLights.Remove(light);
         }
@@ -68,21 +68,18 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         private void UpdateLight(SceneLight light, ref Particle particle, ParticleSystemRenderState systemRenderState)
         {
             // Should we use the particle color?
-            var color = colorScale.NextVector(ref particle, systemRenderState) / 255f;
+            var color = colorScale.NextVector(ref particle, systemRenderState);
             var radius = particle.Radius;
             var range = radius * radiusMultiplier.NextNumber(ref particle, systemRenderState);
             var brightness = MathF.Max(0f, intensity.NextNumber(ref particle, systemRenderState));
 
             light.Color = color;
             light.Brightness = brightness;
-            light.BrightnessScale = 300f;
+            light.BrightnessScale = 500f;
             light.Range = range;
             light.Position = particle.Position;
             light.Transform = Matrix4x4.CreateTranslation(particle.Position);
-            light.Direction = particle.GetVector(ParticleField.Normal) is { } normal && normal != Vector3.Zero
-                ? Vector3.Normalize(normal)
-                : Vector3.UnitX;
-
+            light.Direction = particle.GetVector(ParticleField.Normal);
             light.IsDirty = true;
         }
     }

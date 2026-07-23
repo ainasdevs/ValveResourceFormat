@@ -34,27 +34,27 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         public bool IsLooping { get; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether the animation is hidden.
+        /// Gets a value indicating whether the animation is hidden.
         /// </summary>
         public bool Hidden { get; init; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether this is a delta animation.
+        /// Gets a value indicating whether this is a delta animation.
         /// </summary>
         public bool Delta { get; init; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether this animation is in world space.
+        /// Gets a value indicating whether this animation is in world space.
         /// </summary>
         public bool Worldspace { get; init; }
 
         /// <summary>
-        /// Gets or sets LegacyRealtime value of animation sequence. False for animations constructed without animation sequence data.
+        /// Gets LegacyRealtime value of animation sequence. False for animations constructed without animation sequence data.
         /// </summary>
         public bool Realtime { get; init; }
 
         /// <summary>
-        /// Gets or sets Autoplay value of animation sequence. False for animations constructed without animation sequence data.
+        /// Gets Autoplay value of animation sequence. False for animations constructed without animation sequence data.
         /// </summary>
         public bool Autoplay { get; init; }
 
@@ -77,6 +77,12 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         public AnimationActivity[] Activities { get; }
 
         /// <summary>
+        /// Gets the local-hierarchy overrides of this animation (bones interpolated in another bone's
+        /// or model space for a frame range, e.g. a weapon detaching in a death animation).
+        /// </summary>
+        public AnimationLocalHierarchy[] LocalHierarchy { get; } = [];
+
+        /// <summary>
         /// Gets the sequence parameters for this animation.
         /// </summary>
         public AnimationSequenceParams SequenceParams { get; }
@@ -87,7 +93,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         public AnimationAutoLayer[] AutoLayers { get; } = [];
 
         /// <summary>
-        /// Gets fetch data for this animation. Null animations that were constructed without sequence data.
+        /// Gets fetch data for this animation. Null for animations that were constructed without sequence data.
         /// </summary>
         public AnimationFetch? Fetch { get; }
 
@@ -95,6 +101,9 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         /// Gets whether this animation was constructed from sequence data.
         /// </summary>
         public bool FromSequence { get; }
+
+        private static AnimationLocalHierarchy[] GetLocalHierarchy(KVObject animDesc)
+            => animDesc.GetArray("m_hierarchyArray")?.Select(static x => new AnimationLocalHierarchy(x)).ToArray() ?? [];
 
         private Animation(KVObject animDesc, AnimationSegmentDecoder?[] segmentArray)
         {
@@ -134,6 +143,8 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                                     .Select(x => new AnimationActivity(x))
                                     .ToArray();
 
+            LocalHierarchy = GetLocalHierarchy(animDesc);
+
             var sequenceParams = animDesc.GetSubCollection("m_sequenceParams");
             SequenceParams = new AnimationSequenceParams(sequenceParams);
 
@@ -160,6 +171,8 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             Activities = seqDesc.GetArray("m_activityArray")
                 .Select(x => new AnimationActivity(x))
                 .ToArray();
+
+            LocalHierarchy = GetLocalHierarchy(animDesc);
 
             // Transition params from sequence descriptor
             var transition = seqDesc.GetSubCollection("m_transition");
@@ -450,7 +463,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             }
 
             GetMovementForTime(time, out var movement, out var nextMovement, out var t);
-            return AnimationMovement.Lerp(movement, nextMovement, time);
+            return AnimationMovement.Lerp(movement, nextMovement, t);
         }
 
         /// <summary>
@@ -536,7 +549,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             // Read all frame blocks
             foreach (var frameBlock in FrameBlocks)
             {
-                // Only consider blocks that actual contain info for this frame
+                // Only consider blocks that actually contain info for this frame
                 if (outFrame.FrameIndex >= frameBlock.StartFrame && outFrame.FrameIndex <= frameBlock.EndFrame)
                 {
                     foreach (var segmentIndex in frameBlock.SegmentIndexArray)

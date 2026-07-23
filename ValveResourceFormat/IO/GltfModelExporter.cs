@@ -28,11 +28,6 @@ namespace ValveResourceFormat.IO
     /// </summary>
     public partial class GltfModelExporter
     {
-        // NOTE: Swaps Y and Z axes - gltf up axis is Y (source engine up is Z)
-        // Also divides by 100, gltf units are in meters, source engine units are in inches
-        // https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#coordinate-system-and-units
-        private readonly static Matrix4x4 TRANSFORMSOURCETOGLTF = Matrix4x4.CreateScale(0.0254f) * Matrix4x4.CreateFromYawPitchRoll(0, MathF.PI / -2f, MathF.PI / -2f);
-
         // https://github.com/KhronosGroup/glTF-Blender-IO/blob/6b29ca135d5255dbfe1dd72424ce7243be73c0be/addons/io_scene_gltf2/blender/com/conversion.py#L20
         private const float PbrWattsTolumens = 683;
 
@@ -74,9 +69,14 @@ namespace ValveResourceFormat.IO
         public bool ExportExtras { get; set; }
 
         /// <summary>
-        /// Gets the set of animation names to filter during export.
+        /// Gets the set of animation names to filter during export. An entry matches an animation by its
+        /// full name or, for animation graph clips named by resource path, by its leaf name (e.g. "idle_knife"
+        /// matches "animation/anims/.../idle_knife"). Empty means export every animation.
         /// </summary>
         public HashSet<string> AnimationFilter { get; } = [];
+
+        // Filter entries that matched at least one animation, so unmatched ones can be reported after export.
+        private readonly HashSet<string> matchedAnimationFilter = [];
 
         /// <summary>
         /// Gets the set of mesh names to filter during export.
@@ -167,9 +167,11 @@ namespace ValveResourceFormat.IO
             try
             {
                 exportAction();
+                ReportUnmatchedAnimationFilter();
             }
             finally
             {
+                matchedAnimationFilter.Clear();
                 ExportedMeshes.Clear();
                 PhysicsToExport.Clear();
                 TextureExportingTasks.Clear();
@@ -179,6 +181,45 @@ namespace ValveResourceFormat.IO
                 TexturesExportedSoFar = 0;
                 DstDir = string.Empty;
                 IsExporting = false;
+            }
+        }
+
+        // Whether an animation passes AnimationFilter, matching on its full name or, for path-named graph
+        // clips, its leaf name. Records which filter entry matched so misses can be reported afterwards.
+        private bool IncludeAnimation(HashSet<string> filter, string name)
+        {
+            if (filter.Count == 0)
+            {
+                return true;
+            }
+
+            if (filter.Contains(name))
+            {
+                matchedAnimationFilter.Add(name);
+                return true;
+            }
+
+            var leafName = Path.GetFileName(name);
+            if (leafName.Length != name.Length && filter.Contains(leafName))
+            {
+                matchedAnimationFilter.Add(leafName);
+                return true;
+            }
+
+            return false;
+        }
+
+        private void ReportUnmatchedAnimationFilter()
+        {
+            if (AnimationFilter.Count == 0)
+            {
+                return;
+            }
+
+            var unmatched = AnimationFilter.Where(name => !matchedAnimationFilter.Contains(name)).ToList();
+            if (unmatched.Count > 0)
+            {
+                ProgressReporter?.Report($"glTF animation filter matched no animations for: {string.Join(", ", unmatched)}");
             }
         }
 
@@ -361,27 +402,15 @@ namespace ValveResourceFormat.IO
             ExportPhysicsIfAny(resourceName, fileName);
         }
 
-        private void LoadEntityMeshes(ModelRoot exportedModel, Scene scene, VEntityLump entityLump, Matrix4x4 parentTransform)
+        private void LoadEntityMeshes(ModelRoot exportedModel, Scene scene, VEntityLump entityLump, Matrix4x4 rootTransform)
         {
-            var childEntities = entityLump.GetChildEntityNames();
-            var childEntityLumps = new Dictionary<string, VEntityLump>(childEntities.Length);
+            var traversed = EntityLumpTraversal.EnumerateEntities(
+                entityLump,
+                FileLoader,
+                rootTransform,
+                onMissingChildLump: name => ProgressReporter?.Report($"Failed to find child entity lump with name {name}."));
 
-            foreach (var childEntityName in childEntities)
-            {
-                var newResource = FileLoader.LoadFileCompiled(childEntityName);
-
-                if (newResource == null)
-                {
-                    continue;
-                }
-
-                var childLump = (VEntityLump)newResource.DataBlock!;
-                var childName = childLump.Name;
-
-                childEntityLumps.Add(childName, childLump);
-            }
-
-            foreach (var entity in entityLump.GetEntities())
+            foreach (var (entity, parentTransform, _) in traversed)
             {
                 var transform = EntityTransformHelper.CalculateTransformationMatrix(entity) * parentTransform;
                 var modelName = entity.GetStringProperty("model");
@@ -394,37 +423,26 @@ namespace ValveResourceFormat.IO
                     // TODO: Add point and spot lights
                     if (className == "light_environment")
                     {
-                        if (!Matrix4x4.Decompose(transform, out var scale, out var _, out var positionVector))
+                        if (!Matrix4x4.Decompose(transform, out var _, out var _, out var positionVector))
                         {
                             throw new InvalidOperationException("Matrix decompose failed");
                         }
 
-                        var pitchYawRoll = entity.GetVector3Property("angles");
-                        var rollMatrix = Matrix4x4.CreateRotationX(float.DegreesToRadians(pitchYawRoll.Z));
-                        var pitchMatrix = Matrix4x4.CreateRotationY(float.DegreesToRadians(pitchYawRoll.X - 90)); // copypasta because of this
-                        var yawMatrix = Matrix4x4.CreateRotationZ(float.DegreesToRadians(pitchYawRoll.Y));
-                        var rotationMatrix = rollMatrix * pitchMatrix * yawMatrix;
+                        // glTF directional lights emit along node-local -Z; orient the node so that
+                        // -Z matches the sun's forward (travel) direction, i.e. the entity's local +X.
+                        var rotation = EntityTransformHelper.CreateRotationMatrixFromEulerAngles(entity.GetVector3Property("angles"));
+                        var direction = Vector3.Transform(Vector3.UnitX, rotation);
 
-                        var scaleMatrix = Matrix4x4.CreateScale(scale);
-                        var positionMatrix = Matrix4x4.CreateTranslation(positionVector);
-                        var lightMatrix = scaleMatrix * rotationMatrix * positionMatrix;
+                        var directionGltf = Vector3.Transform(direction, SourceToGltfRotation);
+                        var positionGltf = Vector3.Transform(positionVector, TransformSourceToGltf);
+
+                        // 'up' only anchors the meaningless roll around the beam, but CreateWorld degenerates
+                        // when it is parallel to the direction, so for a near-vertical sun (along Y) use Z instead.
+                        var up = MathF.Abs(directionGltf.Y) > 0.999f ? Vector3.UnitZ : Vector3.UnitY;
 
                         var node = scene.CreateNode(className);
                         node.PunctualLight = CreateGltfLightEnvironment(exportedModel, entity);
-                        node.LocalMatrix = lightMatrix * TRANSFORMSOURCETOGLTF;
-                    }
-                    else if (className == "point_template")
-                    {
-                        var entityLumpName = entity.GetStringProperty("entitylumpname");
-
-                        if (entityLumpName != null && childEntityLumps.TryGetValue(entityLumpName, out var childLump))
-                        {
-                            LoadEntityMeshes(exportedModel, scene, childLump, transform);
-                        }
-                        else
-                        {
-                            ProgressReporter?.Report($"Failed to find child entity lump with name {entityLumpName}.");
-                        }
+                        node.LocalMatrix = Matrix4x4.CreateWorld(positionGltf, directionGltf, up);
                     }
 
                     continue;
@@ -660,10 +678,8 @@ namespace ValveResourceFormat.IO
                 {
                     var animation = new ResourceTypes.ModelAnimation.Animation(clip);
                     var animationWriter = new AnimationWriter(skeletonData, []);
-                    animationWriter.WriteAnimation(exportedModel, joints, animation);
+                    animationWriter.WriteAnimation(exportedModel, joints, animation, ClipAnimationName(clip.Name));
                 }
-
-                skeletonNode.WorldMatrix = TRANSFORMSOURCETOGLTF;
             }
 
             ExportAnimationClip(animationClip);
@@ -712,7 +728,7 @@ namespace ValveResourceFormat.IO
 
                 foreach (var animation in animations)
                 {
-                    if (animationFilter.Count > 0 && !animationFilter.Contains(animation.Name))
+                    if (!IncludeAnimation(animationFilter, animation.Name))
                     {
                         continue;
                     }
@@ -720,14 +736,15 @@ namespace ValveResourceFormat.IO
                     animationWriter.WriteAnimation(exportedModel, joints, animation);
                     CancellationToken.ThrowIfCancellationRequested();
                 }
+
+                WriteAnimationGraphClips(exportedModel, model, joints!, animationFilter);
             }
             else
             {
                 Debug.Assert(joints == null);
             }
 
-            // Swap Rotate upright, scale inches to meters.
-            transform *= TRANSFORMSOURCETOGLTF;
+            var nodeTransform = GetPlacementTransform(transform);
 
             var materialReplacementTable = skinName != null
                 ? BuildMaterialReplacementTable(model, skinName)
@@ -752,7 +769,7 @@ namespace ValveResourceFormat.IO
                 var node = AddMeshNode(exportedModel, scene, meshName, tintColor, m.Mesh, m.Mesh.VBIB, joints, boneRemapTable, materialReplacementTable, entity);
                 if (node != null)
                 {
-                    node.WorldMatrix = transform;
+                    node.WorldMatrix = nodeTransform;
 
                     DebugValidateGLTF();
                 }
@@ -762,7 +779,7 @@ namespace ValveResourceFormat.IO
             // WorldMatrix should only be set after everything else.
             if (skeletonNode != null)
             {
-                skeletonNode.WorldMatrix = transform;
+                skeletonNode.WorldMatrix = nodeTransform;
             }
         }
 
@@ -772,15 +789,18 @@ namespace ValveResourceFormat.IO
         /// </summary>
         /// <param name="model">The model to get the meshes from.</param>
         /// <param name="name">The base name used when generating mesh names.</param>
-        /// <returns>A tuple of meshes and their names.</returns>
+        /// <returns>An enumerable of tuples of mesh, mesh index, and name.</returns>
         private IEnumerable<(VMesh Mesh, int MeshIndex, string Name)> LoadModelMeshes(VModel model, string name)
         {
-            foreach (var m in model.GetEmbeddedMeshesAndLoD().Where(static m => (m.LoDMask & 1) != 0))
+            // Export the lowest LoD level that actually has meshes. Usually LoD0, but some models leave it empty.
+            var lowestLod = model.LodInfo.LowestLevel;
+
+            foreach (var m in model.GetEmbeddedMeshesForLod(lowestLod))
             {
                 yield return (m.Mesh, m.MeshIndex, string.Concat(name, ".", m.Name));
             }
 
-            foreach (var m in model.GetReferenceMeshNamesAndLoD().Where(static m => (m.LoDMask & 1) != 0))
+            foreach (var m in model.GetReferenceMeshNamesForLod(lowestLod))
             {
                 var meshResource = FileLoader.LoadFileCompiled(m.MeshName);
                 var nodeName = Path.GetFileNameWithoutExtension(m.MeshName);
@@ -804,13 +824,7 @@ namespace ValveResourceFormat.IO
         {
             var exportedModel = CreateModelRoot(resourceName, out var scene);
             var name = Path.GetFileName(resourceName);
-            var node = AddMeshNode(exportedModel, scene, name, Vector4.One, mesh, mesh.VBIB, joints: null);
-
-            if (node != null)
-            {
-                // Swap Rotate upright, scale inches to meters.
-                node.WorldMatrix = TRANSFORMSOURCETOGLTF;
-            }
+            AddMeshNode(exportedModel, scene, name, Vector4.One, mesh, mesh.VBIB, joints: null);
 
             WriteModelFile(exportedModel, fileName);
         }
@@ -948,22 +962,24 @@ namespace ValveResourceFormat.IO
             var joints = new Node[skeleton.Bones.Length];
             foreach (var root in skeleton.Roots)
             {
-                CreateBonesRecursive(root, skeletonNode, ref joints);
+                CreateBonesRecursive(root, skeletonNode, ref joints, isRoot: true);
             }
             return (skeletonNode, joints);
         }
 
-        private static void CreateBonesRecursive(Bone bone, Node parent, ref Node[] joints)
+        private static void CreateBonesRecursive(Bone bone, Node parent, ref Node[] joints, bool isRoot)
         {
+            var (translation, rotation) = BakeConversion(bone.Position, bone.Angle, isRoot);
+
             var node = parent.CreateNode(bone.Name)
-                .WithLocalTranslation(bone.Position)
-                .WithLocalRotation(bone.Angle);
+                .WithLocalTranslation(translation)
+                .WithLocalRotation(rotation);
             joints[bone.Index] = node;
 
             // Recurse into children
             foreach (var child in bone.Children)
             {
-                CreateBonesRecursive(child, node, ref joints);
+                CreateBonesRecursive(child, node, ref joints, isRoot: false);
             }
         }
 
@@ -1028,7 +1044,7 @@ namespace ValveResourceFormat.IO
 
             primitive.WithMaterial(material);
 
-            return scene.CreateNode().WithSkinnedMesh(mesh, TRANSFORMSOURCETOGLTF, joints);
+            return scene.CreateNode().WithSkinnedMesh(mesh, Matrix4x4.Identity, joints);
         }
 
         private static PunctualLight CreateGltfLightEnvironment(ModelRoot exportedModel, VEntityLump.Entity entity)

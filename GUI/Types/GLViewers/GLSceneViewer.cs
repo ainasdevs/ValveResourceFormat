@@ -33,6 +33,18 @@ namespace GUI.Types.GLViewers
         private bool showStaticOctree;
         private bool showDynamicOctree;
         private bool showVisDebug;
+        private bool showPhysicsTraces;
+        private PhysicsTraceDebugRenderer? physicsTraceRenderer;
+
+        private enum PerfDisplay
+        {
+            Off,
+            Stats,
+            Timings,
+        }
+
+        private PerfDisplay perfDisplay;
+        private ComboBox? perfDisplayComboBox;
 
         private readonly List<RenderModes.RenderMode> renderModes = new(RenderModes.Items.Count);
         private int renderModeCurrentIndex;
@@ -71,13 +83,16 @@ namespace GUI.Types.GLViewers
         {
             base.Dispose();
 
+            physicsTraceRenderer?.Delete();
+            physicsTraceRenderer = null;
+
             Renderer?.Dispose();
 
-            if (renderModeComboBox != null)
-            {
-                renderModeComboBox.Dispose();
-                renderModeComboBox = null;
-            }
+            perfDisplayComboBox?.Dispose();
+            perfDisplayComboBox = null;
+
+            renderModeComboBox?.Dispose();
+            renderModeComboBox = null;
 
 #if DEBUG
             ShaderHotReload.ShadersReloaded -= OnHotReload;
@@ -113,9 +128,16 @@ namespace GUI.Types.GLViewers
                     {
                         UiControl.AddCheckBox("Show Vis Debug", showVisDebug, v => showVisDebug = v);
                     }
+
+                    if (Scene.PhysicsWorld != null)
+                    {
+                        UiControl.AddCheckBox("Debug Physics Traces", showPhysicsTraces, v => showPhysicsTraces = v);
+                    }
                 }
 
-                UiControl.AddCheckBox("Show Render Timings", Renderer.Timings.Capture, (v) => Renderer.Timings.Capture = v);
+                perfDisplayComboBox = UiControl.AddSelection("Debug Performance", (_, i) => perfDisplay = (PerfDisplay)i);
+                perfDisplayComboBox.Items.AddRange([nameof(PerfDisplay.Off), nameof(PerfDisplay.Stats), nameof(PerfDisplay.Timings)]);
+                perfDisplayComboBox.SelectedIndex = (int)perfDisplay;
             }
 
             base.AddUiControls();
@@ -194,7 +216,7 @@ namespace GUI.Types.GLViewers
                 }
 
                 // If there is no bbox, LookAt will break camera, so +1 to location
-                var offset = Math.Max(bbox.Max.X, bbox.Max.Z) + 1f * 1.5f;
+                var offset = Math.Max(bbox.Max.X, Math.Max(bbox.Max.Y, bbox.Max.Z)) + 1f * 1.5f;
                 offset = Math.Clamp(offset, 0f, 2000f);
                 var location = new Vector3(offset, 0, offset);
 
@@ -253,9 +275,9 @@ namespace GUI.Types.GLViewers
                 return;
             }
 
-            if (InitialMousePosition == new Point(e.X, e.Y))
+            if (!MouseDragged)
             {
-                Picker?.RequestNextFrame(e.X, e.Y, PickingIntent.Select);
+                Picker?.RequestNextFrame(InitialMousePosition.X, InitialMousePosition.Y, PickingIntent.Select);
             }
         }
 
@@ -352,6 +374,7 @@ namespace GUI.Types.GLViewers
             if (MouseOverRenderArea || Input.ForceUpdate)
             {
                 Input.MouseSensitivity = Settings.Config.MouseSensitivity;
+                Input.SmoothCameraEnabled = Settings.Config.SmoothCameraEnabled;
 
                 var pressedKeys = ConsumeCurrentlyPressedKeysForUpdate();
                 var modifierKeys = Control.ModifierKeys;
@@ -370,25 +393,45 @@ namespace GUI.Types.GLViewers
                 var wheelDelta = ConsumePendingMouseWheelDelta();
 
                 Input.MouseSensitivity = Settings.Config.MouseSensitivity;
+                var wasNoClip = Input.NoClip;
                 Input.Tick(frameTime, pressedKeys, new Vector2(mouseDelta.X, mouseDelta.Y), Renderer.Camera);
                 LastMouseDelta = mouseDelta;
+
+                // cancel unintentional selection
+                if (wasNoClip && !Input.NoClip)
+                {
+                    SelectedNodeRenderer?.SelectNode(null);
+                }
 
                 GrabbedMouse = !Input.NoClip && !Paused;
             }
         }
 
-        protected void DrawLowerCornerText(string text, Color32 color)
+        protected void DrawLowerCornerText(string text, Color32 color, int lineFromBottom = 0)
         {
             Debug.Assert(MainFramebuffer != null);
 
             TextRenderer.AddText(new ValveResourceFormat.Renderer.TextRenderer.TextRenderRequest
             {
                 X = 2f,
-                Y = MainFramebuffer.Height - 4f,
+                Y = MainFramebuffer.Height - 4f - lineFromBottom * 16f,
                 Scale = 14f,
                 Color = color,
                 Text = text
             });
+        }
+
+        protected void DrawWorldSpaceText(string text, float size, Vector3 position, Color32 color, Scene.RenderContext renderContext)
+        {
+            Scene.WantsSceneDepth = true;
+            TextRenderer.AddTextBillboard(position, new ValveResourceFormat.Renderer.TextRenderer.TextRenderRequest
+            {
+                Scale = size,
+                Color = color,
+                Text = text,
+                CenterVertical = true,
+                CenterHorizontal = true,
+            }, renderContext.Camera, depthMask: true);
         }
 
         protected override void BlitFramebufferToScreen()
@@ -410,7 +453,10 @@ namespace GUI.Types.GLViewers
             Debug.Assert(Picker != null);
             Debug.Assert(SelectedNodeRenderer != null);
 
-            Renderer.Timings.MarkFrameBegin();
+            Renderer.PerfStats.Capture = perfDisplay == PerfDisplay.Stats;
+            Renderer.PerfStats.Timings.Capture = perfDisplay == PerfDisplay.Timings;
+
+            Renderer.PerfStats.MarkFrameBegin();
             GL.BeginQuery(QueryTarget.TimeElapsed, frametimeQuery1);
 
             var renderContext = new Scene.RenderContext
@@ -434,6 +480,8 @@ namespace GUI.Types.GLViewers
 
                 SelectedNodeRenderer.Update(renderContext, updateContext);
             }
+
+            Renderer.ForceResolveSceneDepth = ShowBaseGrid;
 
             using (new GLDebugGroup("Scenes Render"))
             {
@@ -473,9 +521,20 @@ namespace GUI.Types.GLViewers
                     Scene.OcclusionDebug.Render();
                 }
 
+                if (showPhysicsTraces && Scene.PhysicsWorld != null)
+                {
+                    physicsTraceRenderer ??= new PhysicsTraceDebugRenderer(Scene.RendererContext);
+                    physicsTraceRenderer.Render(Scene.PhysicsWorld, Input, Renderer.Camera);
+                }
+
                 if (ShowBaseGrid && baseGrid != null)
                 {
                     baseGrid.Render();
+
+                    DrawWorldSpaceText("+X", 10f, Vector3.UnitX * 120f, Color32.Red, renderContext);
+                    DrawWorldSpaceText("-X", 10f, -Vector3.UnitX * 120f, Color32.Red, renderContext);
+                    DrawWorldSpaceText("+Y", 10f, Vector3.UnitY * 120f, Color32.Green, renderContext);
+                    DrawWorldSpaceText("-Y", 10f, -Vector3.UnitY * 120f, Color32.Green, renderContext);
                 }
             }
 
@@ -568,15 +627,19 @@ namespace GUI.Types.GLViewers
                 }
             }
 
-            if (Renderer.Timings.Capture)
+            if (perfDisplay == PerfDisplay.Stats)
             {
-                Renderer.Timings.DisplayTimings(TextRenderer, Renderer.Camera);
+                Renderer.PerfStats.DisplayStats(TextRenderer, Renderer.Camera, Scene, SkyboxScene);
+            }
+            else if (perfDisplay == PerfDisplay.Timings)
+            {
+                Renderer.PerfStats.Timings.DisplayTimings(TextRenderer, Renderer.Camera);
             }
 
-            TextRenderer.Render(Renderer.Camera);
+            TextRenderer.Render(Renderer.Camera, Renderer.ResolvedSceneDepth);
             Picker?.TriggerEventIfAny();
 
-            Renderer.Timings.MarkFrameEnd();
+            Renderer.PerfStats.MarkFrameEnd();
         }
 
         protected void AddBaseGridControl()
@@ -758,6 +821,12 @@ namespace GUI.Types.GLViewers
             if (e.KeyData == Keys.Escape)
             {
                 SelectedNodeRenderer.SelectNode(null);
+            }
+
+            if (e.KeyData == Keys.Tab && perfDisplayComboBox != null)
+            {
+                // Cycle through the perf display modes (the callback updates perfDisplay)
+                perfDisplayComboBox.SelectedIndex = (perfDisplayComboBox.SelectedIndex + 1) % perfDisplayComboBox.Items.Count;
             }
 
             base.OnKeyDown(sender, e);

@@ -41,7 +41,7 @@ namespace GUI.Types.Viewers
                 ShowRootLines = false,
                 ShowNodeToolTips = true,
                 Dock = DockStyle.Fill,
-                ImageList = MainForm.ImageList,
+                ImageList = AppIcons.ImageList,
             };
             fileListView.NodeMouseClick += OnNodeMouseClick;
             Themer.ThemeControl(fileListView);
@@ -144,7 +144,7 @@ namespace GUI.Types.Viewers
                 programContextMenu.Items.Add(exportProgramSpirvStaticMenuItem);
             }
 
-            control = new TextControl(CodeTextBox.HighlightLanguage.Shaders);
+            control = new TextControl(HighlightLanguage.Shaders);
             control.AddControl(fileListView);
         }
 
@@ -172,9 +172,9 @@ namespace GUI.Types.Viewers
         {
             tab.Controls.Add(control);
 
-            var vfxImage = MainForm.Icons["FolderShaders"];
-            var programImage = MainForm.GetImageIndexForExtension("vcs");
-            var comboImage = MainForm.GetImageIndexForExtension("pdi");
+            var vfxImage = AppIcons.Icons["FolderShaders"];
+            var programImage = AppIcons.GetImageIndexForExtension("vcs");
+            var comboImage = AppIcons.GetImageIndexForExtension("pdi");
 
             var materialCollectionIndex = 0;
             var collectionNode = new TreeNode($"{vcsCollectionName}.vfx")
@@ -275,7 +275,7 @@ namespace GUI.Types.Viewers
 
                             if (shaderFile.Bytecode.Length > 0)
                             {
-                                var matImage = MainForm.GetImageIndexForExtension("vmat");
+                                var matImage = AppIcons.GetImageIndexForExtension("vmat");
                                 var matNode = new TreeNode($"Material {program.VcsProgramType}{variantsAbbrev}")
                                 {
                                     ToolTipText = variantsTooltip,
@@ -411,7 +411,7 @@ namespace GUI.Types.Viewers
                 var reflectedSource = AttemptSpirvReflection(vulkanSource, Backend.GLSL);
 
                 var textTab = new TabPage("SPIR-V");
-                var textBox = new CodeTextBox(reflectedSource, CodeTextBox.HighlightLanguage.Shaders);
+                var textBox = new CodeTextBox(reflectedSource, HighlightLanguage.Shaders);
                 textTab.Controls.Add(textBox);
                 resTabs.TabPages.Add(textTab);
                 resTabs.SelectedTab = textTab;
@@ -429,7 +429,7 @@ namespace GUI.Types.Viewers
 
         private static void CreateStaticComboNodes(VfxStaticComboData combo, TreeNode treeNode)
         {
-            var sourceFileImage = MainForm.GetImageIndexForExtension("ini");
+            var sourceFileImage = AppIcons.GetImageIndexForExtension("ini");
 
             List<string> dfNamesAbbrev = [];
             List<string> dfNames = [];
@@ -512,50 +512,44 @@ namespace GUI.Types.Viewers
         private void OnExportCollectionClick(object? sender, EventArgs e)
         {
             if (collectionContextMenu.Tag is not ShaderExtract shaderExtract)
-                return;
-
-            using var dialog = new FolderBrowserDialog
             {
-                Description = "Select export folder",
-                InitialDirectory = Settings.Config.SaveDirectory,
-                UseDescriptionForTitle = true,
-            };
-
-            if (dialog.ShowDialog() != DialogResult.OK)
                 return;
+            }
 
-            Settings.Config.SaveDirectory = dialog.SelectedPath;
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
 
             _ = Task.Run(() =>
             {
                 foreach (var program in shaderExtract.Shaders)
-                    ExportProgram(program, dialog.SelectedPath);
+                {
+                    ExportProgram(program, folderPath);
+                }
 
-                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
             });
         }
 
         private void OnExportProgramClick(object? sender, EventArgs e)
         {
             if (programContextMenu.Tag is not VfxProgramData program)
-                return;
-
-            using var dialog = new FolderBrowserDialog
             {
-                Description = "Select export folder",
-                InitialDirectory = Settings.Config.SaveDirectory,
-                UseDescriptionForTitle = true,
-            };
-
-            if (dialog.ShowDialog() != DialogResult.OK)
                 return;
+            }
 
-            Settings.Config.SaveDirectory = dialog.SelectedPath;
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
 
             _ = Task.Run(() =>
             {
-                ExportProgram(program, dialog.SelectedPath);
-                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                ExportProgram(program, folderPath);
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
             });
         }
 
@@ -572,7 +566,7 @@ namespace GUI.Types.Viewers
 
             if (!int.TryParse(prompt.ResultText, out dynamicComboIndex) || dynamicComboIndex < 0)
             {
-                MessageBox.Show("Invalid dynamic combo index.", "Export", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _ = AppMessageDialogs.ShowMessageAsync("Invalid dynamic combo index.", "Export", MessageIcon.Warning);
                 return false;
             }
 
@@ -582,56 +576,54 @@ namespace GUI.Types.Viewers
         private void OnExportCollectionStaticOnlyClick(object? sender, EventArgs e)
         {
             if (collectionContextMenu.Tag is not ShaderExtract shaderExtract)
+            {
                 return;
+            }
 
             if (!PromptDynamicComboIndex(out var dynamicComboIndex))
-                return;
-
-            using var dialog = new FolderBrowserDialog
             {
-                Description = "Select export folder",
-                InitialDirectory = Settings.Config.SaveDirectory,
-                UseDescriptionForTitle = true,
-            };
-
-            if (dialog.ShowDialog() != DialogResult.OK)
                 return;
+            }
 
-            Settings.Config.SaveDirectory = dialog.SelectedPath;
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
 
             _ = Task.Run(() =>
             {
                 foreach (var program in shaderExtract.Shaders)
-                    ExportProgram(program, dialog.SelectedPath, dynamicComboIndex);
+                {
+                    ExportProgram(program, folderPath, dynamicComboIndex);
+                }
 
-                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
             });
         }
 
         private void OnExportProgramStaticOnlyClick(object? sender, EventArgs e)
         {
             if (programContextMenu.Tag is not VfxProgramData program)
+            {
                 return;
+            }
 
             if (!PromptDynamicComboIndex(out var dynamicComboIndex))
-                return;
-
-            using var dialog = new FolderBrowserDialog
             {
-                Description = "Select export folder",
-                InitialDirectory = Settings.Config.SaveDirectory,
-                UseDescriptionForTitle = true,
-            };
-
-            if (dialog.ShowDialog() != DialogResult.OK)
                 return;
+            }
 
-            Settings.Config.SaveDirectory = dialog.SelectedPath;
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
 
             _ = Task.Run(() =>
             {
-                ExportProgram(program, dialog.SelectedPath, dynamicComboIndex);
-                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                ExportProgram(program, folderPath, dynamicComboIndex);
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
             });
         }
 
@@ -641,7 +633,10 @@ namespace GUI.Types.Viewers
         private void OnExportCollectionSpirvStaticOnlyClick(object? sender, EventArgs e)
         {
             if (!PromptDynamicComboIndex(out var index))
+            {
                 return;
+            }
+
             RunBulkSpirvExport(collectionContextMenu.Tag, dynamicComboIndex: index);
         }
 
@@ -651,7 +646,10 @@ namespace GUI.Types.Viewers
         private void OnExportProgramSpirvStaticOnlyClick(object? sender, EventArgs e)
         {
             if (!PromptDynamicComboIndex(out var index))
+            {
                 return;
+            }
+
             RunBulkSpirvExport(programContextMenu.Tag, dynamicComboIndex: index);
         }
 
@@ -666,28 +664,24 @@ namespace GUI.Types.Viewers
 
             var programsList = programs.ToList();
             if (programsList.Count == 0)
-                return;
-
-            using var dialog = new FolderBrowserDialog
             {
-                Description = "Select export folder",
-                InitialDirectory = Settings.Config.SaveDirectory,
-                UseDescriptionForTitle = true,
-            };
-
-            if (dialog.ShowDialog() != DialogResult.OK)
                 return;
+            }
 
-            Settings.Config.SaveDirectory = dialog.SelectedPath;
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
 
             _ = Task.Run(() =>
             {
                 foreach (var program in programsList)
                 {
-                    ExportProgram(program, dialog.SelectedPath, dynamicComboIndex, ShaderExportMode.SpirvWithNames);
+                    ExportProgram(program, folderPath, dynamicComboIndex, ShaderExportMode.SpirvWithNames);
                 }
 
-                MessageBox.Show($"Export complete.\n{dialog.SelectedPath}", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
             });
         }
 
@@ -810,27 +804,19 @@ namespace GUI.Types.Viewers
             Debug.Assert(combo.ParentProgramData != null);
 
             var extension = shaderFile.BlockName == "VULKAN" ? "spv" : shaderFile.BlockName.ToLowerInvariant();
-            using var dialog = new SaveFileDialog
-            {
-                Title = "Export bytecode",
-                FileName = $"{combo.ParentProgramData.ShaderName}_{combo.StaticComboId:x08}_{shaderFile.ShaderFileId:x02}",
-                InitialDirectory = Settings.Config.SaveDirectory,
-                DefaultExt = extension,
-                Filter = $"{shaderFile.BlockName} bytecode (*.{extension})|*.{extension}|All files (*.*)|*.*",
-                AddToRecent = true,
-            };
 
-            if (dialog.ShowDialog() != DialogResult.OK)
+            var fileName = AppFileDialogs.SaveFile(
+                "Export bytecode",
+                $"{combo.ParentProgramData.ShaderName}_{combo.StaticComboId:x08}_{shaderFile.ShaderFileId:x02}",
+                extension,
+                $"{shaderFile.BlockName} bytecode (*.{extension})|*.{extension}|All files (*.*)|*.*");
+
+            if (fileName == null)
             {
                 return;
             }
 
-            if (Path.GetDirectoryName(dialog.FileName) is { } directory)
-            {
-                Settings.Config.SaveDirectory = directory;
-            }
-
-            File.WriteAllBytes(dialog.FileName, shaderFile.Bytecode);
+            File.WriteAllBytes(fileName, shaderFile.Bytecode);
         }
 
         private void OnShaderFileContextMenuOpening(object? sender, CancelEventArgs e)
@@ -849,38 +835,27 @@ namespace GUI.Types.Viewers
             var combo = vulkanSource.ParentCombo;
             Debug.Assert(combo.ParentProgramData != null);
 
-            using var dialog = new SaveFileDialog
-            {
-                Title = "Export SPIR-V with renamed symbols",
-                FileName = $"{combo.ParentProgramData.ShaderName}_{combo.StaticComboId:x08}_{vulkanSource.ShaderFileId:x02}_named",
-                InitialDirectory = Settings.Config.SaveDirectory,
-                DefaultExt = "spv",
-                Filter = "SPIR-V bytecode (*.spv)|*.spv|All files (*.*)|*.*",
-                AddToRecent = true,
-            };
-
-            if (dialog.ShowDialog() != DialogResult.OK)
+            var fileName = AppFileDialogs.SaveFile(
+                "Export SPIR-V with renamed symbols",
+                $"{combo.ParentProgramData.ShaderName}_{combo.StaticComboId:x08}_{vulkanSource.ShaderFileId:x02}_named",
+                "spv",
+                "SPIR-V bytecode (*.spv)|*.spv|All files (*.*)|*.*");
+            if (fileName == null)
             {
                 return;
-            }
-
-            if (Path.GetDirectoryName(dialog.FileName) is { } directory)
-            {
-                Settings.Config.SaveDirectory = directory;
             }
 
             try
             {
                 var rewritten = ShaderSpirvRewriter.InjectMetadataNames(vulkanSource);
-                File.WriteAllBytes(dialog.FileName, rewritten);
+                File.WriteAllBytes(fileName, rewritten);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
+                _ = AppMessageDialogs.ShowMessageAsync(
                     $"Failed to rewrite SPIR-V binary:\n\n{ex.Message}",
                     "Export SPIR-V",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                    MessageIcon.Error);
             }
         }
     }

@@ -79,8 +79,8 @@ namespace ValveResourceFormat.Renderer.PostProcess
         }
 
         /// <summary>
-        /// Resolves MSAA color and/or depth from source using compute shaders.
-        /// Color and depth are written to standalone RenderTexture targets.
+        /// Resolves MSAA color and/or depth from <paramref name="source"/> using compute shaders.
+        /// Color and depth are written to standalone <see cref="RenderTexture"/> targets.
         /// Uses Karis average for HDR-aware color resolve, min filter for depth (conservative for reverse-Z).
         /// </summary>
         public void ResolveMsaa(Framebuffer source, RenderTexture destColor, RenderTexture destDepth,
@@ -197,7 +197,7 @@ namespace ValveResourceFormat.Renderer.PostProcess
                 if (State.HasBloom)
                 {
                     postProcessShader.SetTexture(4, "g_tBloom", Bloom.AccumulationResult);
-                    // these seems to all be needed at once due to transitions between post process volumes, we dont do that yet
+                    // these seem to all be needed at once due to transitions between post process volumes, we don't do that yet
                     // NormalizedBloomStrengths seems to act as a blending factor "how much of each bloom mode do we have right now"
                     var bloomStrengths = new Vector3(State.BloomSettings.AddBloomStrength, State.BloomSettings.ScreenBloomStrength, State.BloomSettings.BlurBloomStrength);
                     var normalizedStrenghts = Vector3.Normalize(bloomStrengths);

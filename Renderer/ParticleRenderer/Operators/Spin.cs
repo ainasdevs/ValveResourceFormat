@@ -13,9 +13,35 @@ namespace ValveResourceFormat.Renderer.Particles.Operators
         protected CGeneralSpin(ParticleDefinitionParser parse) : base(parse)
         {
             spinRateDegrees = parse.Int32("m_nSpinRateDegrees", spinRateDegrees);
-            spinRateMinDegrees = parse.Int32("m_nSpinRateMinDegrees", spinRateMinDegrees); // what is this
+            spinRateMinDegrees = parse.Int32("m_nSpinRateMinDegrees", spinRateMinDegrees);
             spinRateStopTime = parse.Float("m_fSpinRateStopTime", spinRateStopTime);
         }
+
+        /// <summary>
+        /// Spin rate in degrees per second at the given particle age: the rate decays linearly from
+        /// the main rate to the min floor over the stop time; a stop time of 0 means no decay.
+        /// </summary>
+        private float GetSpinRate(float age)
+        {
+            if (spinRateStopTime == 0f)
+            {
+                return spinRateDegrees;
+            }
+
+            var decayed = spinRateDegrees * MathF.Max(0f, 1f - (age / spinRateStopTime));
+
+            return spinRateDegrees >= 0
+                ? MathF.Max(decayed, spinRateMinDegrees)
+                : MathF.Min(decayed, spinRateMinDegrees);
+        }
+
+        /// <summary>
+        /// This frame's rotation increment in radians. Rotation is stored in radians, the spin rate
+        /// in degrees per second; the engine scales the converted rate by an extra 2*pi, inherited
+        /// from S1 CGeneralSpin (57 deg/s spins roughly one full turn per second).
+        /// </summary>
+        protected float GetSpinDelta(float age, float frameTime)
+            => float.DegreesToRadians(GetSpinRate(age)) * MathF.Tau * frameTime;
     }
 
     /// <summary>
@@ -33,10 +59,7 @@ namespace ValveResourceFormat.Renderer.Particles.Operators
         {
             foreach (ref var particle in particles.Current)
             {
-                if (particle.Age < spinRateStopTime)
-                {
-                    particle.SetScalar(ParticleField.Roll, particle.Rotation.Z + spinRateDegrees * frameTime);
-                }
+                particle.SetScalar(ParticleField.Roll, particle.Rotation.Z + GetSpinDelta(particle.Age, frameTime));
             }
         }
     }
@@ -56,10 +79,7 @@ namespace ValveResourceFormat.Renderer.Particles.Operators
         {
             foreach (ref var particle in particles.Current)
             {
-                if (particle.Age < spinRateStopTime)
-                {
-                    particle.SetScalar(ParticleField.Yaw, particle.Rotation.X + spinRateDegrees * frameTime);
-                }
+                particle.SetScalar(ParticleField.Yaw, particle.Rotation.X + GetSpinDelta(particle.Age, frameTime));
             }
         }
     }

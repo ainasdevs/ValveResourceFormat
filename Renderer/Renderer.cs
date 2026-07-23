@@ -14,6 +14,35 @@ namespace ValveResourceFormat.Renderer;
 public class Renderer
 {
     /// <summary>
+    /// Depth range for a single layer of the scene.
+    /// </summary>
+    /// <param name="Start">The starting depth value from the viewers perspective. Note: 1.0 = closest.</param>
+    /// <param name="End">The ending depth value from the viewers perspective. Note: 0.0 = furthest.</param>
+    public record DepthRange(float Start, float End)
+    {
+        /// <summary>The window-space near value.</summary>
+        public float Near { get; } = End;
+
+        /// <summary>The window-space far value.</summary>
+        public float Far { get; } = Start;
+
+        /// <summary>Applies the depth range to the current render state.</summary>
+        public void Apply()
+        {
+            GL.DepthRange(Near, Far);
+        }
+
+        /// <summary>The main scene.</summary>
+        public static readonly DepthRange Scene = new(0.95f, 0.05f);
+
+        /// <summary>Reserved for the first-person viewmodel, always in front of the main scene.</summary>
+        public static readonly DepthRange Viewmodel = new(1.0f, Scene.Start);
+
+        /// <summary>Reserved for the 3D sky, always behind the main scene.</summary>
+        public static readonly DepthRange Sky = new(Scene.End, 0f);
+    }
+
+    /// <summary>
     /// Total time elapsed since the renderer was started, in seconds.
     /// </summary>
     public float Uptime { get; set; }
@@ -34,9 +63,15 @@ public class Renderer
     public Camera Camera { get; set; }
 
     /// <summary>
-    /// GPU timing queries for profiling render passes.
+    /// Secondary camera used to render the first-person viewmodel layer with its own FOV.
+    /// Synced to <see cref="Camera"/>'s position/orientation each frame; see <see cref="RenderScenesWithView"/>.
     /// </summary>
-    public Timings Timings { get; } = new();
+    public Camera ViewmodelCamera { get; }
+
+    /// <summary>
+    /// Per-frame rendering statistics, including CPU/GPU profiling timings
+    /// </summary>
+    public PerfStats PerfStats { get; } = new();
 
     /// <summary>
     /// The main scene to render.
@@ -91,6 +126,13 @@ public class Renderer
     /// </summary>
     public RenderTexture? ResolvedSceneDepth { get; private set; }
 
+    /// <summary>
+    /// When set, forces <see cref="ResolvedSceneDepth"/> to be refreshed this frame even if no material
+    /// or occlusion pass requests it. Used by overlays (e.g. world-space text) that need the scene depth
+    /// to occlude themselves against geometry. Must be set before <see cref="Render(Scene.RenderContext)"/>.
+    /// </summary>
+    public bool ForceResolveSceneDepth { get; set; }
+
     private readonly Shader[] histogramShaders = new Shader[2];
     private readonly StorageBuffer[] histogramBuffers = new StorageBuffer[2];
 
@@ -127,7 +169,7 @@ public class Renderer
     public bool IsWireframe { get; set; }
 
     /// <summary>
-    /// When <see langword="true"/>, the skybox is included in scene rendering.
+    /// When <see langword="true"/>, the 3D skybox scene is included in scene rendering. Does not affect the 2D skybox.
     /// </summary>
     public bool ShowSkybox { get; set; } = true;
 
@@ -139,7 +181,8 @@ public class Renderer
     {
         RendererContext = rendererContext;
         Postprocess = new(rendererContext);
-        Camera = new Camera(rendererContext);
+        Camera = new Camera(rendererContext.FieldOfView);
+        ViewmodelCamera = new Camera();
         Scene = new Scene(rendererContext);
     }
 
@@ -211,8 +254,6 @@ public class Renderer
         //depthOnlyShaders[(int)DepthOnlyProgram.StaticAlphaTest] = GuiContext.ShaderLoader.LoadShader("vrf.depth_only", ("F_ALPHA_TEST", 1));
         depthOnlyShaders[(int)DepthOnlyProgram.Animated] = Scene.RendererContext.ShaderLoader.LoadShader("vrf.depth_only", ("D_ANIMATED", 1));
         depthOnlyShaders[(int)DepthOnlyProgram.AnimatedEightBones] = Scene.RendererContext.ShaderLoader.LoadShader("vrf.depth_only", ("D_ANIMATED", 1), ("D_EIGHT_BONE_BLENDING", 1));
-
-        depthOnlyShaders[(int)DepthOnlyProgram.OcclusionQueryAABBProxy] = Scene.RendererContext.ShaderLoader.LoadShader("vrf.depth_only_aabb");
 
         histogramShaders[0] = Scene.RendererContext.ShaderLoader.LoadShader("vrf.histogram");
         histogramShaders[1] = Scene.RendererContext.ShaderLoader.LoadShader("vrf.histogram", ("D_HISTOGRAM_MODE", 1));
@@ -452,6 +493,11 @@ public class Renderer
         var isMainFramebuffer = ReferenceEquals(renderContext.Framebuffer, MainFramebuffer);
         var isStandardPass = renderContext.ReplacementShader == null && isMainFramebuffer;
 
+        if (!isStandardPass)
+        {
+            PerfStats.Active.SuspendTriangleCounter();
+        }
+
         var isWireframe = IsWireframe && isStandardPass; // To avoid toggling it mid frame
         var computeFramebufferLuminance = Postprocess.State.ExposureSettings.AutoExposureEnabled;
 
@@ -463,7 +509,30 @@ public class Renderer
             GL.PolygonMode(TriangleFace.FrontAndBack, PolygonMode.Line);
         }
 
-        GL.DepthRange(0.05, 1);
+        using (new GLDebugGroup("Viewmodel Opaque"))
+        {
+            var mainCamera = renderContext.Camera;
+
+            ViewmodelCamera.CopyFrom(mainCamera);
+            ViewmodelCamera.FieldOfView = ComputeViewmodelFov();
+            ViewmodelCamera.CreateProjectionMatrix();
+            ViewmodelCamera.RecalculateMatrices();
+
+            DepthRange.Viewmodel.Apply();
+
+            ViewmodelCamera.SetViewConstants(ViewBuffer.Data);
+            Scene.SetFogConstants(ViewBuffer.Data);
+            ViewBuffer.BindBufferBase();
+            ViewBuffer.Update();
+            Scene.SetSceneBuffers();
+
+            renderContext.Camera = ViewmodelCamera;
+            renderContext.Scene = Scene;
+            Scene.RenderViewmodelOpaqueLayer(renderContext);
+            renderContext.Camera = mainCamera;
+        }
+
+        DepthRange.Scene.Apply();
 
         UpdatePerViewGpuBuffers(Scene, renderContext.Camera, DeltaTime);
         Scene.SetSceneBuffers();
@@ -474,19 +543,15 @@ public class Renderer
             Scene.RenderOpaqueLayer(renderContext, isStandardPass ? depthOnlyShaders : Span<Shader>.Empty);
         }
 
-        if (isStandardPass && Scene.EnableOcclusionQueries)
-        {
-            Scene.RenderOcclusionProxies(renderContext, depthOnlyShaders[(int)DepthOnlyProgram.OcclusionQueryAABBProxy]);
-        }
-
         //using (new GLDebugGroup("Sky Render"))
         {
-            GL.DepthRange(0, 0.05);
+            DepthRange.Sky.Apply();
 
             renderContext.ReplacementShader?.SetUniform1("isSkybox", 1u);
             var skyboxScene = SkyboxScene;
             var render3DSkybox = ShowSkybox && skyboxScene != null;
             var (copyColor, copyDepth) = (Scene.WantsSceneColor, Scene.WantsSceneDepth);
+            copyDepth |= ForceResolveSceneDepth;
             Postprocess.HasOutlineObjects = Scene.HasOutlineObjects;
 
             if (render3DSkybox)
@@ -550,12 +615,35 @@ public class Renderer
             }
 
             renderContext.ReplacementShader?.SetUniform1("isSkybox", 0u);
-            GL.DepthRange(0.05, 1);
+            DepthRange.Scene.Apply();
         }
 
         using (new GLDebugGroup("Main Scene Translucent Render"))
         {
             RenderTranslucentLayer(Scene, renderContext);
+        }
+
+        using (new GLDebugGroup("Viewmodel Translucent"))
+        {
+            var mainCamera = renderContext.Camera;
+
+            DepthRange.Viewmodel.Apply();
+
+            ViewmodelCamera.SetViewConstants(ViewBuffer.Data);
+            Scene.SetFogConstants(ViewBuffer.Data);
+            ViewBuffer.BindBufferBase();
+            ViewBuffer.Update();
+
+            renderContext.Camera = ViewmodelCamera;
+            Scene.RenderViewmodelTranslucentLayer(renderContext);
+            renderContext.Camera = mainCamera;
+
+            DepthRange.Scene.Apply();
+
+            mainCamera.SetViewConstants(ViewBuffer.Data);
+            Scene.SetFogConstants(ViewBuffer.Data);
+            ViewBuffer.BindBufferBase();
+            ViewBuffer.Update();
         }
 
         if (isWireframe)
@@ -575,6 +663,20 @@ public class Renderer
                 RenderOutlineLayer(renderContext);
             }
         }
+        else
+        {
+            PerfStats.Active.ResumeTriangleCounter();
+        }
+    }
+
+    /// <summary>
+    /// Computes the first-person viewmodel camera's FOV.
+    /// </summary>
+    private float ComputeViewmodelFov()
+    {
+        var fovRatio = RendererContext.FieldOfView / 90f;
+
+        return RendererContext.ViewmodelFieldOfView * fovRatio;
     }
 
     /// <summary>
@@ -603,6 +705,7 @@ public class Renderer
 
         using (new GLDebugGroup("Direct Light Shadows"))
         {
+            PerfStats.Active.Count(Counter.DirectionalShadowMap);
             Scene.RenderOpaqueShadows(renderContext, depthOnlyShaders, Scene.CulledShadowDrawCalls);
         }
     }
@@ -616,7 +719,7 @@ public class Renderer
             return;
         }
 
-        if (Scene.LightingInfo.BinnedShadowCasters.Count == 0)
+        if (Scene.LightingInfo.ShadowMapper.ShadowCasters.Count == 0)
         {
             return;
         }
@@ -633,8 +736,7 @@ public class Renderer
 
         BarnLightShadowBuffer.Bind(FramebufferTarget.Framebuffer);
 
-        var atlasSize = ShadowTextureSize;
-        Scene.LightingInfo.BarnLightShadowAtlasSize = atlasSize;
+        var atlasSize = Scene.LightingInfo.BarnLightShadowAtlasSize;
 
         if (BarnLightShadowBuffer.Resize(atlasSize, atlasSize))
         {
@@ -648,7 +750,7 @@ public class Renderer
         GL.Scissor(0, 0, BarnLightShadowBuffer.Width, BarnLightShadowBuffer.Height);
         GL.Clear(ClearBufferMask.DepthBufferBit);
 
-        foreach (var caster in Scene.LightingInfo.BinnedShadowCasters)
+        foreach (var caster in Scene.LightingInfo.ShadowMapper.ShadowCasters)
         {
             var region = caster.Region;
 
@@ -656,6 +758,8 @@ public class Renderer
             {
                 continue;
             }
+
+            PerfStats.Active.Count(Counter.BarnShadowMap);
 
             GL.Viewport(region.X, region.Y, region.Width, region.Height);
             GL.Scissor(region.X, region.Y, region.Width, region.Height);
@@ -811,7 +915,7 @@ public class Renderer
         ViewBuffer?.Dispose();
         Scene?.Dispose();
         SkyboxScene?.Dispose();
-        Timings?.Dispose();
+        PerfStats?.Dispose();
         ResolvedSceneColor?.Delete();
         ResolvedSceneDepth?.Delete();
     }
@@ -841,12 +945,7 @@ public class Renderer
 
         if (ViewBuffer.Data.ExperimentalLightsEnabled)
         {
-            Scene.LightingInfo.BinBarnLights(Camera.ViewFrustum, Camera.Location);
-        }
-
-        if (LockedCullFrustum == null)
-        {
-            Scene.GetOcclusionTestResults();
+            Scene.LightingInfo.BinBarnLights(Camera, ShadowTextureSize);
         }
 
         if (Scene is { EnablePvsCulling: true, VoxelVisibility: not null })

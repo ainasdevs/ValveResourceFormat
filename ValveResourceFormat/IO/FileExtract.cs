@@ -42,10 +42,16 @@ namespace ValveResourceFormat.IO
         /// <summary>
         /// Additional extracted resources. E.g. for a vmat, this would be the vtex files.
         /// You will want to extract the files if data is non null, and also their respective subfiles.
-        /// You might want to ignore further extracts on these files—especially lone extracts,
+        /// You might want to ignore further extracts on these files, especially lone extracts,
         /// since this is most likely their most optimal extract context.
         /// </summary>
         public List<ContentFile> AdditionalFiles { get; init; } = [];
+
+        /// <summary>
+        /// When true, writers place this file (and its subfiles) at its full <see cref="FileName"/> relative
+        /// to the output root instead of next to the parent content file.
+        /// </summary>
+        public bool KeepFullPath { get; set; }
 
         /// <summary>
         /// Gets a value indicating whether this instance has been disposed.
@@ -173,7 +179,7 @@ namespace ValveResourceFormat.IO
                     break;
 
                 case ResourceType.Model:
-                    contentFile = new ModelExtract(resource, fileLoader).ToContentFile();
+                    contentFile = new ModelExtract(resource, fileLoader) { ProgressReporter = progress }.ToContentFile();
                     break;
 
                 case ResourceType.AnimationGraph:
@@ -202,6 +208,16 @@ namespace ValveResourceFormat.IO
                         using var soundStream = soundData.GetSoundStream();
                         soundStream.TryGetBuffer(out var buffer);
                         contentFile.Data = [.. buffer];
+
+                        // Lip-sync phoneme data; the compiler bakes this back in when the txt sits next to the source sound.
+                        if (soundData.Sentence != null)
+                        {
+                            contentFile.AdditionalFiles.Add(new ContentFile
+                            {
+                                FileName = Path.ChangeExtension(resource.FileName, "txt") ?? "exported.txt",
+                                Data = Encoding.UTF8.GetBytes(soundData.Sentence.ToValveSentence())
+                            });
+                        }
 
                         // TODO: Refactor this into a SoundExtract?
                         if (resource.GetBlockByType(BlockType.CTRL) is BinaryKV3 ctrlData)

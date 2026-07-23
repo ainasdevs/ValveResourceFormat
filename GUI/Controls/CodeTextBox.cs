@@ -10,17 +10,6 @@ namespace GUI.Controls
 {
     internal partial class CodeTextBox : FastColoredTextBox
     {
-        internal enum HighlightLanguage
-        {
-            Default = -1,
-            None,
-            KeyValues,
-            XML,
-            JS,
-            CSS,
-            Shaders,
-        }
-
         private string? LazyText;
 
         public static Font GetMonospaceFont()
@@ -353,7 +342,7 @@ namespace GUI.Controls
             }
 
             // Roughly tracks the VS Code Dark+/Light+ palettes. Several KVTokenType values
-            // map to the same Style — e.g. all four brace/bracket variants share one entry.
+            // map to the same Style; e.g. all four brace/bracket variants share one entry.
             private static Style?[] BuildPalette(bool dark)
             {
                 var p = new Style?[(int)KVTokenType.BinaryBlob + 1];

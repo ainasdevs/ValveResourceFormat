@@ -18,7 +18,7 @@ using Resource = ValveResourceFormat.Resource;
 namespace GUI.Types.GLViewers
 {
     /// <summary>
-    /// GL Render control with material controls (render modes maybe at some point?).
+    /// GL Render control with material controls and render mode selection.
     /// </summary>
     class GLMaterialViewer : GLSingleNodeViewer
     {
@@ -732,7 +732,7 @@ namespace GUI.Types.GLViewers
 
             if (Tabs == null || vcsShader == null)
             {
-                // todo: open in new tab when we're in preivew
+                // todo: open in new tab when we're in preview
                 return;
             }
 

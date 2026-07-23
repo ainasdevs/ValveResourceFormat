@@ -1,5 +1,4 @@
 using System.IO;
-using System.Windows.Forms;
 using ValveKeyValue;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer.Utils;
@@ -11,7 +10,7 @@ namespace GUI.Utils
     /// </summary>
     static class Settings
     {
-        private const int SettingsFileCurrentVersion = 14;
+        private const int SettingsFileCurrentVersion = 16;
         private const int RecentFilesLimit = 20;
 
         /// <summary>
@@ -66,8 +65,12 @@ namespace GUI.Utils
             public int ShadowResolution { get; set; }
             /// <summary>Gets or sets the camera field of view in degrees.</summary>
             public float FieldOfView { get; set; }
+            /// <summary>Gets or sets the first-person viewmodel field of view in degrees.</summary>
+            public float ViewmodelFieldOfView { get; set; }
             /// <summary>Gets or sets the mouse look sensitivity.</summary>
             public float MouseSensitivity { get; set; }
+            /// <summary>Gets or sets whether the viewport camera should have acceleration/deceleration when starting or stopping to move</summary>
+            public bool SmoothCameraEnabled { get; set; }
             /// <summary>Gets or sets the number of MSAA samples used for anti-aliasing.</summary>
             public int AntiAliasingSamples { get; set; }
             /// <summary>Gets or sets the top edge position of the main window.</summary>
@@ -94,7 +97,7 @@ namespace GUI.Utils
             public int TextViewerFontSize { get; set; }
             /// <summary>Gets or sets whether the package file list uses grid view (1) or list view (0).</summary>
             public int PackageGridView { get; set; }
-            /// <summary>Gets or sets the grid thumbnail size index (0–4, mapping to ThumbnailSizes enum).</summary>
+            /// <summary>Gets or sets the grid thumbnail size index (0-4, mapping to <see cref="GUI.Types.PackageViewer.ThumbnailRenderers.ThumbnailSizes"/> enum).</summary>
             public int PackageGridSize { get; set; }
             /// <summary>Internal settings file version used to apply migrations when upgrading from older versions. Do not modify manually.</summary>
             public int _VERSION_DO_NOT_MODIFY { get; set; }
@@ -108,7 +111,7 @@ namespace GUI.Utils
         public static string SettingsFolder { get; private set; } = string.Empty;
         private static string SettingsFilePath = string.Empty;
 
-        /// <summary>Gets or sets the active application configuration.</summary>
+        /// <summary>Gets the active application configuration.</summary>
         public static AppConfig Config { get; private set; } = new AppConfig();
 
         /// <summary>Raised when <see cref="AppConfig.SavedCameras"/> is mutated, signaling subscribers to refresh their camera lists.</summary>
@@ -158,14 +161,16 @@ namespace GUI.Utils
 
             if (currentVersion > SettingsFileCurrentVersion)
             {
-                var result = MessageBox.Show(
+                // Blocking on the task is only safe here because this runs at startup before
+                // the UI exists, when we switch to pangui, this will need to be correctly awaited
+                // to not block the UI thread
+                var continueAnyway = AppMessageDialogs.ConfirmAsync(
                     $"Your current settings.vdf has a higher version ({currentVersion}) than currently supported ({SettingsFileCurrentVersion}). You likely ran an older version of Source 2 Viewer and your settings may get reset.\n\nDo you want to continue?",
                     "Source 2 Viewer downgraded",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question
-                );
+                    buttons: ConfirmButtons.YesNo
+                ).GetAwaiter().GetResult();
 
-                if (result != DialogResult.Yes)
+                if (!continueAnyway)
                 {
                     Environment.Exit(1);
                     return;
@@ -206,14 +211,16 @@ namespace GUI.Utils
                 Config.ShadowResolution = 4096;
             }
 
-            if (Config.FieldOfView <= 0)
+            // upgrade fov
+            if (currentVersion > 0 && currentVersion < 16)
             {
-                Config.FieldOfView = 60;
+                var oldVerticalRadians = float.DegreesToRadians(Config.FieldOfView);
+                var horizontalAt4By3Radians = 2f * MathF.Atan(MathF.Tan(oldVerticalRadians * 0.5f) * (4f / 3f));
+                Config.FieldOfView = float.RadiansToDegrees(horizontalAt4By3Radians);
             }
-            else if (Config.FieldOfView > 170)
-            {
-                Config.FieldOfView = 170;
-            }
+
+            Config.FieldOfView = Math.Clamp(Config.FieldOfView, 1, 170);
+            Config.ViewmodelFieldOfView = Math.Clamp(Config.ViewmodelFieldOfView, 40, 80);
 
             Config.AntiAliasingSamples = Math.Clamp(Config.AntiAliasingSamples, 0, 64);
             Config.Volume = MathUtils.Saturate(Config.Volume);
@@ -271,15 +278,25 @@ namespace GUI.Utils
                 Config.MouseSensitivity = 4f;
             }
 
+            if (currentVersion < 15) // version 15: added smooth camera setting
+            {
+                Config.SmoothCameraEnabled = true;
+            }
+
+            if (currentVersion < 16) // version 16: added viewmodel field of view
+            {
+                Config.ViewmodelFieldOfView = 64;
+            }
+
             if (currentVersion > 0 && currentVersion != SettingsFileCurrentVersion)
             {
                 Log.Info(nameof(Settings), $"Settings version changed: {currentVersion} -> {SettingsFileCurrentVersion}");
             }
 
             // If the version changed, force an update check (if enabled)
-            if (Config.Update.Version != Application.ProductVersion)
+            if (Config.Update.Version != Program.ProductVersion)
             {
-                Config.Update.Version = Application.ProductVersion;
+                Config.Update.Version = Program.ProductVersion;
                 Config.Update.UpdateAvailable = false;
                 Config.Update.LastCheck = string.Empty;
             }
@@ -303,8 +320,8 @@ namespace GUI.Utils
         }
 
         /// <summary>
-        /// Adds <paramref name="path"/> to the top of the recent files list, removing any duplicate
-        /// entry, trimming the list to <see cref="RecentFilesLimit"/>, then saves.
+        /// Appends <paramref name="path"/> to the end of the recent files list (most recent last),
+        /// removing any duplicate entry, trimming the oldest entries to <see cref="RecentFilesLimit"/>, then saves.
         /// </summary>
         /// <param name="path">The absolute file path to record as recently opened.</param>
         public static void TrackRecentFile(string path)

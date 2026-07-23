@@ -18,11 +18,11 @@ namespace ValveResourceFormat.ResourceTypes
         public class Entity : KVObject
         {
             /// <summary>
-            /// Gets or sets the entity connections (inputs/outputs).
+            /// Gets the entity connections (outputs that fire inputs on other entities, part of the entity I/O system).
             /// </summary>
             public List<KVObject>? Connections { get; internal set; }
             /// <summary>
-            /// Gets or initializes the parent entity lump that contains this entity.
+            /// Gets the parent entity lump that contains this entity.
             /// </summary>
             public required EntityLump ParentLump { get; init; }
 
@@ -222,7 +222,7 @@ namespace ValveResourceFormat.ResourceTypes
                     EntityFieldType.Integer => (long)dataReader.ReadInt32(),
                     EntityFieldType.UInt => (ulong)dataReader.ReadUInt32(),
                     EntityFieldType.Integer64 => dataReader.ReadUInt64(), // Is this supposed to be ReadInt64?
-                    EntityFieldType.Vector or EntityFieldType.QAngle => (KVObject)$"{dataReader.ReadSingle()} {dataReader.ReadSingle()} {dataReader.ReadSingle()}",
+                    EntityFieldType.Vector or EntityFieldType.QAngle => (KVObject)string.Create(CultureInfo.InvariantCulture, $"{dataReader.ReadSingle()} {dataReader.ReadSingle()} {dataReader.ReadSingle()}"),
                     EntityFieldType.CString => dataReader.ReadNullTermString(Encoding.UTF8),
                     _ => throw new UnexpectedMagicException("Unknown type", (int)type, nameof(type)),
                 };

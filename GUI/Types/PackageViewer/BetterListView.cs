@@ -30,6 +30,18 @@ namespace GUI.Types.PackageViewer
 
         protected override void WndProc(ref Message m)
         {
+            const int WM_LBUTTONDOWN = 0x0201;
+
+            // On Shift+click, range-select from the anchor in reading order instead of the native 2D region.
+            if (m.Msg == WM_LBUTTONDOWN
+                && (ModifierKeys & (Keys.Shift | Keys.Control)) == Keys.Shift
+                && FocusedItem != null
+                && HitTest(PointToClient(Cursor.Position)).Item is { } clicked)
+            {
+                SelectIndexRange(FocusedItem.Index, clicked.Index);
+                return;
+            }
+
             base.WndProc(ref m);
             if (m.Msg == PInvoke.WM_VSCROLL)
             {
@@ -43,6 +55,27 @@ namespace GUI.Types.PackageViewer
                     ScrollEventType.EndScroll,
                     0 // no idea how to get scroll pos
                 ));
+            }
+        }
+
+        private void SelectIndexRange(int a, int b)
+        {
+            var min = Math.Min(a, b);
+            var max = Math.Max(a, b);
+
+            BeginUpdate();
+            try
+            {
+                SelectedIndices.Clear();
+
+                for (var i = min; i <= max; i++)
+                {
+                    SelectedIndices.Add(i);
+                }
+            }
+            finally
+            {
+                EndUpdate();
             }
         }
 
@@ -151,12 +184,12 @@ namespace GUI.Types.PackageViewer
             {
                 var iconName = sorter.Order == SortOrder.Ascending ? "SortUp" : "SortDown";
 
-                var icon = MainForm.Icons[iconName];
-                var size = MainForm.ImageList.ImageSize;
+                var icon = AppIcons.Icons[iconName];
+                var size = AppIcons.ImageList.ImageSize;
                 var x = e.Bounds.Right - size.Width - this.AdjustForDPI(4);
                 var y = e.Bounds.Top + (e.Bounds.Height - size.Height) / 2;
 
-                MainForm.ImageList.Draw(e.Graphics, x, y, size.Width, size.Height, icon);
+                AppIcons.ImageList.Draw(e.Graphics, x, y, size.Width, size.Height, icon);
             }
         }
     }

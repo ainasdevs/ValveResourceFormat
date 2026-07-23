@@ -32,7 +32,7 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets the number of mip levels.</summary>
         public int NumMipLevels { get; private set; }
 
-        /// <summary>Gets or sets the average color reflectivity used for environment lighting calculations.</summary>
+        /// <summary>Gets the average color reflectivity used for environment lighting calculations.</summary>
         public Vector4 Reflectivity { get; internal set; }
 
         RenderTexture(TextureTarget target)
@@ -79,11 +79,11 @@ namespace ValveResourceFormat.Renderer
             Target = target;
         }
 
-        /// <summary>Creates a 2D texture with immutable storage, optionally generating a full mip chain.</summary>
+        /// <summary>Creates a 2D texture with immutable storage, optionally allocating a reduced mip chain sized by <see cref="MaxMipCount"/>.</summary>
         /// <param name="width">Texture width in texels.</param>
         /// <param name="height">Texture height in texels.</param>
         /// <param name="format">Internal pixel format.</param>
-        /// <param name="mips">When <see langword="true"/>, allocates a full mip chain.</param>
+        /// <param name="mips">When <see langword="true"/>, allocates a reduced mip chain (see <see cref="MaxMipCount"/>) rather than a single level.</param>
         /// <returns>The newly created render texture.</returns>
         public static RenderTexture Create(int width, int height, SizedInternalFormat format = SizedInternalFormat.Rgba8, bool mips = false)
         {

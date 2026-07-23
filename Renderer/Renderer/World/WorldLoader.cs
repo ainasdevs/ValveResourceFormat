@@ -11,6 +11,7 @@ using ValveResourceFormat.NavMesh;
 using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.Renderer.SceneNodes;
 using ValveResourceFormat.ResourceTypes;
+using ValveResourceFormat.ResourceTypes.GenericData.CS2;
 using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.ResourceTypes.EntityLump;
 using WorldResource = ValveResourceFormat.ResourceTypes.World;
@@ -50,6 +51,8 @@ namespace ValveResourceFormat.Renderer.World
         public SceneSkybox2D? Skybox2D { get; set; }
         /// <summary>The loaded navigation mesh, populated by <see cref="LoadNavigationMesh"/>.</summary>
         public NavMeshFile? NavMesh { get; set; }
+        /// <summary>Baked bomb damage data for CS2, null if it doesn't exist. Populated by <see cref="LoadBombDamageData"/>.</summary>
+        public BombDamage? BombDamage { get; set; }
 
         /// <summary>Translation offset applied to the world, used when compositing multiple maps.</summary>
         public Vector3 WorldOffset { get; set; } = Vector3.Zero;
@@ -171,12 +174,13 @@ namespace ValveResourceFormat.Renderer.World
         }
 
         /// <summary>
-        /// Loads all world components: lighting, entities, world nodes, physics, and navigation mesh.
+        /// Loads all world components: lighting, entities, world nodes, physics, visibility, bomb damage data, and navigation mesh.
         /// Navigation mesh loading is parallelized with resource preloading when references are provided.
         /// </summary>
         /// <param name="mapResourceReferences">Optional external reference list from the map resource, used to preload assets in parallel.</param>
         public void Load(ResourceExtRefList? mapResourceReferences = null)
         {
+            // Non resource files not covered by ParallelPreloadResources
             var navMeshTask = Task.Run(LoadNavigationMesh);
 
             ParallelPreloadResources(mapResourceReferences);
@@ -185,6 +189,7 @@ namespace ValveResourceFormat.Renderer.World
             LoadWorldNodes();
             LoadWorldPhysics();
             LoadWorldVisibility();
+            LoadBombDamageData();
 
             navMeshTask.Wait();
         }
@@ -217,6 +222,8 @@ namespace ValveResourceFormat.Renderer.World
                 LoadEntitiesFromLump(entityLump, "Entities", Matrix4x4.Identity);
             }
 
+            ResolveAttachmentParenting();
+
             Action<List<SceneLight>> lightEntityStore = (scene.LightingInfo.LightmapVersionNumber, scene.LightingInfo.LightmapGameVersionNumber) switch
             {
                 (6, 0) or (8, 0) or (8, 1) => scene.LightingInfo.StoreLightMappedLights_V1,
@@ -226,6 +233,57 @@ namespace ValveResourceFormat.Renderer.World
             lightEntityStore.Invoke(
                 scene.AllNodes.Where(static n => n is SceneLight).Cast<SceneLight>().ToList()
             );
+        }
+
+        /// <summary>
+        /// Parents entities with a <c>parentname</c> to that parent each frame, snapping onto the
+        /// <c>parentattachmentname</c> attachment (or the bone with that name when no attachment matches)
+        /// when one is given, otherwise following the parent's transform. <c>uselocaloffset</c> is ignored,
+        /// as the engine does here too. Done after all entities are loaded so the parent is registered
+        /// regardless of spawn order.
+        /// </summary>
+        private void ResolveAttachmentParenting()
+        {
+            var modelsByTargetName = new Dictionary<string, ModelSceneNode>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var model in scene.AllNodes.OfType<ModelSceneNode>())
+            {
+                var targetName = model.EntityData?.GetStringProperty("targetname");
+
+                if (targetName != null)
+                {
+                    // first registered wins, matching the previous FirstOrDefault lookup
+                    modelsByTargetName.TryAdd(targetName, model);
+                }
+            }
+
+            foreach (var node in scene.AllNodes)
+            {
+                var parentName = node.EntityData?.GetStringProperty("parentname");
+
+                if (parentName is null || !modelsByTargetName.TryGetValue(parentName, out var parentNode))
+                {
+                    continue;
+                }
+
+                var attachmentName = node.EntityData!.GetStringProperty("parentattachmentname");
+
+                if (attachmentName is null)
+                {
+                    // plain parenting keeps the child where it is, so it only moves if the parent does
+                    parentNode.AttachNodeKeepingTransform(node);
+                    continue;
+                }
+
+                if (!parentNode.HasAttachmentOrBone(attachmentName))
+                {
+                    RendererContext.Logger.LogWarning("Parent {ParentName} has no attachment or bone {AttachmentName} to parent {NodeName} to", parentName, attachmentName, node.Name);
+                    continue;
+                }
+
+                // attachment parenting snaps the child onto the attachment point or bone
+                parentNode.AttachNode(node, attachmentName);
+            }
         }
 
         /// <summary>
@@ -415,34 +473,10 @@ namespace ValveResourceFormat.Renderer.World
             || cls == "point_camera_vertical_fov"
             || cls == "point_camera";
 
-        internal const string ToolEntitiesLayerName = "Tool Entities";
+        internal const string ToolEntitiesLayerName = "Entities (editor only)";
 
-        private void LoadEntitiesFromLump(EntityLump entityLump, string originalLayerName, Matrix4x4 parentTransform)
+        private void LoadEntitiesFromLump(EntityLump entityLump, string originalLayerName, Matrix4x4 rootTransform)
         {
-            var childEntities = entityLump.GetChildEntityNames();
-            var childEntityLumps = new Dictionary<string, EntityLump>(childEntities.Length);
-
-            foreach (var childEntityName in childEntities)
-            {
-                var newResource = RendererContext.FileLoader.LoadFileCompiled(childEntityName);
-
-                if (newResource == null)
-                {
-                    continue;
-                }
-
-                var childLump = (EntityLump?)newResource.DataBlock;
-
-                if (childLump == null)
-                {
-                    continue;
-                }
-
-                var childName = childLump.Name;
-
-                childEntityLumps.Add(childName, childLump);
-            }
-
             static bool IsCubemapOrProbe(string cls)
                 => cls == "env_combined_light_probe_volume"
                 || cls == "env_light_probe_volume"
@@ -452,16 +486,22 @@ namespace ValveResourceFormat.Renderer.World
             static bool IsFog(string cls)
                 => cls is "env_cubemap_fog" or "env_gradient_fog";
 
-            var entities = entityLump.GetEntities().ToList();
-            var entitiesReordered = entities
-                .Select(e => (Entity: e, Classname: e.GetStringProperty("classname")))
+            var traversed = EntityLumpTraversal.EnumerateEntities(
+                entityLump,
+                RendererContext.FileLoader,
+                rootTransform,
+                onMissingChildLump: name => RendererContext.Logger.LogWarning("Failed to find child entity lump with name {EntityLumpName}", name))
+                .ToList();
+
+            var entitiesReordered = traversed
+                .Select(t => (t.Entity, t.ParentTransform, t.FromTemplate, Classname: t.Entity.GetStringProperty("classname")))
                 .Where(x => x.Classname != null)
-                .Select(x => (x.Entity, Classname: x.Classname!))
+                .Select(x => (x.Entity, x.ParentTransform, x.FromTemplate, Classname: x.Classname!))
                 .OrderByDescending(x => IsCubemapOrProbe(x.Classname) || IsFog(x.Classname));
 
-            Entities.AddRange(entities);
+            Entities.AddRange(traversed.Select(t => t.Entity));
 
-            void LoadEntity(string classname, Entity entity)
+            void LoadEntity(string classname, Entity entity, Matrix4x4 parentTransform, bool fromTemplate)
             {
                 if (classname == "worldspawn")
                 {
@@ -476,7 +516,11 @@ namespace ValveResourceFormat.Renderer.World
                     CreateEntityConnectionLines(entity, transformationMatrix.Translation);
                 }
 
-                var layerName = originalLayerName;
+                var layerName = fromTemplate ? "Template Entities" : originalLayerName;
+
+                // group the point_template marker and its spawned children under the same layer
+                var toolEntityLayer = fromTemplate || classname == "point_template" ? "Template Entities" : ToolEntitiesLayerName;
+
                 var disabled = entity.GetBooleanProperty("startdisabled");
 
                 if (!disabled)
@@ -486,7 +530,7 @@ namespace ValveResourceFormat.Renderer.World
 
                 if (disabled && layerName == "Entities")
                 {
-                    layerName = "Disabled Entities";
+                    layerName = "Entities (disabled)";
                 }
 
                 if (classname == "info_world_layer")
@@ -511,19 +555,6 @@ namespace ValveResourceFormat.Renderer.World
                     lightNode.LayerName = layerName;
                     lightNode.Flags |= ObjectTypeFlags.NoShadows;
                     scene.Add(lightNode, true);
-                }
-                else if (classname == "point_template")
-                {
-                    var entityLumpName = entity.GetStringProperty("entitylumpname");
-
-                    if (entityLumpName != null && childEntityLumps.TryGetValue(entityLumpName, out var childLump))
-                    {
-                        LoadEntitiesFromLump(childLump, entityLumpName, transformationMatrix);
-                    }
-                    else
-                    {
-                        RendererContext.Logger.LogWarning("Failed to find child entity lump with name {EntityLumpName}", entityLumpName);
-                    }
                 }
                 else if (classname == "env_sky" || classname == "env_global_light")
                 {
@@ -584,7 +615,7 @@ namespace ValveResourceFormat.Renderer.World
 
                         // Some maps don't have these properties.
                         var useHeightFog = entity.ContainsKey("fogverticalexponent"); // The oldest versions lack these values, so disable it there
-                        var useHeightFog2 = entity.ContainsKey("fogstartheight"); // Robot Repair lack these values, so disable it there
+                        var useHeightFog2 = entity.ContainsKey("fogstartheight"); // Robot Repair lacks these values, so disable it there
                         useHeightFog = entity.GetBooleanProperty("heightfog", useHeightFog); // New in CS2
 
                         // TODO: find the correct behavior under this condition
@@ -767,7 +798,7 @@ namespace ValveResourceFormat.Renderer.World
                     var handShakeString = entity.GetStringProperty("handshake");
                     if (!int.TryParse(handShakeString, out var handShake))
                     {
-                        handShake = 0;
+                        handShake = entity.GetInt32Property("handshake");
                     }
 
                     AABB bounds = default;
@@ -898,6 +929,35 @@ namespace ValveResourceFormat.Renderer.World
                     WorldOffset = positionVector;
                 }
 
+                if (classname is "path_particle_rope" or "path_particle_rope_clientside")
+                {
+                    try
+                    {
+                        if (CableSceneNode.TryCreate(scene, entity, parentTransform, out var cable) && cable != null)
+                        {
+                            // The snapshot positions are already world-space (pathnodes placed by the parent
+                            // transform), so the node keeps an identity transform.
+                            cable.LayerName = "Particles";
+                            cable.EntityData = entity;
+                            scene.Add(cable, true);
+                        }
+                        else
+                        {
+                            RendererContext.Logger.LogWarning("Skipped degenerate path_particle_rope '{Target}' at ({Origin})",
+                                entity.GetStringProperty("targetname"), entity.GetStringProperty("origin"));
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        RendererContext.Logger.LogError(e, "Failed to setup path_particle_rope '{Target}'", entity.GetStringProperty("targetname"));
+                    }
+
+                    // A degenerate or failed cable renders nothing. Never fall through to the
+                    // generic effect_name path: without a runtime snapshot the cable vpcf loads its m_hSnapshot
+                    // editor-preview placeholder and draws a rope at the world origin.
+                    return;
+                }
+
                 if (particle != null)
                 {
                     var particleResource = RendererContext.FileLoader.LoadFileCompiled(particle);
@@ -905,8 +965,6 @@ namespace ValveResourceFormat.Renderer.World
 
                     if (particleSystem != null)
                     {
-                        var origin = new Vector3(positionVector.X, positionVector.Y, positionVector.Z);
-
                         try
                         {
                             ParticleSnapshot? particleSnapshot = null;
@@ -925,7 +983,7 @@ namespace ValveResourceFormat.Renderer.World
                             var particleNode = new ParticleSceneNode(scene, particleSystem, particleSnapshot)
                             {
                                 Name = particle,
-                                Transform = Matrix4x4.CreateTranslation(origin),
+                                Transform = transformationMatrix,
                                 LayerName = "Particles",
                                 EntityData = entity,
                             };
@@ -1043,7 +1101,7 @@ namespace ValveResourceFormat.Renderer.World
 
                 if (model == null)
                 {
-                    CreateDefaultEntity(entity, classname, transformationMatrix, entityFlags);
+                    CreateDefaultEntity(entity, classname, transformationMatrix, entityFlags, toolEntityLayer);
                     return;
                 }
 
@@ -1116,8 +1174,21 @@ namespace ValveResourceFormat.Renderer.World
                         var groups = modelNode.GetMeshGroups();
                         modelNode.SetActiveMeshGroups(groups.Skip((int)body).Take(1));
                     }
+                }
 
+                // Model-referenced particles spawn regardless of meshes; a particle-only model is
+                // still added so its follow attachments get updated (the scene skips parented nodes).
+                var modelParticleNodes = ParticleSceneNode.CreateModelParticles(scene, newModel, modelNode);
+
+                if (modelNode.HasMeshes || modelParticleNodes.Count > 0)
+                {
                     scene.Add(modelNode, true);
+
+                    foreach (var modelParticleNode in modelParticleNodes)
+                    {
+                        modelParticleNode.LayerName = "Particles";
+                        scene.Add(modelParticleNode, true);
+                    }
                 }
 
                 var phys = newModel?.GetEmbeddedPhys();
@@ -1145,18 +1216,18 @@ namespace ValveResourceFormat.Renderer.World
                         scene.Add(physSceneNode, true);
                     }
                 }
-                else if (!modelNode.HasMeshes)
+                else if (!modelNode.HasMeshes && modelParticleNodes.Count == 0)
                 {
-                    // If the loaded model has no meshes and has no physics, fallback to default entity
-                    CreateDefaultEntity(entity, classname, transformationMatrix);
+                    // If the loaded model has no meshes, particles, or physics, fallback to default entity
+                    CreateDefaultEntity(entity, classname, transformationMatrix, layerName: toolEntityLayer);
                 }
             }
 
-            foreach (var (entity, classname) in entitiesReordered)
+            foreach (var (entity, parentTransform, fromTemplate, classname) in entitiesReordered)
             {
                 try
                 {
-                    LoadEntity(classname, entity);
+                    LoadEntity(classname, entity, parentTransform, fromTemplate);
                 }
                 catch (Exception e)
                 {
@@ -1190,7 +1261,7 @@ namespace ValveResourceFormat.Renderer.World
             // Load the skybox map vpk and make it searchable in the file loader
             if (vpkFound.PathOnDisk != null)
             {
-                // TODO: Due to the way gui contexts works, we're preloading the vpk into parent context
+                // TODO: Due to the way gui contexts work, we're preloading the vpk into parent context
                 package = RendererContext.FileLoader.AddPackageToSearch(vpkFound.PathOnDisk);
             }
             else if (vpkFound.PackageEntry != null)
@@ -1250,7 +1321,7 @@ namespace ValveResourceFormat.Renderer.World
 
             foreach (var node in SkyboxScene.AllNodes)
             {
-                if (node.LayerName == "Tool Entities")
+                if (node.LayerName == ToolEntitiesLayerName)
                 {
                     node.Transform *= offsetTransform;
                 }
@@ -1299,7 +1370,34 @@ namespace ValveResourceFormat.Renderer.World
             }
         }
 
-        private void CreateDefaultEntity(Entity entity, string classname, Matrix4x4 transformationMatrix, ObjectTypeFlags flags = ObjectTypeFlags.None)
+        /// <summary>
+        /// Loads CS2 baked bomb damage data for this world. Populates <see cref="BombDamage"/>.
+        /// Skips loading if <see cref="BombDamage"/> is already set.
+        /// </summary>
+        public void LoadBombDamageData()
+        {
+            if (BombDamage is not null)
+            {
+                return;
+            }
+
+            var bombDamagePath = Path.Combine(MapName, "baked_bomb_damage.vdata_c");
+            try
+            {
+                using var bombDamageFile = RendererContext.FileLoader.LoadFile(bombDamagePath);
+                if (bombDamageFile?.DataBlock is BombDamage bombDamage)
+                {
+                    BombDamage = bombDamage;
+                    RendererContext.Logger.LogInformation("Loaded CS2 baked bomb damage data from '{BakedBombDamagePath}'", bombDamagePath);
+                }
+            }
+            catch (Exception e)
+            {
+                RendererContext.Logger.LogError(e, "Couldn't load CS2 baked bomb damage data from '{BakedBombDamagePath}'", bombDamagePath);
+            }
+        }
+
+        private void CreateDefaultEntity(Entity entity, string classname, Matrix4x4 transformationMatrix, ObjectTypeFlags flags = ObjectTypeFlags.None, string layerName = ToolEntitiesLayerName)
         {
             var hammerEntity = HammerEntities.Get(classname);
             string? filename = null;
@@ -1330,7 +1428,7 @@ namespace ValveResourceFormat.Renderer.World
                 var boxNode = new SimpleBoxSceneNode(scene, color, new Vector3(16f))
                 {
                     Transform = rotationMatrix * Matrix4x4.CreateTranslation(positionVector),
-                    LayerName = ToolEntitiesLayerName,
+                    LayerName = layerName,
                     Name = filename,
                     EntityData = entity,
                     Flags = flags,
@@ -1344,7 +1442,7 @@ namespace ValveResourceFormat.Renderer.World
                     : new ModelSceneNode(scene, modelData, null, isWorldPreview: true) { Name = filename };
 
                 modelNode.Transform = transformationMatrix;
-                modelNode.LayerName = ToolEntitiesLayerName;
+                modelNode.LayerName = layerName;
                 modelNode.EntityData = entity;
                 modelNode.Flags |= flags;
 
@@ -1356,7 +1454,7 @@ namespace ValveResourceFormat.Renderer.World
             {
                 var spriteNode = new SpriteSceneNode(scene, RendererContext, resource, transformationMatrix.Translation)
                 {
-                    LayerName = ToolEntitiesLayerName,
+                    LayerName = layerName,
                     Name = filename,
                     EntityData = entity,
                     Flags = flags,
@@ -1410,7 +1508,7 @@ namespace ValveResourceFormat.Renderer.World
 
                     var lineNode = new LineSceneNode(scene, start, end, line.Color, line.Color)
                     {
-                        LayerName = ToolEntitiesLayerName,
+                        LayerName = layerName,
                         Transform = Matrix4x4.CreateTranslation(origin)
                     };
                     scene.Add(lineNode, true);
@@ -1490,7 +1588,7 @@ namespace ValveResourceFormat.Renderer.World
         }
 
         /// <summary>
-        /// Returns the path to the world resource (<c>.vwrld_c</c>) for a given map name.
+        /// Returns the path to the world resource (<c>.vwrld</c>) for a given map name.
         /// </summary>
         /// <param name="mapName">Path to the map, with or without the compiled file suffix.</param>
         public static string GetWorldNameFromMap(string mapName)

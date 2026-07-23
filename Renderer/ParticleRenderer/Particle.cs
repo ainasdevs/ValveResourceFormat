@@ -31,15 +31,21 @@ namespace ValveResourceFormat.Renderer.Particles
         public float AlphaAlternate { get; set; } = 1.0f;
 
         /// <summary>Gets or sets the RGB color of the particle, with each component in the range [0, 1].</summary>
-        public Vector3 Color { get; set; } = Vector3.One; // ??
+        public Vector3 Color { get; set; } = Vector3.One;
         /// <summary>Gets or sets the radius of the particle.</summary>
         public float Radius { get; set; } = 1.0f;
 
-        /// <summary>Gets or sets the trail length multiplier for trail-based renderers.</summary>
-        public float TrailLength { get; set; } = 0f;
+        /// <summary>Gets or sets the trail length multiplier for trail-based renderers. The engine seeds this attribute with 0.1.</summary>
+        public float TrailLength { get; set; } = 0.1f;
 
         /// <summary>
-        /// Gets or sets (Yaw, Pitch, Roll) Euler angles.
+        /// Gets or sets the scale factor applied to forces acting on this particle. 1 = full force,
+        /// 0 = immovable (pinned). Used by movement/force operators to mask or weight forces per particle.
+        /// </summary>
+        public float ForceScale { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Gets or sets (Yaw, Pitch, Roll) Euler angles in radians.
         /// </summary>
         public Vector3 Rotation { get; set; } = Vector3.Zero;
 
@@ -47,6 +53,7 @@ namespace ValveResourceFormat.Renderer.Particles
         /// Gets or sets (Yaw, Pitch, Roll) Euler angles rotation speed.
         /// </summary>
         public Vector3 RotationSpeed { get; set; } = Vector3.Zero;
+
         /// <summary>Gets or sets the current velocity of the particle.</summary>
         public Vector3 Velocity { get; set; } = Vector3.Zero;
 
@@ -58,27 +65,34 @@ namespace ValveResourceFormat.Renderer.Particles
             readonly get => Vector3.Transform(new Vector3(0, 0, 1), GetRotationMatrix());
             set
             {
-                var normal = Vector3.Normalize(value);
-
-                if (normal == Vector3.Zero)
+                if (value == Vector3.Zero)
                 {
                     return;
                 }
 
+                var normal = Vector3.Normalize(value);
+
                 var yaw = MathF.Atan2(normal.X, normal.Z);
-                var pitch = MathF.Asin(Math.Clamp(normal.Y, -1f, 1f));
+                // The getter yields Y = -sin(pitch), so the pitch must be negated here for get/set round trips
+                var pitch = MathF.Asin(-Math.Clamp(normal.Y, -1f, 1f));
                 Rotation = new Vector3(yaw, pitch, Rotation.Z);
             }
         }
 
         /// <summary>Gets the particle's age as a fraction of its lifetime. May exceed 1 if the particle outlives its lifetime.</summary>
         public readonly float NormalizedAge => Age / Math.Max(0.0001f, Lifetime); //Old version: 1 - (Lifetime / ConstantLifetime);
-        /// <summary>Gets or sets the scalar speed of the particle, adjusting velocity direction when set.</summary>
+        /// <summary>Gets or sets the scalar speed (magnitude) of the particle; setting it rescales the velocity to the new length while preserving its direction.</summary>
         public float Speed
         {
             readonly get => Velocity.Length();
             set => Velocity = Vector3.Normalize(Velocity) * value;
         }
+        /// <summary>
+        /// Gets or sets the acceleration accumulated by force generators this frame; consumed and
+        /// cleared by <see cref="Operators.BasicMovement"/>.
+        /// </summary>
+        public Vector3 ForceAccumulator { get; set; } = Vector3.Zero;
+
         /// <summary>Gets or sets the sprite sheet sequence number.</summary>
         public int Sequence { get; set; } = 0;
 
@@ -121,15 +135,17 @@ namespace ValveResourceFormat.Renderer.Particles
             {
                 var vectorValues = parse.Data.GetIntegerArray("m_ConstantColor");
                 Color = new Vector3(vectorValues[0], vectorValues[1], vectorValues[2]) / 255f;
-                Alpha = vectorValues[3] / 255f; // presumably
+                Alpha = vectorValues[3] / 255f;
             }
 
             Radius = parse.Float("m_flConstantRadius", Radius);
             Lifetime = parse.Float("m_flConstantLifespan", Lifetime);
-            Rotation = Rotation with { Z = parse.Float("m_flConstantRotation", Rotation.Z) };
-            Rotation = Rotation with { Z = parse.Float("m_flConstantRotationSpeed", Rotation.Z) };
+            // Rotation fields are stored in radians, but the constants are authored in degrees
+            Rotation = Rotation with { Z = float.DegreesToRadians(parse.Float("m_flConstantRotation", 0f)) };
+            RotationSpeed = RotationSpeed with { Z = float.DegreesToRadians(parse.Float("m_flConstantRotationSpeed", 0f)) };
+            Normal = parse.Vector3("m_ConstantNormal", Normal);
             Sequence = parse.Int32("m_nConstantSequenceNumber", Sequence);
-            Sequence = parse.Int32("m_nConstantSequenceNumber1", Sequence);
+            Sequence2 = parse.Int32("m_nConstantSequenceNumber1", Sequence2);
         }
 
         /// <summary>

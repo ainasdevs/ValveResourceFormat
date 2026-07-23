@@ -93,7 +93,7 @@ namespace ValveResourceFormat.ResourceTypes
             => Data.GetArray<byte>("m_colorCorrectionVolumeData");
 
         /// <summary>
-        /// Gets the RAW data format of the color correction LUT.
+        /// Gets the color correction LUT data converted to RAW format (alpha bytes stripped).
         /// </summary>
         public byte[] GetRAWData()
         {
@@ -201,7 +201,7 @@ namespace ValveResourceFormat.ResourceTypes
                 layers.Add(ccLayer);
             }
 
-            outKV3.Add("layers", layers);
+            outKV3.Add("m_layers", layers);
 
             return outKV3.ToKV3String();
         }

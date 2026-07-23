@@ -103,9 +103,6 @@ namespace ValveResourceFormat.Renderer
             public int AnimationData = -1;
             public int EnvmapTexture = -1;
             public int LPVIrradianceTexture = -1;
-            public int LPVIndicesTexture = -1;
-            public int LPVScalarsTexture = -1;
-            public int LPVShadowsTexture = -1;
             public int Transform = -1;
             public int IsInstancing = -1;
             public int Tint = -1;
@@ -158,6 +155,8 @@ namespace ValveResourceFormat.Renderer
                 IndirectDraw = context.Scene.DrawMeshletsIndirect && context.RenderPass < RenderPass.Opaque,
             };
 
+            var counters = PerfStats.Active;
+
             foreach (var request in requests)
             {
                 if (request.Call == null)
@@ -165,7 +164,11 @@ namespace ValveResourceFormat.Renderer
                     if (context.RenderPass is RenderPass.Opaque or RenderPass.Translucent or RenderPass.Outline)
                     {
                         material?.PostRender();
+
+                        // Custom nodes render themselves and may issue several draws internally; count them as one draw call.
+                        counters.Count(Counter.DrawCall);
                         request.Node.Render(context);
+
                         shader = null;
                         material = null;
                         vao = -1;
@@ -178,6 +181,8 @@ namespace ValveResourceFormat.Renderer
 
                 if (material != requestMaterial)
                 {
+                    counters.Count(Counter.MaterialChange);
+
                     if (context.ReplacementShader?.IgnoreMaterialData != true)
                     {
                         material?.PostRender();
@@ -212,9 +217,6 @@ namespace ValveResourceFormat.Renderer
                         if (shader.Parameters.ContainsKey("D_BAKED_LIGHTING_FROM_PROBE"))
                         {
                             uniforms.LPVIrradianceTexture = shader.GetUniformLocation("g_tLPV_Irradiance");
-                            uniforms.LPVIndicesTexture = shader.GetUniformLocation("g_tLPV_Indices");
-                            uniforms.LPVScalarsTexture = shader.GetUniformLocation("g_tLPV_Scalars");
-                            uniforms.LPVShadowsTexture = shader.GetUniformLocation("g_tLPV_Shadows");
                         }
 
                         if (shader.Name == "vrf.picking")
@@ -287,6 +289,8 @@ namespace ValveResourceFormat.Renderer
             {
                 if (request.Node is SceneAggregate agg && agg.IndirectDrawCount > 0 && agg.CompactionIndex >= 0)
                 {
+                    PerfStats.Active.CountIndirectDraw(agg);
+
                     var scene = agg.Scene;
                     if (scene.CompactMeshletDraws)
                     {
@@ -311,34 +315,10 @@ namespace ValveResourceFormat.Renderer
                 SetInstanceTexture(shader, ReservedTextureSlots.EnvironmentMap, uniforms.EnvmapTexture, envmap.EnvMapTexture);
             }
 
-            if (config.LightProbeType == LightProbeType.IndividualProbes && uniforms.LPVIrradianceTexture != -1)
+            if (config.LightProbeType == LightProbeType.IndividualProbes && uniforms.LPVIrradianceTexture != -1
+                && request.Node.LightProbeBinding is { } lightProbe)
             {
-                if (request.Node.LightProbeBinding is { } lightProbe)
-                {
-                    if (lightProbe.Irradiance != null)
-                    {
-                        SetInstanceTexture(shader, ReservedTextureSlots.Probe1, uniforms.LPVIrradianceTexture, lightProbe.Irradiance);
-                    }
-
-                    if (config.LightmapGameVersionNumber == 1)
-                    {
-                        if (lightProbe.DirectLightIndices != null)
-                        {
-                            SetInstanceTexture(shader, ReservedTextureSlots.Probe2, uniforms.LPVIndicesTexture, lightProbe.DirectLightIndices);
-                        }
-                        if (lightProbe.DirectLightScalars != null)
-                        {
-                            SetInstanceTexture(shader, ReservedTextureSlots.Probe3, uniforms.LPVScalarsTexture, lightProbe.DirectLightScalars);
-                        }
-                    }
-                    else if (request.Node.Scene.LightingInfo.LightmapGameVersionNumber == 2)
-                    {
-                        if (lightProbe.DirectLightShadows != null)
-                        {
-                            SetInstanceTexture(shader, ReservedTextureSlots.Probe2, uniforms.LPVShadowsTexture, lightProbe.DirectLightShadows);
-                        }
-                    }
-                }
+                request.Node.Scene.LightingInfo.SetInstanceLightProbeTextures(shader, lightProbe, instanceBoundTextures);
             }
 
             if (uniforms.AnimationData != -1)
@@ -380,7 +360,10 @@ namespace ValveResourceFormat.Renderer
             if (uniforms.Tint > -1)
             {
                 var instanceTint = (request.Node is SceneAggregate.Fragment fragment) ? fragment.Tint : Vector4.One;
-                var tint = request.Mesh.Tint * request.Call.TintColor * instanceTint;
+
+                // Content can author out-of-range tints (e.g. renderamt above 255 baked into the draw call
+                // alpha); the packed byte color can only represent [0, 1].
+                var tint = Vector4.Clamp(request.Mesh.Tint * request.Call.TintColor * instanceTint, Vector4.Zero, Vector4.One);
 
                 GL.ProgramUniform1((uint)shader.Program, uniforms.Tint, Color32.FromVector4(tint).PackedValue);
             }
@@ -396,6 +379,8 @@ namespace ValveResourceFormat.Renderer
             {
                 GL.ProgramUniform1((uint)shader.Program, uniforms.IsInstancing, instanceCount > 1 ? 1 : 0);
             }
+
+            PerfStats.Active.CountDrawCall(request.Node);
 
             GL.DrawElementsInstancedBaseVertexBaseInstance(
                 request.Call.PrimitiveType,

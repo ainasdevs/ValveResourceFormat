@@ -38,7 +38,29 @@ namespace ValveResourceFormat.Renderer.Utils
         }
 
         /// <summary>
-        /// Swaps min and max if min > max.
+        /// Remaps a value from one range to another, holding the output at the range ends
+        /// for inputs outside the input range. Mirrors Source's RemapValClamped.
+        /// </summary>
+        /// <param name="x">Value to remap.</param>
+        /// <param name="inputMin">Input range minimum.</param>
+        /// <param name="inputMax">Input range maximum.</param>
+        /// <param name="outputMin">Output range minimum.</param>
+        /// <param name="outputMax">Output range maximum.</param>
+        /// <returns>Value remapped to the output range, clamped to it.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static float RemapValClamped(float x, float inputMin, float inputMax, float outputMin, float outputMax)
+        {
+            // Source treats a degenerate input range as a threshold
+            if (inputMin == inputMax)
+            {
+                return x >= inputMax ? outputMax : outputMin;
+            }
+
+            return float.Lerp(outputMin, outputMax, Saturate(Remap(x, inputMin, inputMax)));
+        }
+
+        /// <summary>
+        /// Swaps <paramref name="min"/> and <paramref name="max"/> if <paramref name="min"/> > <paramref name="max"/>.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void MinMaxFixUp<T>(ref T min, ref T max) where T : INumber<T>
@@ -62,10 +84,10 @@ namespace ValveResourceFormat.Renderer.Utils
         /// Returns the fractional part of a value (x - floor(x)).
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static float Fract(float x) => x % 1f;
+        public static float Fract(float x) => x - MathF.Floor(x);
 
         /// <summary>
-        /// Wraps a value into the half-open range [lowBounds, highBounds).
+        /// Wraps a value into the half-open range [<paramref name="lowBounds"/>, <paramref name="highBounds"/>).
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float Wrap(float x, float lowBounds, float highBounds)
@@ -88,6 +110,18 @@ namespace ValveResourceFormat.Renderer.Utils
             var shortestPath = 2.0f * diff % MathF.Tau - diff;
 
             return from + shortestPath * amount;
+        }
+
+        /// <summary>
+        /// Evaluates a cubic Bezier curve at <paramref name="t"/> in [0, 1].
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Vector3 CubicBezier(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
+        {
+            var u = 1.0f - t;
+            var uu = u * u;
+            var tt = t * t;
+            return (uu * u * p0) + (3.0f * uu * t * p1) + (3.0f * u * tt * p2) + (tt * t * p3);
         }
     }
 }

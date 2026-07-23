@@ -1,5 +1,3 @@
-using OpenTK.Graphics.OpenGL;
-
 namespace ValveResourceFormat.Renderer
 {
     /// <summary>
@@ -35,26 +33,6 @@ namespace ValveResourceFormat.Renderer
             /// Gets the eight child octree nodes created after subdivision.
             /// </summary>
             public Node[] Children { get; private set; } = [];
-
-            /// <summary>
-            /// Gets or sets whether this node is outside the view frustum.
-            /// </summary>
-            public bool FrustumCulled { get; set; }
-
-            /// <summary>
-            /// Gets or sets the OpenGL occlusion query handle for this node.
-            /// </summary>
-            public int OcclusionQueryHandle { get; set; } = -1;
-
-            /// <summary>
-            /// Gets or sets whether an occlusion query has been submitted for this node.
-            /// </summary>
-            public bool OcclusionQuerySubmitted { get; set; }
-
-            /// <summary>
-            /// Gets or sets whether this node is occluded by other geometry.
-            /// </summary>
-            public bool OcclusionCulled { get; set; }
 
             /// <summary>
             /// Splits this node into eight child nodes and redistributes elements.
@@ -144,6 +122,12 @@ namespace ValveResourceFormat.Renderer
             /// </remarks>
             public void Insert(SceneNode element)
             {
+                if ((element.Flags & ObjectTypeFlags.DisableVisCulling) != 0)
+                {
+                    InsertIntoRoot(element);
+                    return;
+                }
+
                 if (!HasChildren && HasElements && ShouldSubdivide(Region.Size.X, Elements!.Count))
                 {
                     Subdivide();
@@ -179,6 +163,11 @@ namespace ValveResourceFormat.Renderer
                     return;
                 }
 
+                InsertIntoRoot(element);
+            }
+
+            private void InsertIntoRoot(SceneNode element)
+            {
                 if (Elements == null)
                 {
                     Elements = [element];
@@ -236,7 +225,7 @@ namespace ValveResourceFormat.Renderer
             }
 
             /// <summary>
-            /// Clears all elements and children from this node and releases OpenGL resources.
+            /// Clears all elements and children from this node.
             /// </summary>
             public void Clear()
             {
@@ -247,16 +236,6 @@ namespace ValveResourceFormat.Renderer
 
                 Elements = null;
                 Children = [];
-
-                if (OcclusionQueryHandle != -1)
-                {
-                    GL.DeleteQuery(OcclusionQueryHandle);
-                    OcclusionQueryHandle = -1;
-                }
-
-                FrustumCulled = false;
-                OcclusionQuerySubmitted = false;
-                OcclusionCulled = false;
             }
 
             /// <summary>
@@ -294,48 +273,13 @@ namespace ValveResourceFormat.Renderer
             /// </summary>
             /// <param name="frustum">View frustum to test against.</param>
             /// <param name="results">List to populate with visible scene nodes.</param>
-            /// <remarks>
-            /// Performs frustum and occlusion culling during traversal.
-            /// </remarks>
             public void Query(Frustum frustum, List<SceneNode> results)
             {
                 if (HasElements)
                 {
                     foreach (var element in Elements!)
                     {
-                        if (frustum.Intersects(element.BoundingBox))
-                        {
-                            results.Add(element);
-                        }
-                    }
-                }
-
-                if (HasChildren)
-                {
-                    foreach (var child in Children)
-                    {
-                        child.FrustumCulled = !frustum.Intersects(child.Region);
-
-                        if (child.FrustumCulled || child.OcclusionCulled)
-                        {
-                            continue;
-                        }
-
-                        child.Query(frustum, results);
-                    }
-                }
-            }
-
-            /// <summary>Queries scene nodes visible within the specified view frustum, ignoring occlusion culling results.</summary>
-            /// <param name="frustum">View frustum to test against.</param>
-            /// <param name="results">List to populate with visible scene nodes.</param>
-            public void QueryNoOcclusion(Frustum frustum, List<SceneNode> results)
-            {
-                if (HasElements)
-                {
-                    foreach (var element in Elements!)
-                    {
-                        if (frustum.Intersects(element.BoundingBox))
+                        if (frustum.Intersects(element.BoundingBox) || (element.Flags & ObjectTypeFlags.DisableVisCulling) != 0)
                         {
                             results.Add(element);
                         }
@@ -348,7 +292,7 @@ namespace ValveResourceFormat.Renderer
                     {
                         if (frustum.Intersects(child.Region))
                         {
-                            child.QueryNoOcclusion(frustum, results);
+                            child.Query(frustum, results);
                         }
                     }
                 }
@@ -456,6 +400,11 @@ namespace ValveResourceFormat.Renderer
         public void Update(SceneNode obj, in AABB oldBounds)
         {
             ArgumentNullException.ThrowIfNull(obj);
+
+            if ((obj.Flags & ObjectTypeFlags.DisableVisCulling) != 0)
+            {
+                return;
+            }
 
             var (node, index) = Root.Find(obj, oldBounds);
             if (node is { Elements: not null })

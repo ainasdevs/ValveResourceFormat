@@ -64,7 +64,7 @@ namespace GUI.Types.Viewers
 
             var infoPage = new ThemedTabPage("NAV INFO");
             var infoText = navMeshFile.ToString();
-            var infoTextControl = CodeTextBox.Create(infoText, CodeTextBox.HighlightLanguage.None);
+            var infoTextControl = CodeTextBox.Create(infoText, HighlightLanguage.None);
             infoPage.Controls.Add(infoTextControl);
             tabControl.Controls.Add(infoPage);
 
@@ -93,6 +93,8 @@ namespace GUI.Types.Viewers
             }
         }
 
+        public void NotifyVisible() => glViewer?.NotifyVisible();
+
         public void Dispose()
         {
             glViewer?.Dispose();
@@ -103,7 +105,7 @@ namespace GUI.Types.Viewers
             var kvPage = new ThemedTabPage(tabName);
 
             var kvText = kvDocument.ToKV3String();
-            var kvTextControl = CodeTextBox.Create(kvText, CodeTextBox.HighlightLanguage.None);
+            var kvTextControl = CodeTextBox.Create(kvText, HighlightLanguage.None);
 
             kvPage.Controls.Add(kvTextControl);
             return kvPage;

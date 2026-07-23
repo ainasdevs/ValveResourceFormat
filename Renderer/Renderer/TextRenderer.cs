@@ -17,10 +17,11 @@ namespace ValveResourceFormat.Renderer
         [StructLayout(LayoutKind.Sequential)]
         struct Vertex
         {
-            public const int Size = 5;
+            public const int Size = 6;
 
             public Vector2 Position;
             public Vector2 TexCoord;
+            public float Depth;
             public Color32 Color;
         }
 
@@ -37,6 +38,11 @@ namespace ValveResourceFormat.Renderer
 
             /// <summary>Gets or sets the text scale in pixels-per-em.</summary>
             public float Scale { get; set; }
+
+            /// <summary>
+            /// Gets or sets the window space depth to use for depth masking.
+            /// </summary>
+            public float SceneDepth { get; set; } = -1f;
 
             /// <summary>Gets the text color.</summary>
             public Color32 Color { get; init; } = Color32.White;
@@ -86,10 +92,12 @@ namespace ValveResourceFormat.Renderer
             GL.TextureSubImage2D(fontTexture.Handle, 0, 0, 0, bitmap.Width, bitmap.Height, PixelFormat.Bgra, PixelType.UnsignedByte, bitmap.GetPixels());
 
             // Create VAO
+            // Order matters: the offset is accumulated in sequence and must match the Vertex struct layout.
             var attributes = new List<(string Name, int Size, VertexAttribType Type, bool Normalized)>
             {
                 ("vPOSITION", 2, VertexAttribType.Float, false),
                 ("vTEXCOORD", 2, VertexAttribType.Float, false),
+                ("vDEPTH", 1, VertexAttribType.Float, false),
                 ("vCOLOR", 4, VertexAttribType.UnsignedByte, true),
             };
 
@@ -123,7 +131,8 @@ namespace ValveResourceFormat.Renderer
         /// <param name="textRenderRequest">Text rendering parameters.</param>
         /// <param name="camera">Camera used for the projection.</param>
         /// <param name="fixedScale">When <see langword="true"/>, the scale is unchanged; when <see langword="false"/>, the scale is attenuated by depth.</param>
-        public void AddTextBillboard(Vector3 position, TextRenderRequest textRenderRequest, Camera camera, bool fixedScale = true)
+        /// <param name="depthMask">When <see langword="true"/>, the text is occluded by scene geometry using the resolved scene depth texture.</param>
+        public void AddTextBillboard(Vector3 position, TextRenderRequest textRenderRequest, Camera camera, bool fixedScale = true, bool depthMask = false)
         {
             var screenPosition = Vector4.Transform(new Vector4(position, 1.0f), camera.ViewProjectionMatrix);
             screenPosition /= screenPosition.W;
@@ -136,6 +145,11 @@ namespace ValveResourceFormat.Renderer
             textRenderRequest.X = 0.5f * (screenPosition.X + 1.0f) * camera.WindowSize.X;
             textRenderRequest.Y = 0.5f * (1.0f - screenPosition.Y) * camera.WindowSize.Y;
 
+            if (depthMask)
+            {
+                textRenderRequest.SceneDepth = 0.05f + 0.95f * screenPosition.Z;
+            }
+
             if (!fixedScale)
             {
                 textRenderRequest.Scale *= screenPosition.Z * 100f;
@@ -144,7 +158,7 @@ namespace ValveResourceFormat.Renderer
             AddText(textRenderRequest);
         }
 
-        /// <summary>Queues text at a viewport-relative position (0–1 range) for rendering.</summary>
+        /// <summary>Queues text at a viewport-relative position (0-1 range) for rendering.</summary>
         /// <param name="text">String to render.</param>
         /// <param name="x">Horizontal position as a fraction of the viewport width.</param>
         /// <param name="y">Vertical position as a fraction of the viewport height.</param>
@@ -165,7 +179,7 @@ namespace ValveResourceFormat.Renderer
             AddTextRelative(req, camera);
         }
 
-        /// <summary>Queues a text render request at a viewport-relative position (0–1 range) for rendering.</summary>
+        /// <summary>Queues a text render request at a viewport-relative position (0-1 range) for rendering.</summary>
         /// <param name="textRenderRequest">Text rendering parameters; <see cref="TextRenderRequest.X"/> and <see cref="TextRenderRequest.Y"/> are treated as fractions of the viewport dimensions.</param>
         /// <param name="camera">Camera providing the viewport dimensions.</param>
         public void AddTextRelative(TextRenderRequest textRenderRequest, Camera camera)
@@ -184,7 +198,11 @@ namespace ValveResourceFormat.Renderer
 
         /// <summary>Flushes all queued text requests to the GPU and renders them for the current frame.</summary>
         /// <param name="camera">Camera providing the viewport dimensions for the orthographic projection.</param>
-        public void Render(Camera camera)
+        /// <param name="sceneDepth">
+        /// Resolved scene depth texture used to occlude world-space text behind geometry. When
+        /// <see langword="null"/>, depth masking is skipped (world-space text always renders on top).
+        /// </param>
+        public void Render(Camera camera, RenderTexture? sceneDepth = null)
         {
             var letters = 0;
             var verticesSize = 0;
@@ -200,6 +218,8 @@ namespace ValveResourceFormat.Renderer
             }
 
             using var _ = new GLDebugGroup("Text Render");
+
+            PerfStats.Active.SuspendTriangleCounter();
 
             verticesSize *= Vertex.Size * 4;
             var vertexBuffer = ArrayPool<float>.Shared.Rent(verticesSize);
@@ -231,6 +251,7 @@ namespace ValveResourceFormat.Renderer
                     var originalX = x;
 
                     var color = textRenderRequest.Color;
+                    var depth = textRenderRequest.SceneDepth;
 
                     for (var j = 0; j < textRenderRequest.Text.Length; j++)
                     {
@@ -283,16 +304,16 @@ namespace ValveResourceFormat.Renderer
                         var to = metrics.AtlasBounds.W / AtlasSize;
 
                         // left bottom
-                        vertices[i++] = new Vertex { Position = new Vector2(x0, y0), TexCoord = new Vector2(le, bo), Color = color };
+                        vertices[i++] = new Vertex { Position = new Vector2(x0, y0), TexCoord = new Vector2(le, bo), Depth = depth, Color = color };
 
                         // left top
-                        vertices[i++] = new Vertex { Position = new Vector2(x0, y1), TexCoord = new Vector2(le, to), Color = color };
+                        vertices[i++] = new Vertex { Position = new Vector2(x0, y1), TexCoord = new Vector2(le, to), Depth = depth, Color = color };
 
                         // right top
-                        vertices[i++] = new Vertex { Position = new Vector2(x1, y1), TexCoord = new Vector2(ri, to), Color = color };
+                        vertices[i++] = new Vertex { Position = new Vector2(x1, y1), TexCoord = new Vector2(ri, to), Depth = depth, Color = color };
 
                         // right bottom
-                        vertices[i++] = new Vertex { Position = new Vector2(x1, y0), TexCoord = new Vector2(ri, bo), Color = color };
+                        vertices[i++] = new Vertex { Position = new Vector2(x1, y0), TexCoord = new Vector2(ri, bo), Depth = depth, Color = color };
 
                         x += metrics.Advance * textRenderRequest.Scale;
                     }
@@ -317,6 +338,12 @@ namespace ValveResourceFormat.Renderer
             shader.Use();
             shader.SetUniform4x4("transform", Matrix4x4.CreateOrthographicOffCenter(0f, camera.WindowSize.X, camera.WindowSize.Y, 0f, -100f, 100f));
             shader.SetTexture(0, "msdf", fontTexture);
+
+            if (sceneDepth != null)
+            {
+                shader.SetTexture(1, "g_tSceneDepth", sceneDepth);
+            }
+
             shader.SetUniform1("g_fRange", TextureRange);
 
             GL.BindVertexArray(vao);
@@ -327,6 +354,8 @@ namespace ValveResourceFormat.Renderer
 
             GL.Disable(EnableCap.Blend);
             GL.Enable(EnableCap.DepthTest);
+
+            PerfStats.Active.ResumeTriangleCounter();
 
             TextRenderRequests.Clear();
         }
