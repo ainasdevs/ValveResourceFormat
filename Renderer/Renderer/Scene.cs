@@ -33,6 +33,9 @@ namespace ValveResourceFormat.Renderer
 
             /// <summary>Gets the elapsed time in seconds since the last update.</summary>
             public required float Timestep { get; init; }
+
+            /// <summary> Gets the renderer's total elapsed time in seconds.</summary>
+            public float Uptime { get; init; }
         }
 
         /// <summary>
@@ -119,6 +122,9 @@ namespace ValveResourceFormat.Renderer
         private Shader? FrustumCullShader;
         private Shader? CompactionShader;
 
+        /// <summary>Gets the tile and depth bin cull passes for this scene.</summary>
+        public LightBinner LightBinner { get; }
+
         private Shader? DepthPyramidShader;
         private Shader? DepthPyramidNpotShader;
         /// <summary>Gets the hierarchical depth pyramid texture used for GPU occlusion culling.</summary>
@@ -163,6 +169,13 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets or sets whether GPU draw compaction is applied after frustum culling to remove empty indirect draw commands.</summary>
         public bool EnableCompaction { get; set; } = true;
 
+        /// <summary>Gets or sets whether lights are binned to screen tiles so shaders iterate only what reaches them.</summary>
+        /// <remarks>
+        /// <see cref="Renderer"/> reads the main scene's copy when driving every binner, so that one also
+        /// governs the 3D skybox. The skybox scene's own copy is never what the viewer toggles.
+        /// </remarks>
+        public bool EnableTiledLightCulling { get; set; } = true;
+
         internal bool DrawMeshletsIndirect { get; private set; }
         internal bool CompactMeshletDraws { get; private set; }
 
@@ -186,6 +199,7 @@ namespace ValveResourceFormat.Renderer
             DynamicOctree = new(sizeHint);
 
             LightingInfo = new(this);
+            LightBinner = new(this);
         }
 
         /// <summary>
@@ -207,6 +221,7 @@ namespace ValveResourceFormat.Renderer
             CompactionShader = RendererContext.ShaderLoader.LoadShader("vrf.compact_indirect_draws");
             DepthPyramidShader = RendererContext.ShaderLoader.LoadShader("vrf.depth_pyramid");
             DepthPyramidNpotShader = RendererContext.ShaderLoader.LoadShader("vrf.depth_pyramid", ("D_NPOT_DOWNSAMPLE", 1));
+            LightBinner.LoadShaders();
 
             EnableIndirectDraws = LightingInfo.LightingData.IsSkybox == 0u;
 
@@ -374,12 +389,6 @@ namespace ValveResourceFormat.Renderer
                 node.Update(updateContext);
             }
 
-            if (StaticOctree.Dirty)
-            {
-                // we disabled or enabled some static node
-                CreateIndirectDrawBuffers(true);
-            }
-
             foreach (var node in dynamicNodes)
             {
                 if (node.Parent != null)
@@ -398,9 +407,18 @@ namespace ValveResourceFormat.Renderer
 
             if (StaticOctree.Dirty || DynamicOctree.Dirty)
             {
+                // Indirect draw commands bake node ids, so recreate them only after reindexing
+                var staticDirty = StaticOctree.Dirty;
+
                 UpdateOctrees();
                 UpdateNodeIndices();
                 CreateInstanceTransformBuffers(deletePrevious: true);
+
+                if (staticDirty)
+                {
+                    // a static node was disabled, enabled, added, or removed
+                    CreateIndirectDrawBuffers(true);
+                }
             }
         }
 
@@ -476,8 +494,9 @@ namespace ValveResourceFormat.Renderer
                 {
                     TintAlpha = Color32.FromVector4(instanceTint).PackedValue,
                     TransformIndex = transformIndex,
+                    VisibleLPV = (uint)(node.LightProbeBinding?.ShaderIndex ?? 0)
+                        | (node.ShaderEnvMapVisibility.GetFirstShaderIndex() << 16),
                     EnvMapVisibility = node.ShaderEnvMapVisibility,
-                    VisibleLPV = (uint)(node.LightProbeBinding?.ShaderIndex ?? 0),
                     Identification = node.Id,
                 };
             }
@@ -536,17 +555,22 @@ namespace ValveResourceFormat.Renderer
                 var meshletDataGpu = new MeshletCullInfo[aggregateMeshletCount];
                 var indirectDrawsGpu = new DrawElementsIndirectCommand[aggregateMeshletCount];
 
+                // Commands are laid out by meshlet index, so each draw call multidraws its
+                // [FirstMeshlet, FirstMeshlet + NumMeshlets) range within the aggregate
                 var sceneDrawCount = 0;
                 var sceneMeshletCount = 0;
-                var aggregateIndex = 0;
+                var compactionRequestList = new List<uint>();
+
                 foreach (var agg in aggregateSceneNodes)
                 {
                     agg.IndirectDrawByteOffset = sceneMeshletCount * Unsafe.SizeOf<DrawElementsIndirectCommand>();
                     agg.IndirectDrawCount = agg.RenderMesh.Meshlets.Count;
-                    agg.CompactionIndex = aggregateIndex++;
+
+                    agg.CompactionIndex = compactionRequestList.Count / 2;
+                    compactionRequestList.Add((uint)agg.RenderMesh.Meshlets.Count);
+                    compactionRequestList.Add((uint)sceneMeshletCount);
 
                     var drawIndex = 0;
-                    var indirectDrawCount = 0;
                     foreach (var fragment in agg.Fragments)
                     {
                         var fragmentInstanceId = fragment.Id;
@@ -558,7 +582,9 @@ namespace ValveResourceFormat.Renderer
                         for (var drawMeshletIndex = start; drawMeshletIndex < stop; drawMeshletIndex++)
                         {
                             var meshlet = agg.RenderMesh.Meshlets[drawMeshletIndex];
-                            meshletDataGpu[sceneMeshletCount] = new MeshletCullInfo
+                            var commandIndex = sceneMeshletCount + drawMeshletIndex;
+
+                            meshletDataGpu[commandIndex] = new MeshletCullInfo
                             {
                                 Bounds = meshlet.PackedAABB,
                                 Cone = meshlet.CullingData,
@@ -586,7 +612,7 @@ namespace ValveResourceFormat.Renderer
 
                             // what is meshlet.VertexOffset used for?
 
-                            indirectDrawsGpu[sceneMeshletCount] = new DrawElementsIndirectCommand
+                            indirectDrawsGpu[commandIndex] = new DrawElementsIndirectCommand
                             {
                                 Count = count,
                                 InstanceCount = 1,
@@ -594,17 +620,12 @@ namespace ValveResourceFormat.Renderer
                                 BaseVertex = drawCall.BaseVertex,
                                 BaseInstance = fragmentInstanceId,
                             };
-
-                            sceneMeshletCount++;
-                            indirectDrawCount++;
                         }
 
                         drawIndex++;
                     }
 
-                    // can be smaller than serialized meshlets due to LoD filtering
-                    agg.IndirectDrawCount = indirectDrawCount;
-
+                    sceneMeshletCount += agg.RenderMesh.Meshlets.Count;
                     sceneDrawCount += agg.Fragments.Count;
                 }
 
@@ -620,22 +641,10 @@ namespace ValveResourceFormat.Renderer
                 CompactedDrawsGpu = new StorageBuffer(ReservedBufferSlots.CompactedDraws);
                 CompactedDrawsGpu.Create(indirectDrawsGpu, BufferUsageHint.DynamicDraw);
 
-                CompactedCountsGpu = StorageBuffer.Allocate<uint>(ReservedBufferSlots.CompactedCounts, aggregateSceneNodes.Count, BufferUsageHint.DynamicDraw);
-
-                // Create compaction requests (one per aggregate)
-                var compactionRequests = new uint[aggregateSceneNodes.Count * 2];
-                for (var i = 0; i < aggregateSceneNodes.Count; i++)
-                {
-                    var agg = aggregateSceneNodes[i];
-                    var startIndex = agg.IndirectDrawByteOffset / Unsafe.SizeOf<DrawElementsIndirectCommand>();
-                    var drawCount = agg.IndirectDrawCount;
-
-                    compactionRequests[i * 2 + 0] = (uint)drawCount;
-                    compactionRequests[i * 2 + 1] = (uint)startIndex;
-                }
+                CompactedCountsGpu = StorageBuffer.Allocate<uint>(ReservedBufferSlots.CompactedCounts, compactionRequestList.Count / 2, BufferUsageHint.DynamicDraw);
 
                 CompactionRequestsGpu = new StorageBuffer(ReservedBufferSlots.CompactionRequests);
-                CompactionRequestsGpu.Create(compactionRequests, BufferUsageHint.StaticDraw);
+                CompactionRequestsGpu.Create(compactionRequestList);
             }
 
             OcclusionDebug = new OcclusionDebugRenderer(this, RendererContext);
@@ -661,6 +670,8 @@ namespace ValveResourceFormat.Renderer
             envMapBuffer.BindBufferBase();
             lpvBuffer.BindBufferBase();
             LightingInfo.BindBarnLightBuffer();
+
+            LightBinner.Bind();
         }
 
         private readonly List<SceneNode> CullResults = [];
@@ -711,6 +722,7 @@ namespace ValveResourceFormat.Renderer
             [RenderPass.OpaqueFragments] = [],
             [RenderPass.Opaque] = [],
             [RenderPass.StaticOverlay] = [],
+            [RenderPass.OpaqueRefract] = [],
             [RenderPass.Water] = [],
             [RenderPass.Translucent] = [],
             [RenderPass.Outline] = [],
@@ -747,6 +759,11 @@ namespace ValveResourceFormat.Renderer
                 renderLists[RenderPass.Outline].Add(request);
             }
 
+            // Aggregated geometry is opaque world detail that never samples the scene color, and the refract
+            // pass is the one place it cannot go: it has neither the depth prepass nor the indirect draw path.
+            var isAggregated = request.Node is SceneAggregate or SceneAggregate.Fragment;
+            var readsSceneColor = !isAggregated && request.Call.Material.ReadsSceneColor;
+
             if (renderPass == RenderPass.OpaqueAggregate)
             {
                 if (request.Node is SceneAggregate { CanDrawIndirect: true })
@@ -775,15 +792,22 @@ namespace ValveResourceFormat.Renderer
                 ? viewmodelRenderLists[renderPass]
                 : renderLists[renderPass];
 
-            if (renderPass == RenderPass.Translucent)
-            {
-                WantsSceneColor |= request.Call.Material.Shader.ReservedTexturesUsed.Contains("g_tSceneColor");
-                WantsSceneDepth |= request.Call.Material.Shader.ReservedTexturesUsed.Contains("g_tSceneDepth");
+            var isLatePass = renderPass == RenderPass.Translucent;
 
-                if (!isViewmodelLayer && request.Call.Material.IsCs2Water)
-                {
-                    queueList = renderLists[RenderPass.Water];
-                }
+            if ((readsSceneColor || request.Call.Material.IsCs2Water) && !isViewmodelLayer && renderPass != RenderPass.StaticOverlay)
+            {
+                queueList = renderLists[request.Call.Material.IsTranslucent
+                    ? RenderPass.Water
+                    : RenderPass.OpaqueRefract];
+
+                isLatePass = true;
+            }
+
+            // Only draws that happen after the grab can make use of the resolved copies.
+            if (isLatePass)
+            {
+                WantsSceneColor |= readsSceneColor;
+                WantsSceneDepth |= request.Call.Material.Shader.ReservedTexturesUsed.Contains("g_tSceneDepth");
             }
 
             queueList.Add(request);
@@ -1135,6 +1159,38 @@ namespace ValveResourceFormat.Renderer
         }
 
         /// <summary>
+        /// Binds the depth pyramid and sets the constants every occlusion test reads. Shared by the
+        /// meshlet cull and the light tile cull so the two cannot test against different state.
+        /// </summary>
+        /// <param name="shader">The shader whose occlusion uniforms to set. Must already be in use.</param>
+        /// <returns>Whether occlusion culling is active this frame.</returns>
+        internal bool SetOcclusionUniforms(Shader shader)
+        {
+            var pyramid = DepthPyramid;
+            var enabled = DepthPyramidValid && pyramid != null;
+
+            shader.SetUniform1("g_bOcclusionCullEnabled", enabled ? 1 : 0);
+
+            if (!enabled)
+            {
+                return false;
+            }
+
+            Debug.Assert(pyramid != null);
+
+            shader.SetUniform1("g_nDepthPyramidMaxMip", pyramid.NumMipLevels - 1);
+            shader.SetUniform1("g_nDepthPyramidWidth", pyramid.Width);
+            shader.SetUniform1("g_nDepthPyramidHeight", pyramid.Height);
+            shader.SetUniform1("g_flDepthRangeMin", Renderer.DepthRange.Scene.Near);
+            shader.SetUniform1("g_flDepthRangeMax", Renderer.DepthRange.Scene.Far);
+
+            GL.ActiveTexture(TextureUnit.Texture0);
+            GL.BindTexture(pyramid.Target, pyramid.Handle);
+
+            return true;
+        }
+
+        /// <summary>
         /// Dispatches the GPU frustum (and optional occlusion) culling compute shader, writing surviving indirect draw commands to <see cref="IndirectDrawsGpu"/>.
         /// </summary>
         /// <param name="frustum">The view frustum used to cull meshlets.</param>
@@ -1154,41 +1210,35 @@ namespace ValveResourceFormat.Renderer
 
             FrustumCullShader.Use();
 
-            // Set occlusion culling enabled flag
-            var occlusionEnabled = DepthPyramidValid;
-            FrustumCullShader.SetUniform1("g_bOcclusionCullEnabled", occlusionEnabled ? 1 : 0);
-
-            // If occlusion culling is enabled, setup depth pyramid and bind texture
-            if (occlusionEnabled)
-            {
-                Debug.Assert(DepthPyramid != null);
-
-                FrustumCullShader.SetUniform1("g_nDepthPyramidMaxMip", DepthPyramid.NumMipLevels - 1);
-                FrustumCullShader.SetUniform1("g_nDepthPyramidWidth", DepthPyramid.Width);
-                FrustumCullShader.SetUniform1("g_nDepthPyramidHeight", DepthPyramid.Height);
-                FrustumCullShader.SetUniform1("g_flDepthRangeMin", Renderer.DepthRange.Scene.Near);
-                FrustumCullShader.SetUniform1("g_flDepthRangeMax", Renderer.DepthRange.Scene.Far);
-
-                // Bind depth pyramid as texture for sampling
-                GL.ActiveTexture(TextureUnit.Texture0);
-                GL.BindTexture(DepthPyramid.Target, DepthPyramid.Handle);
-            }
+            SetOcclusionUniforms(FrustumCullShader);
 
             MeshletDataGpu.BindBufferBase();
             DrawBoundsGpu.BindBufferBase();
             IndirectDrawsGpu.BindBufferBase();
 
+            var occlusionDebugEnabled = OcclusionDebugEnabled && OcclusionDebug != null;
+
             // Bind debug buffer for occluded bounds visualization
-            if (OcclusionDebugEnabled)
+            if (occlusionDebugEnabled)
             {
                 OcclusionDebug!.BindAndClearBuffer();
             }
-            FrustumCullShader.SetUniform1("g_bOcclusionDebugEnabled", OcclusionDebugEnabled);
+            FrustumCullShader.SetUniform1("g_bOcclusionDebugEnabled", occlusionDebugEnabled);
 
             var workGroups = (SceneMeshletCount + 63) / 64;
             GL.DispatchCompute(workGroups, 1, 1);
 
             GL.MemoryBarrier(MemoryBarrierFlags.ShaderStorageBarrierBit);
+
+            if (occlusionDebugEnabled)
+            {
+                // Converts occludedCount into a DrawArraysIndirectCommand on the GPU so
+                // OcclusionDebugRenderer.Render() can draw without a CPU readback/stall.
+                // The barrier above makes occludedCount visible to this dispatch; the
+                // CommandBarrierBit barrier in RenderOpaqueLayer covers its own output
+                // being visible to the later indirect draw.
+                OcclusionDebug!.DispatchFinalize();
+            }
         }
 
         /// <summary>
@@ -1411,14 +1461,42 @@ namespace ValveResourceFormat.Renderer
             GL.DepthMask(true);
         }
 
+        /// <summary>
+        /// Renders depth-writing geometry that samples the scene color, collected during <see cref="CollectSceneDrawCalls"/>.
+        /// Runs after the framebuffer grab but before water and translucents, so those still sort against its depth.
+        /// </summary>
+        /// <param name="renderContext">The render context for this pass.</param>
+        public void RenderOpaqueRefractLayer(RenderContext renderContext)
+        {
+            var requests = renderLists[RenderPass.OpaqueRefract];
+
+            if (requests.Count == 0)
+            {
+                return;
+            }
+
+            using (new GLDebugGroup("Opaque Refract Render"))
+            {
+                renderContext.RenderPass = RenderPass.OpaqueRefract;
+                MeshBatchRenderer.Render(requests, renderContext);
+            }
+        }
+
         /// <summary>Renders water draw calls collected during <see cref="CollectSceneDrawCalls"/>.</summary>
         /// <param name="renderContext">The render context for this pass.</param>
         public void RenderWaterLayer(RenderContext renderContext)
         {
+            var requests = renderLists[RenderPass.Water];
+
+            if (requests.Count == 0)
+            {
+                return;
+            }
+
             using (new GLDebugGroup("Fancy Water Render"))
             {
                 renderContext.RenderPass = RenderPass.Water;
-                MeshBatchRenderer.Render(renderLists[RenderPass.Water], renderContext);
+                MeshBatchRenderer.Render(requests, renderContext);
             }
         }
 
@@ -1569,11 +1647,23 @@ namespace ValveResourceFormat.Renderer
             }
         }
 
-        /// <summary>Writes the scene fog parameters into the provided view constants structure.</summary>
-        /// <param name="viewConstants">The view constants to update with fog uniforms.</param>
+        /// <summary>
+        /// Wetness coverage, drying amount, rain strength and puddle ripple strength, read from the map's
+        /// <c>info_map_parameters</c>. Holds that entity's own defaults when the map has none.
+        /// </summary>
+        public Vector4 EnvironmentWetness { get; set; } = new(1f, 0f, 1f, 1f);
+
+        /// <summary>Puddle ripple direction, over 0 to 1 for a full turn.</summary>
+        public float PuddleWindDirection { get; set; }
+
+        /// <summary>Writes the scene's fog and weather parameters into the provided view constants structure.</summary>
+        /// <param name="viewConstants">The view constants to update.</param>
         public void SetFogConstants(ViewConstants viewConstants)
         {
             FogInfo.SetFogUniforms(viewConstants, FogEnabled);
+
+            viewConstants.EnvWetness = EnvironmentWetness;
+            viewConstants.EnvWetnessRipple = new Vector4(PuddleWindDirection, 0f, 0f, 0f);
         }
 
         /// <summary>
@@ -1792,7 +1882,9 @@ namespace ValveResourceFormat.Renderer
                     return aDistance.CompareTo(bDistance);
                 });
 
-                node.ShaderEnvMapVisibility = node.ShaderEnvMapVisibility.Store(node.EnvMaps);
+                // Rebuilt from scratch rather than added to: Store only sets bits, so a node that lost a
+                // probe since the last call would keep it.
+                node.ShaderEnvMapVisibility = default(SceneEnvMap.EnvMapVisibility128).Store(node.EnvMaps);
 
                 // all cubemaps visible
                 if (node.Flags.HasFlag(ObjectTypeFlags.DisableVisCulling))
@@ -1842,7 +1934,7 @@ namespace ValveResourceFormat.Renderer
                 throw new InvalidOperationException("Matrix invert failed");
             }
 
-            var boundsExtend = new Vector3(0.02f);
+            var boundsExtend = new Vector3(SceneEnvMap.BoundsExtend);
 
             envMapBuffer.Data.EnvMaps[index] = new EnvMapData
             {
@@ -1854,7 +1946,7 @@ namespace ValveResourceFormat.Renderer
                 Origin = envMap.Transform.Translation,
                 ProjectionType = (uint)envMap.ProjectionMode,
                 Color = envMap.Tint,
-                NormalizationSH = new Vector4(0, 0, 0, 1)
+                NormalizationSH = envMap.NormalizationSH
             };
         }
 
@@ -1883,6 +1975,7 @@ namespace ValveResourceFormat.Renderer
             if (disposing)
             {
                 frustumBuffer?.Dispose();
+                LightBinner.Dispose();
                 lightingBuffer?.Dispose();
                 lpvBuffer?.Dispose();
                 envMapBuffer?.Dispose();

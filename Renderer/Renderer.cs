@@ -5,6 +5,7 @@ using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Renderer.Buffers;
 using ValveResourceFormat.Renderer.PostProcess;
 using ValveResourceFormat.Renderer.SceneEnvironment;
+using ValveResourceFormat.ResourceTypes;
 
 namespace ValveResourceFormat.Renderer;
 
@@ -41,6 +42,13 @@ public class Renderer
         /// <summary>Reserved for the 3D sky, always behind the main scene.</summary>
         public static readonly DepthRange Sky = new(Scene.End, 0f);
     }
+
+    /// <summary>
+    /// Occlusion culling is held off until <see cref="Uptime"/> passes this, since the geometry, shader
+    /// specialization, and camera position are all still settling right after load; culling against a
+    /// depth pyramid from those first frames risks hiding things that should be visible.
+    /// </summary>
+    private const float OcclusionCullWarmupSeconds = 1f;
 
     /// <summary>
     /// Total time elapsed since the renderer was started, in seconds.
@@ -97,6 +105,9 @@ public class Renderer
     /// GPU uniform buffer containing per-view constants such as view-projection matrices.
     /// </summary>
     public UniformBuffer<ViewConstants>? ViewBuffer { get; set; }
+
+    /// <summary>Gets the fullscreen tile mask overlay drawn in the tile debug render modes.</summary>
+    public LightTilesOverlay LightTilesOverlay { get; }
 
     /// <summary>
     /// Named textures bound to reserved slots for all render passes.
@@ -157,6 +168,18 @@ public class Renderer
     /// </summary>
     public Vector3? LockedCullPosition { get; set; }
 
+    /// <summary>
+    /// When <see langword="true"/>, every form of culling (CPU frustum, GPU meshlet, occlusion, PVS, shadow
+    /// frustum) is bypassed so the whole scene is submitted.
+    /// </summary>
+    public bool DisableAllCulling { get; set; }
+
+    /// <summary>Reused so <see cref="Scene.GetFrustumCullResults"/> keeps its cache across pre-warm calls.</summary>
+    private readonly Frustum noCullFrustum = Frustum.CreateEmpty();
+
+    /// <summary>The frustum to cull against, or <see langword="null"/> to use the camera's own frustum.</summary>
+    private Frustum? CullFrustum => DisableAllCulling ? noCullFrustum : LockedCullFrustum;
+
     // options
     /// <summary>
     /// Width and height in texels of the shadow depth buffers.
@@ -181,6 +204,7 @@ public class Renderer
     {
         RendererContext = rendererContext;
         Postprocess = new(rendererContext);
+        LightTilesOverlay = new(rendererContext);
         Camera = new Camera(rendererContext.FieldOfView);
         ViewmodelCamera = new Camera();
         Scene = new Scene(rendererContext);
@@ -274,29 +298,69 @@ public class Renderer
         EnsureDepthPyramidSize(256, 256);
     }
 
+    /// <summary>Slots out of <see cref="MaterialLoader.ShaderTextures"/> that have been resolved.</summary>
+    private readonly HashSet<ReservedTextureSlots> loadedShaderTextures = [];
+
+    /// <summary>
+    /// Loads any used texture from the <see cref="MaterialLoader.ShaderTextures"/> list.
+    /// </summary>
+    private void LoadShaderTextures()
+    {
+        if (loadedShaderTextures.Count == MaterialLoader.ShaderTextures.Count)
+        {
+            return;
+        }
+
+        var declared = RendererContext.ShaderLoader.DeclaredReservedTextures;
+
+        foreach (var (slot, name, path) in MaterialLoader.ShaderTextures)
+        {
+            if (!declared.Contains(name) || !loadedShaderTextures.Add(slot))
+            {
+                continue;
+            }
+
+            using var resource = RendererContext.FileLoader.LoadFileCompiled(path);
+
+            var texture = resource != null
+                ? RendererContext.MaterialLoader.LoadTexture(resource)
+                : RendererContext.MaterialLoader.GetDefaultColor();
+
+            Textures.Add(new(slot, name, texture));
+        }
+    }
+
     /// <summary>
     /// Loads embedded or game-provided BRDF LUT, cube fog, and blue noise textures into <see cref="Textures"/>.
     /// </summary>
     public void LoadRendererResources()
     {
         var rendererAssembly = Assembly.GetAssembly(typeof(RendererContext)) ?? throw new InvalidOperationException("Failed to get renderer assembly");
-        const string vtexFileName = "ggx_integrate_brdf_lut_schlick.vtex_c";
+        const string vtexFileName = "brdf_lut.vtex_c";
 
         // Load brdf lut, preferably from game.
         var brdfLutResource = RendererContext.FileLoader.LoadFile("textures/dev/" + vtexFileName);
 
+        const int BrdfTextureSize = 64;
+        const int BrdfTextureDepth = 3;
+
+        if (brdfLutResource?.DataBlock is not Texture gameBrdfLut
+        || gameBrdfLut.Width != BrdfTextureSize
+        || gameBrdfLut.Height != BrdfTextureSize
+        || gameBrdfLut.Depth != BrdfTextureDepth
+        || gameBrdfLut.Format != VTexFormat.RGBA16161616F)
+        {
+            brdfLutResource?.Dispose();
+            brdfLutResource = null;
+        }
+
         try
         {
-            Stream? brdfStream; // Will be used by LoadTexture, and disposed by resource
-
             if (brdfLutResource == null)
             {
-                brdfStream = rendererAssembly.GetManifestResourceStream("Renderer.Resources." + vtexFileName);
-
-                if (brdfStream == null)
-                {
-                    throw new InvalidOperationException($"Failed to load embedded resource: {vtexFileName}");
-                }
+                // Will be used by LoadTexture, and disposed by resource
+                var brdfStream = rendererAssembly.GetManifestResourceStream("Renderer.Resources." + vtexFileName)
+                    ?? throw new InvalidOperationException($"Failed to load embedded resource: {vtexFileName}");
 
                 brdfLutResource = new Resource() { FileName = vtexFileName };
                 brdfLutResource.Read(brdfStream);
@@ -377,19 +441,38 @@ public class Renderer
         camera.SetViewConstants(ViewBuffer.Data);
         scene.SetFogConstants(ViewBuffer.Data);
 
+        var cullWidth = (int)ViewBuffer.Data.ViewportSize.X;
+        var cullHeight = (int)ViewBuffer.Data.ViewportSize.Y;
+
+        var tileCullEnabled = LockedCullFrustum == null && scene.EnableTiledLightCulling;
+        scene.LightBinner.Update(ViewBuffer.Data, cullWidth, cullHeight, tileCullEnabled);
+        SkyboxScene?.LightBinner.Update(ViewBuffer.Data, cullWidth, cullHeight, tileCullEnabled);
+
         ViewBuffer.BindBufferBase();
         ViewBuffer.Update();
 
-        if (LockedCullFrustum == null)
+        // A locked cull frustum leaves the indirect buffers untouched, freezing the cull state. Disabled
+        // culling still has to dispatch, otherwise the indirect draw commands keep the previous contents.
+        Frustum? gpuCullFrustum = DisableAllCulling
+            ? noCullFrustum
+            : LockedCullFrustum == null ? camera.ViewFrustum : null;
+
+        if (gpuCullFrustum.HasValue)
         {
             if (scene.DrawMeshletsIndirect)
             {
-                scene.MeshletCullGpu(camera.ViewFrustum);
+                scene.MeshletCullGpu(gpuCullFrustum.Value);
             }
 
             if (scene.CompactMeshletDraws)
             {
                 scene.CompactIndirectDraws();
+            }
+
+            using (new GLDebugGroup("Cull Tiles and Depth Bins"))
+            {
+                scene.LightBinner.Dispatch();
+                SkyboxScene?.LightBinner.Dispatch();
             }
         }
 
@@ -402,6 +485,7 @@ public class Renderer
 
     private static void RenderTranslucentLayer(Scene scene, Scene.RenderContext renderContext)
     {
+        scene.RenderOpaqueRefractLayer(renderContext);
         scene.RenderWaterLayer(renderContext);
 
         GL.DepthMask(false);
@@ -431,6 +515,7 @@ public class Renderer
             Textures = Textures,
         };
 
+        LoadShaderTextures();
         UpdatePerViewGpuBuffers(Scene, Camera, DeltaTime);
         Scene.SetSceneBuffers();
 
@@ -461,6 +546,8 @@ public class Renderer
     /// </summary>
     public void Render(Scene.RenderContext renderContext)
     {
+        LoadShaderTextures();
+
         // Render backfaces into shadow maps
         GL.FrontFace(FrontFaceDirection.Cw);
 
@@ -509,6 +596,8 @@ public class Renderer
             GL.PolygonMode(TriangleFace.FrontAndBack, PolygonMode.Line);
         }
 
+        UpdatePerViewGpuBuffers(Scene, renderContext.Camera, DeltaTime);
+
         using (new GLDebugGroup("Viewmodel Opaque"))
         {
             var mainCamera = renderContext.Camera;
@@ -522,6 +611,10 @@ public class Renderer
 
             ViewmodelCamera.SetViewConstants(ViewBuffer.Data);
             Scene.SetFogConstants(ViewBuffer.Data);
+
+            var viewmodelTileRemap = ViewmodelCamera.GetPixelRemapTo(mainCamera, ViewBuffer.Data.ViewportSize);
+            Scene.LightBinner.SetPixelRemap(viewmodelTileRemap);
+
             ViewBuffer.BindBufferBase();
             ViewBuffer.Update();
             Scene.SetSceneBuffers();
@@ -530,11 +623,16 @@ public class Renderer
             renderContext.Scene = Scene;
             Scene.RenderViewmodelOpaqueLayer(renderContext);
             renderContext.Camera = mainCamera;
+
+            DepthRange.Scene.Apply();
+
+            mainCamera.SetViewConstants(ViewBuffer.Data);
+            Scene.SetFogConstants(ViewBuffer.Data);
+            Scene.LightBinner.SetPixelRemap(ViewConstants.PixelRemapIdentity);
+            ViewBuffer.BindBufferBase();
+            ViewBuffer.Update();
         }
 
-        DepthRange.Scene.Apply();
-
-        UpdatePerViewGpuBuffers(Scene, renderContext.Camera, DeltaTime);
         Scene.SetSceneBuffers();
 
         using (new GLDebugGroup("Main Scene Opaque Render"))
@@ -583,10 +681,12 @@ public class Renderer
             {
                 var generateDepthPyramid = Scene.EnableOcclusionCulling
                     && Scene.DrawMeshletsIndirect
-                    && LockedCullFrustum == null;
+                    && LockedCullFrustum == null
+                    && !DisableAllCulling
+                    && Uptime >= OcclusionCullWarmupSeconds;
 
                 copyDepth |= generateDepthPyramid;
-                Scene.DepthPyramidValid = generateDepthPyramid || LockedCullFrustum != null;
+                Scene.DepthPyramidValid = !DisableAllCulling && (generateDepthPyramid || LockedCullFrustum != null);
 
                 GrabFramebufferCopy(renderContext.Framebuffer, copyColor, copyDepth);
 
@@ -631,6 +731,8 @@ public class Renderer
 
             ViewmodelCamera.SetViewConstants(ViewBuffer.Data);
             Scene.SetFogConstants(ViewBuffer.Data);
+            Scene.LightBinner.SetPixelRemap(
+                ViewmodelCamera.GetPixelRemapTo(mainCamera, ViewBuffer.Data.ViewportSize));
             ViewBuffer.BindBufferBase();
             ViewBuffer.Update();
 
@@ -642,6 +744,7 @@ public class Renderer
 
             mainCamera.SetViewConstants(ViewBuffer.Data);
             Scene.SetFogConstants(ViewBuffer.Data);
+            Scene.LightBinner.SetPixelRemap(ViewConstants.PixelRemapIdentity);
             ViewBuffer.BindBufferBase();
             ViewBuffer.Update();
         }
@@ -661,6 +764,16 @@ public class Renderer
             if (Postprocess.HasOutlineObjects)
             {
                 RenderOutlineLayer(renderContext);
+            }
+
+            var overlayBatch = ValveResourceFormat.Renderer.LightTilesOverlay.BatchFor(ViewBuffer!.Data.RenderMode);
+
+            if (overlayBatch != ValveResourceFormat.Renderer.LightTilesOverlay.Batch.None)
+            {
+                var (tileBase, words) = Scene.LightBinner.GetOverlayRegion(
+                    overlayBatch == ValveResourceFormat.Renderer.LightTilesOverlay.Batch.EnvMaps);
+
+                LightTilesOverlay.Render(Scene.LightBinner.CullBits, tileBase, words);
             }
         }
         else
@@ -908,6 +1021,15 @@ public class Renderer
     }
 
     /// <summary>
+    /// Gets or sets whether the vsnd name of every active positioned sound is billboarded in the world.
+    /// </summary>
+    public bool ShowSoundDebug { get; set; }
+
+    // Reused buffers for the sound debug billboards and 2D (non-positioned) sound list
+    private readonly List<(Vector3 Position, string Text)> debugWorldSounds = [];
+    private readonly List<string> debugFlatSounds = [];
+
+    /// <summary>
     /// Releases GPU resources owned by this renderer.
     /// </summary>
     public void Dispose()
@@ -934,6 +1056,8 @@ public class Renderer
         DeltaTime = updateContext.Timestep;
         ViewBuffer.Data.Time = Uptime;
 
+        updateContext = updateContext with { Uptime = Uptime };
+
         Camera.RecalculateMatrices();
 
         Scene.Update(updateContext);
@@ -941,14 +1065,14 @@ public class Renderer
 
         Scene.PostProcessInfo.UpdatePostProcessing(updateContext.Camera);
 
-        Scene.SetupSceneShadows(updateContext.Camera, ShadowDepthBuffer.Width);
+        Scene.SetupSceneShadows(updateContext.Camera, DisableAllCulling ? -1 : ShadowDepthBuffer.Width);
 
         if (ViewBuffer.Data.ExperimentalLightsEnabled)
         {
             Scene.LightingInfo.BinBarnLights(Camera, ShadowTextureSize);
         }
 
-        if (Scene is { EnablePvsCulling: true, VoxelVisibility: not null })
+        if (!DisableAllCulling && Scene is { EnablePvsCulling: true, VoxelVisibility: not null })
         {
             var pvsPosition = LockedCullPosition ?? updateContext.Camera.Location;
             Scene.CurrentFramePvs = Scene.VoxelVisibility.GetPVSForPoint(pvsPosition);
@@ -958,8 +1082,64 @@ public class Renderer
             Scene.CurrentFramePvs = null;
         }
 
-        Scene.CollectSceneDrawCalls(updateContext.Camera, LockedCullFrustum);
-        SkyboxScene?.CollectSceneDrawCalls(updateContext.Camera, LockedCullFrustum);
+        var cullFrustum = CullFrustum;
+        Scene.CollectSceneDrawCalls(updateContext.Camera, cullFrustum);
+        SkyboxScene?.CollectSceneDrawCalls(updateContext.Camera, cullFrustum);
+
+        if (ShowSoundDebug && Sound.Player != null)
+        {
+            CollectSoundDebugText(updateContext);
+        }
+    }
+
+    /// <summary>
+    /// Queues a billboard per audible positioned sound, and a bottom-right corner list of the
+    /// non-positioned (2D) ones.
+    /// </summary>
+    private void CollectSoundDebugText(Scene.UpdateContext updateContext)
+    {
+        debugWorldSounds.Clear();
+        debugFlatSounds.Clear();
+        Sound.Player!.CollectDebugSounds(debugWorldSounds, debugFlatSounds);
+
+        foreach (var (position, text) in debugWorldSounds)
+        {
+            updateContext.TextRenderer.AddTextBillboard(position, new TextRenderer.TextRenderRequest
+            {
+                Scale = 8f,
+                Text = text,
+                CenterHorizontal = true,
+                Color = new Color32(0.4f, 1f, 0.4f, 1f),
+            }, updateContext.Camera);
+        }
+
+        if (debugFlatSounds.Count == 0)
+        {
+            return;
+        }
+
+        const float scale = 10f;
+        const float lineHeight = scale * 1.5f;
+        const float marginRight = 8f;
+        const float marginBottom = 8f;
+
+        // Right edge every line is aligned to, so the ".vsnd" suffix lines up flush against the screen corner.
+        var cornerX = updateContext.Camera.WindowSize.X - marginRight;
+        var y = updateContext.Camera.WindowSize.Y - marginBottom - (debugFlatSounds.Count * lineHeight);
+
+        foreach (var text in debugFlatSounds)
+        {
+            updateContext.TextRenderer.AddText(new TextRenderer.TextRenderRequest
+            {
+                X = cornerX - TextRenderer.MeasureTextWidth(text, scale),
+                Y = y,
+                Scale = scale,
+                Text = text,
+                Color = new Color32(0.4f, 1f, 1f, 1f),
+            });
+
+            y += lineHeight;
+        }
     }
 
     void EnsureDepthPyramidSize(int width, int height)
