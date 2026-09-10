@@ -187,7 +187,6 @@ public partial class GltfModelExporter
         }
 
         // ORM is a texture that may be compiled from multiple inputs
-        using var occlusionRoughnessMetal = new TextureExtract.TexturePacker { DefaultColor = new SKColor(255, 255, 0, 255) };
         var ormTextureInstructions = new Dictionary<string, List<RemapInstruction>>();
         var ormRedChannelForOcclusion = false;
 
@@ -350,6 +349,7 @@ public partial class GltfModelExporter
         async Task AddTextureORM(Image image)
         {
             await Task.Yield();
+            using var occlusionRoughnessMetal = new TextureExtract.TexturePacker { DefaultColor = new SKColor(255, 255, 0, 255) };
 
             // Collect channels for the ORM texture
             foreach (var (texturePath, instructions) in ormTextureInstructions)
