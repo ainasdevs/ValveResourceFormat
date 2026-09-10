@@ -427,12 +427,16 @@ namespace ValveResourceFormat.ResourceTypes
         /// <summary>
         /// Get the embedded animations with a different skeleton as animation target.
         /// </summary>
-        public static IEnumerable<Animation> GetEmbeddedAnimationsWithSkeleton(IFileLoader fileLoader, Skeleton skeleton, Model model)
+        public static IEnumerable<Animation> GetEmbeddedAnimationsWithSkeleton(
+            IFileLoader fileLoader,
+            Skeleton skeleton,
+            Model model,
+            Predicate<string>? includeAnimationGraphClip = null)
         {
             var old = model.cachedSkeleton;
 
             model.cachedSkeleton = skeleton;
-            var anims = model.GetAllAnimations(fileLoader);
+            var anims = model.GetAllAnimations(fileLoader, includeAnimationGraphClip);
 
             model.cachedSkeleton = old;
             return anims;
@@ -442,8 +446,11 @@ namespace ValveResourceFormat.ResourceTypes
         /// Gets animations referenced from other models.
         /// </summary>
         /// <param name="fileLoader">The file loader to use.</param>
+        /// <param name="includeAnimationGraphClip">Optional filter applied to animation graph clip resource names before loading them.</param>
         /// <returns>Enumerable of animations.</returns>
-        public IEnumerable<Animation> GetReferencedAnimations(IFileLoader fileLoader)
+        public IEnumerable<Animation> GetReferencedAnimations(
+            IFileLoader fileLoader,
+            Predicate<string>? includeAnimationGraphClip = null)
         {
             var refAnimModels = Data.GetArray<string>("m_refAnimIncludeModels");
             if (refAnimModels == null || refAnimModels.Length == 0)
@@ -465,7 +472,7 @@ namespace ValveResourceFormat.ResourceTypes
                     continue;
                 }
 
-                var anims = GetEmbeddedAnimationsWithSkeleton(fileLoader, Skeleton, model);
+                var anims = GetEmbeddedAnimationsWithSkeleton(fileLoader, Skeleton, model, includeAnimationGraphClip);
                 allAnims.AddRange(anims);
             }
 
@@ -476,10 +483,13 @@ namespace ValveResourceFormat.ResourceTypes
         /// Gets all animations from this model including embedded, referenced, and animation groups.
         /// </summary>
         /// <param name="fileLoader">The file loader to use.</param>
+        /// <param name="includeAnimationGraphClip">Optional filter applied to animation graph clip resource names before loading them.</param>
         /// <returns>Enumerable of all animations.</returns>
-        public IEnumerable<Animation> GetAllAnimations(IFileLoader fileLoader)
+        public IEnumerable<Animation> GetAllAnimations(
+            IFileLoader fileLoader,
+            Predicate<string>? includeAnimationGraphClip = null)
         {
-            if (CachedAnimations != null)
+            if (includeAnimationGraphClip == null && CachedAnimations != null)
             {
                 return CachedAnimations;
             }
@@ -500,9 +510,15 @@ namespace ValveResourceFormat.ResourceTypes
             // Animation graph (AG2) clips are part of the model's animation set.
             foreach (var clipName in IO.AnimationGraphLoader.GetClipNames(this, fileLoader))
             {
+                if (includeAnimationGraphClip != null && !includeAnimationGraphClip(clipName))
+                {
+                    continue;
+                }
+
                 try
                 {
-                    if (fileLoader.LoadFileCompiled(clipName)?.DataBlock is ModelAnimation2.AnimationClip clip)
+                    using var clipResource = fileLoader.LoadFileCompiled(clipName);
+                    if (clipResource?.DataBlock is ModelAnimation2.AnimationClip clip)
                     {
                         animations.Add(new ClipAnimation(clip));
                     }
@@ -513,7 +529,7 @@ namespace ValveResourceFormat.ResourceTypes
                 }
             }
 
-            animations.AddRange(GetReferencedAnimations(fileLoader));
+            animations.AddRange(GetReferencedAnimations(fileLoader, includeAnimationGraphClip));
 
             HashSet<string> additiveSequences;
             try
@@ -548,9 +564,12 @@ namespace ValveResourceFormat.ResourceTypes
                 sequenceAnimation.IsAdditive |= additiveSequences.Contains(sequenceName);
             }
 
-            CachedAnimations = animations;
+            if (includeAnimationGraphClip == null)
+            {
+                CachedAnimations = animations;
+            }
 
-            return CachedAnimations;
+            return animations;
         }
 
         /// <summary>

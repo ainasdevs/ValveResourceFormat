@@ -396,7 +396,7 @@ public partial class GltfModelExporter
 
         var retargetWriter = new AnimationWriter(model.Skeleton, model.FlexControllers) { ComposeAdditive = ComposeAdditiveAnimations };
 
-        foreach (var animation in model.GetAllAnimations(FileLoader))
+        foreach (var animation in GetExportAnimations(model, animationFilter))
         {
             CancellationToken.ThrowIfCancellationRequested();
 
@@ -513,7 +513,7 @@ public partial class GltfModelExporter
 
         var frame = new Frame(model.Skeleton, model.FlexControllers);
 
-        foreach (var animation in model.GetAllAnimations(FileLoader))
+        foreach (var animation in GetExportAnimations(model, animationFilter))
         {
             if (animation is ClipAnimation || animation.FrameCount == 0 || !animation.HasFlexData || !IncludeAnimation(animationFilter, animation.Name))
             {

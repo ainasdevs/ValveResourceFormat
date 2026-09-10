@@ -200,26 +200,33 @@ namespace ValveResourceFormat.IO
         // clips, its leaf name. Records which filter entry matched so misses can be reported afterwards.
         private bool IncludeAnimation(HashSet<string> filter, string name)
         {
-            if (filter.Count == 0)
+            var matchedName = MatchAnimation(filter, name);
+            if (matchedName != null)
             {
+                matchedAnimationFilter.Add(matchedName);
                 return true;
             }
 
+            return filter.Count == 0;
+        }
+
+        private static string? MatchAnimation(HashSet<string> filter, string name)
+        {
             if (filter.Contains(name))
             {
-                matchedAnimationFilter.Add(name);
-                return true;
+                return name;
             }
 
             var leafName = Path.GetFileName(name);
-            if (leafName.Length != name.Length && filter.Contains(leafName))
-            {
-                matchedAnimationFilter.Add(leafName);
-                return true;
-            }
-
-            return false;
+            return leafName.Length != name.Length && filter.Contains(leafName) ? leafName : null;
         }
+
+        private IEnumerable<ResourceTypes.ModelAnimation.Animation> GetExportAnimations(VModel model, HashSet<string> animationFilter)
+            => model.GetAllAnimations(
+                FileLoader,
+                animationFilter.Count == 0
+                    ? null
+                    : clipName => MatchAnimation(animationFilter, ClipAnimationName(clipName)) != null);
 
         private void ReportUnmatchedAnimationFilter()
         {
@@ -775,7 +782,7 @@ namespace ValveResourceFormat.IO
             {
                 Debug.Assert(joints != null);
 
-                var animations = model.GetAllAnimations(FileLoader);
+                var animations = GetExportAnimations(model, animationFilter);
                 var animationWriter = new AnimationWriter(model.Skeleton, model.FlexControllers) { ComposeAdditive = ComposeAdditiveAnimations };
 
                 foreach (var animation in animations)
