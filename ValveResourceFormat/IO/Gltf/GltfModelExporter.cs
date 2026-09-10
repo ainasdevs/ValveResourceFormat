@@ -64,6 +64,12 @@ namespace ValveResourceFormat.IO
         public bool SatelliteImages { get; set; } = true;
 
         /// <summary>
+        /// Gets or sets a value indicating whether material textures are decoded and written as glTF images.
+        /// When false, materials keep their parameters and extras but reference no image, and no texture is read.
+        /// </summary>
+        public bool ExportTextureImages { get; set; } = true;
+
+        /// <summary>
         /// Gets or sets a value indicating whether to export extra data.
         /// </summary>
         public bool ExportExtras { get; set; }
@@ -81,6 +87,12 @@ namespace ValveResourceFormat.IO
         /// matches "animation/anims/.../idle_knife"). Empty means export every animation.
         /// </summary>
         public HashSet<string> AnimationFilter { get; } = [];
+
+        /// <summary>
+        /// Gets or sets a value indicating whether an empty <see cref="AnimationFilter"/> exports every animation.
+        /// When false an empty filter exports no animation; the skeleton is still written.
+        /// </summary>
+        public bool EmptyAnimationFilterExportsAll { get; set; } = true;
 
         // Filter entries that matched at least one animation, so unmatched ones can be reported after export.
         private readonly HashSet<string> matchedAnimationFilter = [];
@@ -207,7 +219,7 @@ namespace ValveResourceFormat.IO
                 return true;
             }
 
-            return filter.Count == 0;
+            return filter.Count == 0 && EmptyAnimationFilterExportsAll;
         }
 
         private static string? MatchAnimation(HashSet<string> filter, string name)
@@ -222,11 +234,18 @@ namespace ValveResourceFormat.IO
         }
 
         private IEnumerable<ResourceTypes.ModelAnimation.Animation> GetExportAnimations(VModel model, HashSet<string> animationFilter)
-            => model.GetAllAnimations(
+        {
+            if (animationFilter.Count == 0 && !EmptyAnimationFilterExportsAll)
+            {
+                return [];
+            }
+
+            return model.GetAllAnimations(
                 FileLoader,
                 animationFilter.Count == 0
                     ? null
                     : clipName => MatchAnimation(animationFilter, ClipAnimationName(clipName)) != null);
+        }
 
         private void ReportUnmatchedAnimationFilter()
         {

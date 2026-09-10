@@ -131,6 +131,17 @@ public partial class GltfModelExporter
             .WithChannelFactor("MetallicRoughness", "MetallicFactor", metalValue)
             .WithChannelFactor("MetallicRoughness", "RoughnessFactor", 1f);
 
+        if (!ExportTextureImages)
+        {
+            if (needsSpecularMode && renderMaterial.VectorParams.TryGetValue("g_vSpecularColor", out var vSpecularColorNoImages))
+            {
+                material.WithChannelColor("SpecularColor", vSpecularColorNoImages);
+            }
+
+            WriteMaterialExtras(material, renderMaterial, renderMaterial.TextureParams);
+            return;
+        }
+
         var openBitmaps = new Dictionary<string, SKBitmap>();
 
         if (!AdaptTextures)
