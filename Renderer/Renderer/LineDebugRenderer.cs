@@ -19,8 +19,8 @@ namespace ValveResourceFormat.Renderer
         protected void Clear() => lineBuffer.Clear();
 
         /// <summary>Uploads the line vertices, two per segment.</summary>
-        protected void Upload(List<SimpleVertex> vertices, BufferUsageHint usageHint = BufferUsageHint.DynamicDraw)
-            => lineBuffer.Upload(vertices, usageHint);
+        protected void Upload(List<SimpleVertex> vertices, BufferUsage usage = BufferUsage.Dynamic)
+            => lineBuffer.Upload(vertices, usage);
 
         /// <summary>Draws the uploaded lines, on top of everything when depth test is disabled.</summary>
         protected void RenderLines(bool disableDepthTest = false)
@@ -30,28 +30,12 @@ namespace ValveResourceFormat.Renderer
                 return;
             }
 
-            GL.Enable(EnableCap.Blend);
-
-            if (disableDepthTest)
-            {
-                GL.Disable(EnableCap.DepthTest);
-            }
-
-            GL.DepthMask(false);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+            using var _ = GraphicsContext.RenderState.Scope(depthTest: disableDepthTest ? false : null, depthWrite: false, blend: true);
 
             lineBuffer.Shader.Use();
             lineBuffer.Shader.SetUniform3x4("transform", Matrix4x4.Identity);
 
             lineBuffer.Draw();
-
-            GL.DepthMask(true);
-            GL.Disable(EnableCap.Blend);
-
-            if (disableDepthTest)
-            {
-                GL.Enable(EnableCap.DepthTest);
-            }
         }
 
         /// <summary>Deletes the GL objects.</summary>

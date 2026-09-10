@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using OpenTK.Graphics.OpenGL;
 using ValveKeyValue;
+using ValveResourceFormat.Renderer.Entities;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.ResourceTypes.EntityLump;
@@ -37,6 +39,14 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
 
         /// <summary>Gets the white point value; passed through the tonemapper before GPU upload.</summary>
         public float WhitePoint { get; init; } // This is run through the tonemapper before being given to the shader
+
+        /// <summary>
+        /// The scale the shader applies to the exposed scene before the curve.
+        /// </summary>
+        public const float PreTonemapScale = 2.8f;
+
+        /// <summary>Gets the white point the curve is actually normalized against: <see cref="WhitePoint"/> scaled by <see cref="PreTonemapScale"/>.</summary>
+        public readonly float EffectiveWhitePoint => WhitePoint * PreTonemapScale;
         // The following params aren't used, I think?
         /*float LuminanceSource; // CS2
         float ExposureBiasShadows; // CS2
@@ -47,7 +57,6 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
         float MaxHighlightLum; // CS2
         */
 
-        // Default settings (filmic)
         /// <summary>Initializes a new <see cref="TonemapSettings"/> with default filmic curve values.</summary>
         public TonemapSettings()
         {
@@ -117,6 +126,68 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
             var denom = inputValue * (inputValue * ShoulderStrength + LinearStrength) + (ToeStrength * ToeDenom);
             return (num / denom) - (ToeNum / ToeDenom);
         }
+
+        /// <summary>
+        /// Runs the full tonemap the shader performs: the pre-curve scale and clamp, the curve, and the
+        /// white point normalization.
+        /// </summary>
+        /// <param name="sceneValue">The exposed linear scene value.</param>
+        /// <returns>The displayed value, in the 0-1 range before the sRGB encode.</returns>
+        public readonly float Display(float sceneValue)
+        {
+            var effectiveWhitePoint = EffectiveWhitePoint;
+            var curveInput = MathF.Min(sceneValue * PreTonemapScale, effectiveWhitePoint);
+
+            return ApplyTonemapping(curveInput) / ApplyTonemapping(effectiveWhitePoint);
+        }
+
+        /// <summary>
+        /// Inverts <see cref="Display"/>: the exposed scene value that displays as <paramref name="displayValue"/>.
+        /// </summary>
+        /// <param name="displayValue">The desired displayed value, in the 0-1 range the shader outputs.</param>
+        /// <returns>
+        /// The exposed linear scene value that displays as <paramref name="displayValue"/>,
+        /// or <see cref="float.NaN"/> if this curve cannot be inverted.
+        /// </returns>
+        public readonly float InvertTonemapping(float displayValue)
+        {
+            // Solving ApplyTonemapping(x) = displayValue * ApplyTonemapping(EffectiveWhitePoint) for x, after
+            // clearing the curve's denominator, leaves a quadratic in x with these coefficients. g is the
+            // curve's numerator/denominator ratio before the ToeNum/ToeDenom shift. x is the curve input,
+            // so the result is divided by the pre-curve scale to land back in scene space.
+            var g = (displayValue * ApplyTonemapping(EffectiveWhitePoint)) + (ToeNum / ToeDenom);
+
+            var a = ShoulderStrength * (1f - g);
+            var b = LinearStrength * (LinearAngle - g);
+            var c = ToeStrength * (ToeNum - (g * ToeDenom));
+
+            float result;
+
+            if (a == 0f)
+            {
+                // No shoulder, so the curve is a straight line.
+                result = -c / b;
+            }
+            else
+            {
+                var discriminant = (b * b) - (4f * a * c);
+
+                if (discriminant < 0f)
+                {
+                    return float.NaN;
+                }
+
+                var root = MathF.Sqrt(discriminant);
+                result = (-b + root) / (2f * a);
+
+                if (result <= 0f)
+                {
+                    result = (-b - root) / (2f * a);
+                }
+            }
+
+            return (float.IsFinite(result) && result > 0f) ? result / PreTonemapScale : float.NaN;
+        }
     }
 
     /// <summary>
@@ -176,8 +247,25 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
                 AutoExposureEnabled = entity.GetBooleanProperty("enableexposure"), // todo: test where this is enabled/disabled
             };
 
-            settings.AutoExposureEnabled = settings.AutoExposureEnabled && settings.ExposureMax > settings.ExposureMin;
             return settings;
+        }
+
+        /// <summary>Linearly interpolates the numeric fields between two exposure settings.</summary>
+        /// <param name="weight">Blend factor in the range [0, 1]; 0 returns <paramref name="a"/>, 1 returns <paramref name="b"/>.</param>
+        /// <param name="a">The first (start) exposure settings.</param>
+        /// <param name="b">The second (end) exposure settings.</param>
+        public static ExposureSettings Blend(float weight, in ExposureSettings a, in ExposureSettings b)
+        {
+            return new ExposureSettings
+            {
+                AutoExposureEnabled = a.AutoExposureEnabled || b.AutoExposureEnabled,
+                ExposureMin = float.Lerp(a.ExposureMin, b.ExposureMin, weight),
+                ExposureMax = float.Lerp(a.ExposureMax, b.ExposureMax, weight),
+                ExposureSpeedUp = float.Lerp(a.ExposureSpeedUp, b.ExposureSpeedUp, weight),
+                ExposureSpeedDown = float.Lerp(a.ExposureSpeedDown, b.ExposureSpeedDown, weight),
+                ExposureSmoothingRange = float.Lerp(a.ExposureSmoothingRange, b.ExposureSmoothingRange, weight),
+                ExposureCompensation = float.Lerp(a.ExposureCompensation, b.ExposureCompensation, weight),
+            };
         }
     }
 
@@ -199,7 +287,7 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
     /// Bloom effect parameters including threshold, intensity, and per-mip blur settings.
     /// </summary>
     /// <seealso href="https://s2v.app/SchemaExplorer/cs2/materialsystem2/PostProcessingBloomParameters_t">PostProcessingBloomParameters_t</seealso>
-    public readonly struct BloomSettings()
+    public readonly struct BloomSettings
     {
         /// <summary>Gets the compositing blend mode used to apply bloom.</summary>
         public BloomBlendType BlendMode { get; init; } = BloomBlendType.BLOOM_BLEND_ADD;
@@ -225,11 +313,44 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
         /// <summary>Gets the minimum luminance value that begins contributing to bloom.</summary>
         public float BloomStartValue { get; init; } = 1;
 
+        /// <summary>Number of bloom blur buffers (1/2 through 1/32 resolution).</summary>
+        public const int NumBlurBuffers = 5;
+
+        /// <summary>Fixed per-mip blur weight storage. Inline so bloom states copy and blend without allocating.</summary>
+        [InlineArray(NumBlurBuffers)]
+        public struct BlurWeights
+        {
+            private float element0;
+        }
+
+        /// <summary>Fixed per-mip blur tint storage. Inline so bloom states copy and blend without allocating.</summary>
+        [InlineArray(NumBlurBuffers)]
+        public struct BlurTints
+        {
+            private Vector3 element0;
+        }
+
         /// <summary>Gets the per-mip blur weights for the five blur buffers (1/2 through 1/32 resolution).</summary>
-        public float[] BlurWeight { get; init; } = [0.2f, 0.2f, 0.2f, 0.2f, 0.2f];
+        public BlurWeights BlurWeight { get; init; }
 
         /// <summary>Gets the per-mip color tints for the five blur buffers.</summary>
-        public Vector3[] BlurTint { get; init; } = [Vector3.One, Vector3.One, Vector3.One, Vector3.One, Vector3.One];
+        public BlurTints BlurTint { get; init; }
+
+        /// <summary>Initializes bloom settings with the default per-mip weights and tints.</summary>
+        public BloomSettings()
+        {
+            var weights = new BlurWeights();
+            var tints = new BlurTints();
+
+            for (var i = 0; i < NumBlurBuffers; i++)
+            {
+                weights[i] = 0.2f;
+                tints[i] = Vector3.One;
+            }
+
+            BlurWeight = weights;
+            BlurTint = tints;
+        }
 
         /// <summary>Gets the effective bloom strength for the current <see cref="BlendMode"/>.</summary>
         public float BloomStrength =>
@@ -241,25 +362,56 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
                 _ => throw new InvalidOperationException("Invalid bloom blend type")
             };
 
-        /// <summary>Parses a <see cref="BloomSettings"/> from a KV object.</summary>
-        public static BloomSettings ParseFromKVObject(KVObject data)
+        /// <summary>Linearly interpolates between two bloom settings. The three mode strengths blend
+        /// independently, which is also how the composite shader weighs the modes against each other.</summary>
+        /// <param name="weight">Blend factor in the range [0, 1]; 0 returns <paramref name="a"/>, 1 returns <paramref name="b"/>.</param>
+        /// <param name="a">The first (start) bloom settings.</param>
+        /// <param name="b">The second (end) bloom settings.</param>
+        public static BloomSettings Blend(float weight, in BloomSettings a, in BloomSettings b)
         {
-            var settings = new BloomSettings();
-
-            const int NumBlurBuffers = 5;
-            var blurWeight = data.GetFloatArray("m_flBlurWeight");
-            var blurTint = data.GetArray("m_vBlurTint").Select(v => v.ToVector3()).ToArray();
-
-            Debug.Assert(blurWeight.Length == NumBlurBuffers);
-            Debug.Assert(blurTint.Length == NumBlurBuffers);
+            var blurWeight = new BlurWeights();
+            var blurTint = new BlurTints();
 
             for (var i = 0; i < NumBlurBuffers; i++)
             {
-                settings.BlurWeight[i] = blurWeight[i];
-                settings.BlurTint[i] = blurTint[i];
+                blurWeight[i] = float.Lerp(a.BlurWeight[i], b.BlurWeight[i], weight);
+                blurTint[i] = Vector3.Lerp(a.BlurTint[i], b.BlurTint[i], weight);
             }
 
-            settings = settings with
+            return new BloomSettings
+            {
+                BlendMode = weight < 0.5f ? a.BlendMode : b.BlendMode,
+                AddBloomStrength = float.Lerp(a.AddBloomStrength, b.AddBloomStrength, weight),
+                ScreenBloomStrength = float.Lerp(a.ScreenBloomStrength, b.ScreenBloomStrength, weight),
+                BlurBloomStrength = float.Lerp(a.BlurBloomStrength, b.BlurBloomStrength, weight),
+                BloomThreshold = float.Lerp(a.BloomThreshold, b.BloomThreshold, weight),
+                BloomThresholdWidth = float.Lerp(a.BloomThresholdWidth, b.BloomThresholdWidth, weight),
+                SkyboxBloomStrength = float.Lerp(a.SkyboxBloomStrength, b.SkyboxBloomStrength, weight),
+                BloomStartValue = float.Lerp(a.BloomStartValue, b.BloomStartValue, weight),
+                BlurWeight = blurWeight,
+                BlurTint = blurTint,
+            };
+        }
+
+        /// <summary>Parses a <see cref="BloomSettings"/> from a KV object.</summary>
+        public static BloomSettings ParseFromKVObject(KVObject data)
+        {
+            var blurWeightData = data.GetFloatArray("m_flBlurWeight");
+            var blurTintData = data.GetArray("m_vBlurTint").Select(v => v.ToVector3()).ToArray();
+
+            Debug.Assert(blurWeightData.Length == NumBlurBuffers);
+            Debug.Assert(blurTintData.Length == NumBlurBuffers);
+
+            var blurWeight = new BlurWeights();
+            var blurTint = new BlurTints();
+
+            for (var i = 0; i < NumBlurBuffers; i++)
+            {
+                blurWeight[i] = blurWeightData[i];
+                blurTint[i] = blurTintData[i];
+            }
+
+            return new BloomSettings
             {
                 BlendMode = data.GetEnumValue<BloomBlendType>("m_blendMode"),
                 AddBloomStrength = data.GetFloatProperty("m_flBloomStrength"),
@@ -269,10 +421,9 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
                 BloomThresholdWidth = data.GetFloatProperty("m_flBloomThresholdWidth"),
                 SkyboxBloomStrength = data.GetFloatProperty("m_flSkyboxBloomStrength"),
                 BloomStartValue = data.GetFloatProperty("m_flBloomStartValue"),
-                BlurWeight = data.GetFloatArray("m_flBlurWeight"),
+                BlurWeight = blurWeight,
+                BlurTint = blurTint,
             };
-
-            return settings;
         }
     }
 
@@ -331,13 +482,16 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
     public class ScenePostProcessVolume(Scene scene) : SceneNode(scene)
     {
         /// <summary>Gets the fade time in seconds when transitioning into this volume.</summary>
-        public float FadeTime { get; init; }
+        public float FadeTime { get; init; } = 1.0f;
 
         /// <summary>Gets whether this volume overrides auto-exposure settings.</summary>
         public bool UseExposure { get; init; }
 
         /// <summary>Gets whether this is the global master post-process volume.</summary>
         public bool IsMaster { get; init; }
+
+        /// <summary>Gets whether this volume starts disabled and contributes nothing.</summary>
+        public bool StartDisabled { get; init; }
 
         // Don't skip if no postprocess resource. Could still affect exposure
         /// <summary>Gets or sets the parsed post-processing resource for this volume.</summary>
@@ -346,8 +500,20 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
         /// <summary>Gets or sets the model used as the trigger volume shape.</summary>
         public Model? ModelVolume { get; set; } // dumb
 
+        /// <summary>Gets or sets the collider built from the volume model's physics, used to test whether the camera is inside.</summary>
+        public EntityCollider? Collider { get; set; }
+
+        /// <summary>
+        /// Gets or sets the current blend weight of this volume, crossfaded towards presence over
+        /// <see cref="FadeTime"/>. The master volume does not use this; it is the base state.
+        /// </summary>
+        public float Weight { get; set; }
+
         /// <summary>Gets or sets whether this post-processing resource uses the newer post-Half-Life: Alyx format (detected via the presence of local contrast parameters).</summary>
         public bool IsPostHLA { get; set; }
+
+        /// <summary>Gets or sets whether this volume has tonemapping curve data.</summary>
+        public bool HasTonemap { get; set; }
 
         /// <summary>Gets or sets whether this volume has bloom data.</summary>
         public bool HasBloom { get; set; }
@@ -367,23 +533,10 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
         /// <summary>Gets or sets the resolution of the color correction LUT cube.</summary>
         public int ColorCorrectionLutDimensions { get; set; }
 
-        // Bloom isn't implemented yet.
-        // But the BlurWeight array corresponds to the 1/2, 1/4, 1/8, 1/16, and 1/32 resolution blur strengths respectively.
-        // Same goes for BlurTint.
-
         // Local Contrast requires a scene blur, so that's off the table for the time being.
 
         // Vignette could easily be added but I haven't actually found any vpost file that uses it yet.
 
-
-        // For the time being we're only going to support one LUT at a time, as that's all that can be used.
-        // The most accurate method would be to go the valve route of using
-        // a compute shader to blend LUTs (up to 8) at the start of every frame.
-
-        // Additionally, due to collision detection being An Absolute Pain, we can't
-        // use local post process volumes, and can only use the master.
-
-        //
         /// <summary>
         /// Reads tonemapping, bloom, and color correction data from the given post-processing resource.
         /// </summary>
@@ -396,6 +549,7 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
 
             if (tonemapParams != null)
             {
+                HasTonemap = true;
                 PostProcessTonemapSettings = new TonemapSettings(tonemapParams);
             }
 
@@ -418,11 +572,9 @@ namespace ValveResourceFormat.Renderer.SceneEnvironment
 
                 ColorCorrectionLutDimensions = resolution;
 
-                ColorCorrectionLUT = new RenderTexture(TextureTarget.Texture3D, resolution, resolution, resolution, 1);
-                ColorCorrectionLUT.SetLabel(nameof(ColorCorrectionLUT));
-                ColorCorrectionLUT.SetWrapMode(TextureWrapMode.ClampToEdge);
+                ColorCorrectionLUT = RenderTexture.Create3D(TextureTarget.Texture3D, resolution, resolution, resolution, ImageFormat.RGBA8888, 1, nameof(ColorCorrectionLUT));
+                ColorCorrectionLUT.SetWrapMode(RsTextureAddressMode.Clamp);
                 ColorCorrectionLUT.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
-                GL.TextureStorage3D(ColorCorrectionLUT.Handle, 1, SizedInternalFormat.Rgba8, resolution, resolution, resolution);
                 GL.TextureSubImage3D(ColorCorrectionLUT.Handle, 0, 0, 0, 0, resolution, resolution, resolution, PixelFormat.Rgba, PixelType.UnsignedByte, data);
             }
         }

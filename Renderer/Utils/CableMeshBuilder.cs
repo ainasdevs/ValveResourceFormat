@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using ValveResourceFormat.Particles.Utils;
 using ValveResourceFormat.Renderer.SceneNodes;
 
 namespace ValveResourceFormat.Renderer.Utils
@@ -22,6 +23,21 @@ namespace ValveResourceFormat.Renderer.Utils
     }
 
     /// <summary>
+    /// One vertex of the tessellated cable tube.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    readonly struct CableVertex(Vector3 position, Vector3 normal, Vector2 uv, Color32 color)
+    {
+        [VertexAttribute(VertexSlot.Position)] public readonly Vector3 Position = position;
+        [VertexAttribute(VertexSlot.Normal)] public readonly Vector3 Normal = normal;
+        [VertexAttribute(VertexSlot.TexCoord)] public readonly Vector2 UV = uv;
+        [VertexAttribute(VertexSlot.Color)] public readonly Color32 Color = color;
+
+        /// <summary>The layout of this vertex, for creating vertex array objects.</summary>
+        public static readonly VertexInputLayout InputLayout = VertexInputLayout.FromStruct<CableVertex>();
+    }
+
+    /// <summary>
     /// Builds the cable geometry for a <c>path_particle_rope</c>: samples the stored cubic spline into
     /// rope particles, then (after the particle simulation has drooped them) tessellates a round tube
     /// through the settled positions (circular cross-section, sides = <c>2^clamp(roundness,0,3)*4</c>).
@@ -31,15 +47,6 @@ namespace ValveResourceFormat.Renderer.Utils
         // Absolute safety cap on the particle/sample count.
         private const int MaxSamples = 5000;
         private const int MaxStepsPerSegment = 256;
-
-        [StructLayout(LayoutKind.Sequential)]
-        internal readonly struct Vertex(Vector3 position, Vector3 normal, Vector2 uv, Color32 color)
-        {
-            public readonly Vector3 Position = position;
-            public readonly Vector3 Normal = normal;
-            public readonly Vector2 UV = uv;
-            public readonly Color32 Color = color;
-        }
 
         /// <summary>
         /// Samples the cable's cubic spline (no sag) at roughly <c>particle_spacing</c> intervals. Every
@@ -148,7 +155,7 @@ namespace ValveResourceFormat.Renderer.Utils
         /// <paramref name="sides"/> from <see cref="SideCount"/>. Returns false for degenerate input.
         /// </summary>
         internal static bool BuildTubeMesh(ReadOnlySpan<Vector3> positions, ReadOnlySpan<RopeSample> samples,
-            int sides, float circumferenceRepeats, Span<Vertex> vertices, Span<uint> indices)
+            int sides, float circumferenceRepeats, Span<CableVertex> vertices, Span<uint> indices)
         {
             if (positions.Length < 2 || positions.Length != samples.Length)
             {
@@ -165,7 +172,7 @@ namespace ValveResourceFormat.Renderer.Utils
             var normal = i == 0 ? InitialNormal(tangent) : NormalFromPrevious(tangent, previousNormal);
 
             var bitangent = Vector3.Cross(tangent, normal);
-            bitangent = bitangent.LengthSquared() > 1e-8f ? Vector3.Normalize(bitangent) : InitialNormal(tangent);
+            bitangent = bitangent.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(bitangent) : InitialNormal(tangent);
 
             return (normal, bitangent);
         }
@@ -190,7 +197,7 @@ namespace ValveResourceFormat.Renderer.Utils
                 dir = a + b;
             }
 
-            return dir.LengthSquared() > 1e-8f ? Vector3.Normalize(dir) : Vector3.UnitX;
+            return dir.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(dir) : Vector3.UnitX;
         }
 
         private static Vector3 InitialNormal(Vector3 tangent)
@@ -202,11 +209,11 @@ namespace ValveResourceFormat.Renderer.Utils
         private static Vector3 NormalFromPrevious(Vector3 tangent, Vector3 previousNormal)
         {
             var projected = previousNormal - (tangent * Vector3.Dot(previousNormal, tangent));
-            return projected.LengthSquared() > 1e-8f ? Vector3.Normalize(projected) : InitialNormal(tangent);
+            return projected.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(projected) : InitialNormal(tangent);
         }
 
         private static void BuildTubeGeometry(ReadOnlySpan<Vector3> positions, ReadOnlySpan<RopeSample> samples,
-            float circumferenceRepeats, int sides, Span<Vertex> vertices, Span<uint> indices)
+            float circumferenceRepeats, int sides, Span<CableVertex> vertices, Span<uint> indices)
         {
             var ringCount = positions.Length;
             var previousNormal = Vector3.Zero;
@@ -232,7 +239,7 @@ namespace ValveResourceFormat.Renderer.Utils
                     var radial = (normal * MathF.Cos(angle)) + (bitangent * MathF.Sin(angle));
                     var pos = center + (radial * sample.Radius);
                     var v = j / (float)sides * circumferenceRepeats;
-                    vertices[vertexCursor++] = new Vertex(pos, Normalize(radial), new Vector2(sample.U, v), color);
+                    vertices[vertexCursor++] = new CableVertex(pos, Normalize(radial), new Vector2(sample.U, v), color);
                 }
             }
 
@@ -279,6 +286,6 @@ namespace ValveResourceFormat.Renderer.Utils
             return length;
         }
 
-        private static Vector3 Normalize(Vector3 v) => v.LengthSquared() > 1e-12f ? Vector3.Normalize(v) : Vector3.UnitZ;
+        private static Vector3 Normalize(Vector3 v) => v.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(v) : Vector3.UnitZ;
     }
 }

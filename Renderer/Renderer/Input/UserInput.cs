@@ -1,4 +1,5 @@
 using ValveResourceFormat.IO;
+using ValveResourceFormat.Renderer.Entities;
 using ValveResourceFormat.Renderer.SceneNodes;
 using ValveResourceFormat.ResourceTypes;
 
@@ -42,8 +43,17 @@ public class UserInput
     /// <summary>Gets or sets the physics world used for orbit-target and player-movement ray traces.</summary>
     public Rubikon? PhysicsWorld { get; set; }
 
+    /// <summary>
+    /// Gets or sets the entity world whose solid entities the player collides with, on top of
+    /// <see cref="PhysicsWorld"/>. Brush entities move, so they are traced separately from the static world.
+    /// </summary>
+    public EntitySystem? EntitySystem { get; set; }
+
     private Vector3? _orbitTarget;
     private bool _forceUpdate = true;
+
+    private bool following;
+    private CameraLite followReturn;
 
     // Orbit controls
     /// <summary>Gets a value indicating whether the camera is currently in orbit mode.</summary>
@@ -52,6 +62,11 @@ public class UserInput
     public bool OrbitModeAlways { get; set; }
     /// <summary>Gets or sets an optional callback that provides a world-space orbit target point.</summary>
     public Func<Vector3?>? OrbitTargetProvider { get; set; }
+
+    /// <summary>Something the camera can orbit in place of the point under the crosshair.</summary>
+    internal readonly record struct OrbitFollow(bool Wanted, Vector3? Position);
+
+    internal Func<OrbitFollow>? OrbitFollowProvider { get; set; }
 
     /// <summary>Gets or sets the world-space point the camera orbits around; setting this also updates <see cref="OrbitDistance"/>.</summary>
     public Vector3? OrbitTarget
@@ -74,10 +89,23 @@ public class UserInput
     /// Gets the <see cref="PlayerMovement"/> helper that processes WASD movement in walk mode.
     /// </summary>
     public PlayerMovement PlayerMovement { get; }
-    /// <summary>Gets a value indicating whether the camera is in noclip (free-flight) mode rather than FPS movement mode.</summary>
-    public bool NoClip { get; private set; } = true;
 
-    private TrackedKeys Keys;
+    /// <summary>Gets a value indicating whether the camera is in FPS walk mode rather than noclip free flight.</summary>
+    public bool WalkMode { get; private set; }
+
+    /// <summary>Gets a value indicating whether the camera is in noclip (free-flight) mode rather than FPS movement mode.</summary>
+    public bool NoClip => !WalkMode;
+
+    /// <summary>
+    /// Gets a value indicating whether the walk mode crosshair should be drawn. The viewmodel already
+    /// hides itself outside walk mode and while the camera is detached, so it decides; without one
+    /// there is nothing to aim, so no crosshair.
+    /// </summary>
+    public bool ShowCrosshair => Viewmodel is { ShowCrosshair: true };
+
+    /// <summary>The buttons down as of this frame's sample, which movement folds into its own tick state.</summary>
+    internal TrackedKeys Keys { get; private set; }
+
     private TrackedKeys PreviousKeys;
     /// <summary>Gets the current camera velocity in world units per second.</summary>
     public Vector3 Velocity { get; private set; }
@@ -122,6 +150,8 @@ public class UserInput
     /// Checks if a key was just released this frame (not pressed now but was pressed last frame).
     /// </summary>
     public bool Released(TrackedKeys key) => (PreviousKeys & ~Keys & key) != 0;
+
+    private bool EscapeFreedMouse;
 
     private readonly Dictionary<TrackedKeys, float> lastKeyPressTimes = [];
 
@@ -186,10 +216,25 @@ public class UserInput
 
                 if (Released(TrackedKeys.Alt))
                 {
-                    PlayerMovement.Initialize = !NoClip;
+                    if (following)
+                    {
+                        Camera.Pitch = followReturn.Pitch;
+                        Camera.Yaw = followReturn.Yaw;
+                    }
+                    else
+                    {
+                        PlayerMovement.Initialize = WalkMode;
+
+                        if (WalkMode)
+                        {
+                            SettleCamera();
+                        }
+                    }
                 }
+
+                following = false;
             }
-            else if (Pressed(TrackedKeys.Alt))
+            else if (Pressed(TrackedKeys.Alt) && !TryFollowOrbit())
             {
                 OrbitTarget = null;
 
@@ -211,22 +256,51 @@ public class UserInput
             }
         }
 
-        var wasClipping = !NoClip;
-        if (Pressed(TrackedKeys.X) || PressedSuccessive(TrackedKeys.Space, 0.5f))
+        if (Pressed(TrackedKeys.MouseLeftOrRight))
         {
-            NoClip = !NoClip;
-            PlayerMovement.Initialize = !NoClip;
+            EscapeFreedMouse = false;
         }
 
-        if (wasClipping && NoClip)
+        var wasWalking = WalkMode;
+        if (Pressed(TrackedKeys.X))
+        {
+            WalkMode = !WalkMode;
+            PlayerMovement.Initialize = WalkMode;
+        }
+        else if (WalkMode && Pressed(TrackedKeys.Escape))
+        {
+            if (EscapeFreedMouse)
+            {
+                WalkMode = false;
+                PlayerMovement.Initialize = WalkMode;
+            }
+            else
+            {
+                EscapeFreedMouse = true;
+            }
+        }
+
+        if (wasWalking && !WalkMode)
         {
             MoveCamera(new Vector3(0, 0, 32), transition: true);
             CurrentSpeedModifier = 7;
         }
-
-        if (OrbitMode)
+        else if (!wasWalking && WalkMode)
         {
-            HandleOrbitControls(deltaTime, keyboardState, !NoClip);
+            // Only reachable on the frame X hands control back, since otherwise the two agree. The body
+            // is about to be seeded from the camera, so the view has to stop trailing it first.
+            SettleCamera();
+        }
+
+        Camera.Roll = 0f;
+
+        if (following && OrbitTarget is { } followTarget)
+        {
+            HandleFollowOrbit(followTarget);
+        }
+        else if (OrbitMode)
+        {
+            HandleOrbitControls(deltaTime, keyboardState, WalkMode);
         }
         else if (NoClip)
         {
@@ -234,21 +308,67 @@ public class UserInput
         }
         else
         {
-            PlayerMovement.ProcessMovement(this, Camera, deltaTime);
+            if (Viewmodel != null)
+            {
+                PlayerMovement.RunSpeed = Viewmodel.WeaponMaxSpeed;
+            }
+
+            PlayerMovement.ProcessMovement(Camera, deltaTime);
+
             Velocity = PlayerMovement.Velocity;
-            Camera.Pitch -= MouseDeltaPitchYaw.X;
+            Camera.Pitch += MouseDeltaPitchYaw.X;
             Camera.Yaw -= MouseDeltaPitchYaw.Y;
             Camera.ClampRotation();
         }
 
         Viewmodel?.ProcessInput(this, Renderer.Uptime);
 
-        var finalCamera = GetInterpolatedCamera();
-
-        renderCamera.SetLocationPitchYaw(finalCamera.Location, finalCamera.Pitch, finalCamera.Yaw);
-        renderCamera.ClampRotation();
+        ApplyToRenderCamera(renderCamera);
 
         PreviousKeys = keyboardState;
+    }
+
+    private void ApplyToRenderCamera(Camera renderCamera)
+    {
+        var finalCamera = GetInterpolatedCamera();
+
+        // The landing punch tilts the rendered view down without touching the stored aim.
+        var viewPunchPitch = float.DegreesToRadians(PlayerMovement.ViewPunchPitchDegrees);
+
+        renderCamera.SetLocationPitchYaw(finalCamera.Location, finalCamera.Pitch + viewPunchPitch, finalCamera.Yaw);
+        renderCamera.ClampRotation();
+
+        renderCamera.Roll = Camera.Roll;
+    }
+
+    /// <summary>
+    /// Re-places a camera following a moving target, after the scene has stepped it.
+    /// </summary>
+    /// <param name="renderCamera">The camera the frame is drawn with.</param>
+    public void LateUpdate(Camera renderCamera)
+    {
+        if (!following)
+        {
+            return;
+        }
+
+        if (OrbitFollowProvider?.Invoke().Position is { } position)
+        {
+            if (OrbitTarget == null)
+            {
+                AttachFollowOrbit(position);
+            }
+            else
+            {
+                _orbitTarget = position;
+            }
+        }
+
+        if (OrbitTarget is { } target)
+        {
+            PlaceFollowOrbitCamera(target);
+            ApplyToRenderCamera(renderCamera);
+        }
     }
 
     private CameraLite CameraPositionAngles
@@ -263,7 +383,7 @@ public class UserInput
     /// <param name="exitWalkMode">Whether to leave walk mode; pass false to teleport the player instead.</param>
     public void SaveCameraForTransition(float transitionDuration = 1.5f, bool exitWalkMode = true)
     {
-        if (!exitWalkMode && !NoClip)
+        if (!exitWalkMode && WalkMode)
         {
             // Teleport the player instead, without the transition lerping the view
             // behind physics that already moved.
@@ -271,8 +391,26 @@ public class UserInput
             return;
         }
 
-        NoClip = true;
+        WalkMode = false;
         TransitionCamera(transitionDuration);
+    }
+
+    /// <summary>
+    /// Ends any camera transition where it has got to, so the view stops lagging behind the camera it is
+    /// lerping towards.
+    /// </summary>
+    /// <remarks>
+    /// Handing control to the player means the camera stops being something the view chases and starts
+    /// being the body's eyes: the body is seeded from where the camera is, and drawn there, so a view
+    /// still lerping in from behind would watch itself materialise in front of it. Adopting the pose the
+    /// transition had reached rather than its destination keeps the player where they were looking from.
+    /// </remarks>
+    private void SettleCamera()
+    {
+        var view = GetInterpolatedCamera();
+
+        Camera.SetLocationPitchYaw(view.Location, view.Pitch, view.Yaw);
+        TransitionEndTime = -1f;
     }
 
     private void TransitionCamera(float transitionDuration = 1.5f)
@@ -298,6 +436,52 @@ public class UserInput
         return new(location, pitch, yaw);
     }
 
+    private const float FollowOrbitDistance = 64f;
+
+    private bool TryFollowOrbit()
+    {
+        var follow = OrbitFollowProvider?.Invoke() ?? default;
+        following = follow.Wanted;
+
+        if (!following)
+        {
+            return false;
+        }
+
+        _orbitTarget = null;
+        followReturn = CameraPositionAngles;
+
+        if (follow.Position is { } position)
+        {
+            AttachFollowOrbit(position);
+        }
+
+        return true;
+    }
+
+    private void AttachFollowOrbit(Vector3 target)
+    {
+        _orbitTarget = target;
+        OrbitDistance = FollowOrbitDistance;
+    }
+
+    private void HandleFollowOrbit(Vector3 target)
+    {
+        Camera.Yaw -= MouseDeltaPitchYaw.Y;
+        Camera.Pitch += MouseDeltaPitchYaw.X;
+        Camera.ClampRotation();
+
+        PlaceFollowOrbitCamera(target);
+
+        Velocity = Vector3.Zero;
+    }
+
+    private void PlaceFollowOrbitCamera(Vector3 target)
+    {
+        Camera.RecalculateDirectionVectors();
+        Camera.Location = target - Camera.Forward * OrbitDistance;
+    }
+
     private void HandleOrbitControls(float deltaTime, TrackedKeys keyboardState, bool walking)
     {
         var previousCamera = CameraPositionAngles;
@@ -314,7 +498,7 @@ public class UserInput
         if ((keyboardState & TrackedKeys.MouseLeft) != 0 || walking)
         {
             Camera.Yaw -= MouseDeltaPitchYaw.Y;
-            Camera.Pitch -= MouseDeltaPitchYaw.X;
+            Camera.Pitch += MouseDeltaPitchYaw.X;
             Camera.ClampRotation();
         }
 
@@ -339,7 +523,9 @@ public class UserInput
         if (clipped)
         {
             Camera.Location = clippedPos;
-            Camera.Yaw = float.Lerp(previousCamera.Yaw, Camera.Yaw, clippedTime);
+            // Yaw wraps, so the two ends can sit either side of the cut and a plain lerp would take the
+            // long way round, whipping the camera half a turn
+            Camera.Yaw = MathUtils.LerpAngle(previousCamera.Yaw, Camera.Yaw, clippedTime);
             Camera.Pitch = float.Lerp(previousCamera.Pitch, Camera.Pitch, clippedTime);
 
             var direction = clippedPos - target;
@@ -383,7 +569,9 @@ public class UserInput
         {
             // Camera truck and pedestal movement (blender calls this pan)
             var speed = AltMovementSpeed * deltaTime * SpeedModifiers[CurrentSpeedModifier];
-            var screenRight = Vector3.Normalize(Vector3.Cross(Vector3.UnitZ, Camera.Forward));
+            // Cross(worldUp, forward) is the camera's left, and unlike that cross it stays defined when
+            // the camera looks straight down
+            var screenRight = -Camera.Right;
             var screenUp = Vector3.Cross(Camera.Forward, screenRight);
 
             Camera.Location -= screenRight * speed * MouseDelta2D.X;
@@ -391,14 +579,12 @@ public class UserInput
             return;
         }
 
-        // Use the keyboard state to update position
         HandleKeyboardInput(deltaTime, keyboardState);
 
-        Camera.Pitch -= MouseDeltaPitchYaw.X;
+        Camera.Pitch += MouseDeltaPitchYaw.X;
         Camera.Yaw -= MouseDeltaPitchYaw.Y;
         Camera.ClampRotation();
     }
-
 
     /// <summary>
     /// Moves the camera by the specified amounts in camera space.
@@ -500,7 +686,6 @@ public class UserInput
             Velocity = targetVelocity;
         }
 
-        // Apply velocity to camera position
         Camera.Location += Velocity * deltaTime;
     }
 
@@ -527,6 +712,7 @@ public class UserInput
     public bool TryLoadViewmodel(Scene scene)
     {
         Viewmodel = ViewmodelSceneNode.TryLoadCs2Viewmodel(scene);
+        OrbitFollowProvider = Viewmodel is null ? null : Viewmodel.GetOrbitFollow;
         return Viewmodel != null;
     }
 }

@@ -1,4 +1,4 @@
-using ValveResourceFormat.Renderer.Buffers;
+using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.ResourceTypes.EntityLump;
 
@@ -20,6 +20,8 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         Omni,
         /// <summary>Cone-shaped spot light.</summary>
         Spot,
+        /// <summary>Orthographic projected light (parallel rays within a box).</summary>
+        Ortho,
         /// <summary>Second-generation omnidirectional point light.</summary>
         Omni2,
         /// <summary>Barn-door shaped area light.</summary>
@@ -41,6 +43,21 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         Dynamic = 2,
         /// <summary>Dynamic direct light with baked shadows.</summary>
         Stationary = 3,
+    }
+
+    /// <summary>Runtime cost of a light.</summary>
+    public enum LightCost
+    {
+        /// <summary>Light is free. The result is stored in lightmaps. Strength cannot be adjusted.</summary>
+        Static,
+
+        /// <summary>
+        /// Light cannot move. Lightmap stores indirect bounce, and shadow mask. Strength can be adjusted at runtime.
+        /// </summary>
+        Stationary,
+
+        /// <summary>Light can be moved in the world.</summary>
+        Dynamic,
     }
 
     /// <summary>
@@ -95,6 +112,10 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
     /// <summary>Gets or sets the brightness (intensity) of the light.</summary>
     public float Brightness { get; set; } = 1.0f;
+
+    /// <summary>Gets or sets a linear intensity measured at <see cref="LegacyBrightnessDistance"/>, which is
+    /// used in place of converting <see cref="Brightness"/>. <see cref="float.NaN"/> when unset.</summary>
+    public float BrightnessLegacy { get; set; } = float.NaN;
 
     /// <summary>Gets or sets the additional brightness scale multiplier.</summary>
     public float BrightnessScale { get; set; } = 1.0f;
@@ -159,6 +180,18 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// <summary>Gets or sets the direct lighting type.</summary>
     public DirectLightType DirectLight { get; set; } = DirectLightType.Dynamic;
 
+    /// <summary>Gets or sets whether this light is enabled at spawn.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Gets or sets whether this light contributes diffuse lighting.</summary>
+    public bool RenderDiffuse { get; set; } = true;
+
+    /// <summary>Gets or sets whether this light contributes specular lighting.</summary>
+    public bool RenderSpecular { get; set; } = true;
+
+    /// <summary>Gets or sets whether this light passes through transmissive materials.</summary>
+    public bool RenderTransmissive { get; set; } = true;
+
     /// <summary>Gets or sets whether this light casts shadows.</summary>
     public int CastShadows { get; set; } = 1;
 
@@ -192,12 +225,10 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// <summary>Gets or sets the Euler angles of the precomputed sub-OBBs, one per frustum.</summary>
     public Vector3[]? PrecomputedSubObbAngles { get; set; }
 
-    // Precomputed barn light faces (1 for a barn light, 1-6 for an omni light)
     /// <summary>Gets the precomputed face data array (1 face for barn lights, 1-6 for omni lights).</summary>
     public BarnFaceData[] BarnFaces { get; private set; } = [];
 
-    // Marks a barn light dirty. This will recalculate all faces.
-    /// <summary>Gets or sets whether this light's face data needs to be recomputed.</summary>
+    /// <summary>Gets or sets whether this light's face data needs to be recomputed. Setting it recalculates all faces.</summary>
     public bool IsDirty { get; set; } = true;
 
     internal int AdaptiveShadowSize { get; set; }
@@ -206,9 +237,8 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// <summary>
     /// Returns whether this light will produce energy based on its properties.
     /// </summary>
-    public bool IsVisible => BarnFaces.Length > 0 && Brightness > 0f && BrightnessScale > 0f && Color != Vector3.Zero;
-
-    internal Dictionary<int, (int FrustumHash, DepthOnlyDrawBuckets? DrawCalls)> FaceShadowCache { get; } = [];
+    public bool IsVisible => BarnFaces.Length > 0 && BrightnessScale > 0f && Color != Vector3.Zero
+        && (float.IsNaN(BrightnessLegacy) ? Brightness : BrightnessLegacy) > 0f;
 
     /// <summary>
     /// Returns whether the given entity classname is a recognized light type, and which <see cref="EntityType"/> it maps to.
@@ -237,6 +267,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             Type = type switch
             {
                 EntityType.Environment => LightType.Directional,
+                EntityType.Ortho => LightType.Directional,
 
                 EntityType.Omni => LightType.Point,
                 EntityType.Omni2 => LightType.Point,
@@ -251,39 +282,63 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
             Brightness = type switch
             {
-                EntityType.Environment or EntityType.Omni or EntityType.Spot => entity.GetFloatProperty(
-                    "brightness", 1.0f),
+                EntityType.Environment or EntityType.Omni or EntityType.Spot or EntityType.Ortho
+                    => entity.GetFloatProperty("brightness", 1.0f),
                 _ => entity.GetFloatProperty("brightness_lumens", 224.0f)
             },
 
             BrightnessScale = entity.GetFloatProperty("brightnessscale", 1.0f),
             Range = entity.GetFloatProperty("range", 512.0f),
-            FallOff = entity.GetFloatProperty("skirt", 0.1f)
+            FallOff = entity.GetFloatProperty("skirt", 0.1f),
+
+            Enabled = entity.GetInt32Property("enabled", 1) != 0,
+            RenderDiffuse = entity.GetInt32Property("renderdiffuse", 1) != 0,
+            RenderSpecular = entity.GetInt32Property("renderspecular", 1) == 1, // 0 = off, 1 = real time, 2 = baked into cubemaps
+            RenderTransmissive = entity.GetInt32Property("rendertransmissive", 1) != 0,
         };
 
         var isNewLightType = type is EntityType.Omni2 or EntityType.Barn or EntityType.Rect;
+
+        if (isNewLightType && scene.LightingInfo.UsesLegacyBarnBrightness)
+        {
+            light.BrightnessLegacy = entity.GetFloatProperty("brightness_legacy", float.NaN);
+        }
 
         if (!isNewLightType)
         {
             light.AttenuationLinear = entity.GetFloatProperty("attenuation1");
             light.AttenuationQuadratic = entity.GetFloatProperty("attenuation2");
+
+            if (entity.GetInt32Property("baked_light_indexing", 1) == 0)
+            {
+                light.StationaryLightIndex = -1;
+            }
         }
 
-        if (isNewLightType || type is EntityType.Environment)
+        var defaultDirectLight = isNewLightType
+            ? DirectLightType.Dynamic
+            : DirectLightType.Static;
+
+        light.DirectLight = (DirectLightType)entity.GetInt32Property("directlight", (int)defaultDirectLight);
+        light.CastShadows = entity.GetInt32Property("castshadows", 1);
+        light.ShadowMapSize = entity.GetInt32Property("shadowmapsize", 1024);
+        if (light.ShadowMapSize <= 0)
         {
-            light.DirectLight = (DirectLightType)entity.GetInt32Property("directlight", 2);
-            light.CastShadows = entity.GetInt32Property("castshadows", 1);
-            light.ShadowMapSize = entity.GetInt32Property("shadowmapsize", 1024);
-            if (light.ShadowMapSize <= 0)
-            {
-                light.ShadowMapSize = 1024;
-            }
+            light.ShadowMapSize = 1024;
         }
 
         if (type is EntityType.Spot or EntityType.Barn)
         {
             light.SpotInnerAngle = entity.GetFloatProperty("innerconeangle", light.SpotInnerAngle);
             light.SpotOuterAngle = entity.GetFloatProperty("outerconeangle", light.SpotOuterAngle);
+        }
+
+        if (type is EntityType.Ortho)
+        {
+            light.SizeParams = new Vector3(
+                entity.GetFloatProperty("ortholightwidth", 512.0f) * 0.5f,
+                entity.GetFloatProperty("ortholightheight", 512.0f) * 0.5f,
+                0f);
         }
 
         if (type is EntityType.Barn)
@@ -300,6 +355,16 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             light.MinRoughness = entity.GetFloatProperty("minroughness", 0.04f);
 
             light.Shear = entity.GetVector2Property("shear");
+        }
+
+        if (type is EntityType.Rect)
+        {
+            light.SizeParams = entity.GetVector3Property("size_params");
+            light.MinRoughness = entity.GetFloatProperty("minroughness", 0.04f);
+            light.Shape = entity.GetFloatProperty("shape"); // 0 = rectangle, 1 = disc
+            light.SoftX = 0f;
+            light.SoftY = 0f;
+            light.SkirtNear = 0f;
         }
 
         if (type is EntityType.Omni2)
@@ -343,13 +408,66 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         }
 
         light.Position = entity.GetVector3Property("origin");
-        light.Direction = AnglesToDirection(entity.GetVector3Property("angles"));
+        light.Direction = EntityTransformHelper.EulerAnglesToForwardDirection(entity.GetVector3Property("angles"));
         return light;
     }
 
+    /// <summary>
+    /// What this light costs to render, which is <see cref="DirectLight"/> resolved against
+    /// <see cref="StationaryLightIndex"/>.
+    /// </summary>
+    public LightCost Cost => GetCost(DirectLight, StationaryLightIndex);
+
+    /// <inheritdoc cref="Cost"/>
+    public static LightCost GetCost(DirectLightType directLight, int stationaryLightIndex)
+    {
+        if (directLight is DirectLightType.Stationary)
+        {
+            return LightCost.Stationary;
+        }
+
+        if (directLight is DirectLightType.None)
+        {
+            return LightCost.Static;
+        }
+
+        // A baked shadow index means the lightmap holds this light's shadows, which is what makes it
+        // stationary rather than dynamic. Lights authored as stationary reach here as Static: Alyx-era
+        // entities say directlight 1 (baked) plus baked_light_indexing, and pre-Alyx light entities
+        // carry no directlight key at all so they reach here as Dynamic.
+        if (stationaryLightIndex >= 0)
+        {
+            return LightCost.Stationary;
+        }
+
+        return directLight is DirectLightType.Static ? LightCost.Static : LightCost.Dynamic;
+    }
+
+    /// <inheritdoc cref="Cost"/>
+    /// <param name="entity">Light entity to read the direct lighting key values from.</param>
+    public static LightCost GetCost(Entity entity)
+    {
+        return GetCost(
+            (DirectLightType)entity.GetInt32Property("directlight", (int)DirectLightType.Dynamic),
+            entity.GetInt32Property("bakedshadowindex", entity.GetInt32Property("bakelightindex", -1)));
+    }
+
+    /// <summary>
+    /// Editor model tint for a light entity, keyed on how expensive it is: teal for static, amber for
+    /// stationary, red for dynamic. These are the colors the Source 2 light entities pass to the
+    /// <c>lightModeTint2</c> editor model helper in their fgd.
+    /// </summary>
+    /// <param name="entity">Light entity to read the direct lighting key values from.</param>
+    public static Vector3 GetEditorTint(Entity entity) => GetCost(entity) switch
+    {
+        LightCost.Stationary => new Vector3(255f, 196f, 64f) / 255f,
+        LightCost.Dynamic => new Vector3(255f, 64f, 64f) / 255f,
+        _ => new Vector3(0f, 255f, 192f) / 255f,
+    };
+
     internal static bool IsRealTimeLight(SceneLight light)
     {
-        if (light.Entity is not (EntityType.Barn or EntityType.Omni2))
+        if (light.Entity is not (EntityType.Barn or EntityType.Omni2 or EntityType.Rect))
         {
             return false;
         }
@@ -363,29 +481,21 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     }
 
     /// <summary>
-    /// Converts Euler pitch/yaw angles to a normalized forward direction vector.
-    /// </summary>
-    public static Vector3 AnglesToDirection(Vector3 angles)
-    {
-        var (sinPitch, cosPitch) = MathF.SinCos(float.DegreesToRadians(angles.X));
-        var (sinYaw, cosYaw) = MathF.SinCos(float.DegreesToRadians(angles.Y));
-
-        return Vector3.Normalize(new Vector3(cosYaw * cosPitch, sinYaw * cosPitch, sinPitch));
-    }
-
-    /// <summary>
     /// Recomputes the <see cref="BarnFaces"/> array from the current light properties.
     /// </summary>
     /// <param name="cookiePaths">Map from cookie material path to cookie atlas index.</param>
     public void ComputeBarnFaces(Dictionary<string, int> cookiePaths)
     {
+        // Face indices shift under the readbacks still in flight, so their countdowns describe nothing.
+        faceVisibilityTtl = ulong.MaxValue;
+
         if (Range <= 0.0001f)
         {
             BarnFaces = [];
             return;
         }
 
-        if (Entity == EntityType.Barn)
+        if (Entity is EntityType.Barn or EntityType.Rect)
         {
             if (BarnFaces is not { Length: 1 })
             {
@@ -415,6 +525,24 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         return aspect >= 1f
             ? (size, (int)MathF.Round(size / aspect))
             : ((int)MathF.Round(size * aspect), size);
+    }
+
+    /// <summary>Distance, in world units, that <c>brightness_legacy</c> is measured at.</summary>
+    private const float LegacyBrightnessDistance = 100f;
+
+    /// <summary>Linear intensity for the shader, rescaled to the reference distance whose square is <paramref name="referenceDistSq"/> (zero for a light with no falloff).</summary>
+    private static float ComputeIntensity(SceneLight light, float referenceDistSq, float divisor)
+    {
+        if (float.IsNaN(light.BrightnessLegacy))
+        {
+            return divisor > 0.000001f ? light.Brightness * light.BrightnessScale / divisor : 0f;
+        }
+
+        var intensity = light.BrightnessLegacy * light.BrightnessScale;
+
+        return referenceDistSq > 0f
+            ? intensity * (LegacyBrightnessDistance * LegacyBrightnessDistance / referenceDistSq)
+            : intensity;
     }
 
     private static (Matrix4x4 WorldToFrustum, Vector4 Position, float SkirtNear, float SkirtFar, float Divisor)
@@ -507,7 +635,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             ? ComputeOrthographicBarnGeometry(light, forwardDir, upDir, rightDir)
             : ComputePerspectiveBarnGeometry(light, forwardDir, upDir, rightDir);
 
-        var colorIntensity = divisor > 0.000001f ? light.Brightness * light.BrightnessScale / divisor : 0f;
+        var colorIntensity = ComputeIntensity(light, barnLightPosition.W, divisor);
         var linearColor = ColorSpace.SrgbGammaToLinear(light.Color) * colorIntensity;
 
         var cookieW = 0f;
@@ -665,7 +793,8 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
     private static Vector3 ComputeOmni2Color(SceneLight light)
     {
-        var colorIntensity = light.Brightness * light.BrightnessScale * (4f * MathF.PI * 10f) / light.ComputeConeSolidAngle();
+        var divisor = light.ComputeConeSolidAngle() / (4f * MathF.PI * 10f);
+        var colorIntensity = ComputeIntensity(light, 1f, divisor);
         return ColorSpace.SrgbGammaToLinear(light.Color) * colorIntensity;
     }
 
@@ -771,7 +900,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     private static (OpenTK.Mathematics.Matrix3x4 IlluminationFromWorld, Matrix4x4 ObbToWorld)
         ComputeObbMatrices(Vector3 center, Vector3 extent, Vector3 angles)
     {
-        var rotMatrix = EntityTransformHelper.CreateRotationMatrixFromEulerAngles(angles);
+        var rotMatrix = EntityTransformHelper.EulerAnglesToRotationMatrix(angles);
 
         var axis0 = new Vector3(rotMatrix.M11, rotMatrix.M12, rotMatrix.M13);
         var axis1 = new Vector3(rotMatrix.M21, rotMatrix.M22, rotMatrix.M23);
@@ -858,4 +987,53 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             _ => 6
         };
     }
+
+    #region Gpu face visibility
+
+    // Per face verdicts from LightBinner's cull mask readback, kept here because the light reference is
+    // the only identity that survives between frames: the binned slot order is rebuilt every one.
+
+    /// <summary>Disagreeing readbacks before a face loses its shadow. One agreeing readback restores it.</summary>
+    private const int GpuVisibilityTtl = 4;
+
+    /// <summary>Faces the countdowns pack into, one byte each. Above the 6 an omni light has.</summary>
+    private const int GpuVisibilityFaces = 8;
+
+    /// <summary>Starts saturated, so a face nothing has measured is lit.</summary>
+    private ulong faceVisibilityTtl = ulong.MaxValue;
+
+    /// <summary>Gets the readback sequence <see cref="faceVisibilityTtl"/> was last stamped with.</summary>
+    internal int GpuVisibilitySequence { get; private set; }
+
+    /// <summary>Folds one readback's verdict into the per face countdowns.</summary>
+    /// <param name="visibleFaces">Bit per face the readback found reaching a visible tile.</param>
+    /// <param name="sequence">Sequence number of that readback.</param>
+    internal void ApplyGpuFaceVisibility(uint visibleFaces, int sequence)
+    {
+        var next = 0ul;
+
+        for (var face = 0; face < GpuVisibilityFaces; face++)
+        {
+            var shift = face * 8;
+            var ttl = (int)((faceVisibilityTtl >> shift) & 0xFFul);
+
+            ttl = (visibleFaces & (1u << face)) != 0u ? GpuVisibilityTtl : Math.Max(ttl - 1, 0);
+
+            next |= (ulong)ttl << shift;
+        }
+
+        faceVisibilityTtl = next;
+        GpuVisibilitySequence = sequence;
+    }
+
+    /// <summary>Whether a face still wants a shadow map. A sequence this light was not stamped for is no
+    /// verdict at all, which reads as lit.</summary>
+    /// <param name="faceIndex">Face to test.</param>
+    /// <param name="sequence">Sequence number of the readback the caller is asking about.</param>
+    internal bool IsFaceGpuVisible(int faceIndex, int sequence)
+        => GpuVisibilitySequence != sequence
+            || faceIndex >= GpuVisibilityFaces
+            || ((faceVisibilityTtl >> (faceIndex * 8)) & 0xFFul) != 0ul;
+
+    #endregion
 }

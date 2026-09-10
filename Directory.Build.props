@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <ProjectBaseVersion>19.2</ProjectBaseVersion>
+    <ProjectBaseVersion>20.0</ProjectBaseVersion>
     <ProjectVersion Condition="'$(GITHUB_RUN_NUMBER)' != ''">$(ProjectBaseVersion).$(GITHUB_RUN_NUMBER)</ProjectVersion>
     <ProjectVersion Condition="'$(GITHUB_RUN_NUMBER)' == ''">$(ProjectBaseVersion).0</ProjectVersion>
     <DefineConstants Condition="'$(GITHUB_REF_TYPE)' == 'tag'">$(DefineConstants);CI_RELEASE_BUILD</DefineConstants>
@@ -36,7 +36,7 @@
     <Copyright>Copyright © ValveResourceFormat Contributors</Copyright>
     <RepositoryUrl>https://github.com/ValveResourceFormat/ValveResourceFormat</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageProjectUrl>https://valveresourceformat.github.io/</PackageProjectUrl>
+    <PackageProjectUrl>https://s2v.app/</PackageProjectUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 

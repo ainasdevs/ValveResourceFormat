@@ -1,6 +1,7 @@
 #version 460
 
 #include "common/ViewConstants.slang"
+#include "common/instancing_base.slang"
 #include "common/structs.slang"
 
 layout (local_size_x = 64) in;
@@ -25,6 +26,22 @@ layout(binding = 6, std430) readonly buffer MeshletInfoBuffer
     MeshletCullInfo meshlets[];
 };
 
+// Fragments of an instanced aggregate share one draw call, so they share its meshlet cull data too
+layout(binding = 14, std430) readonly buffer CommandMeshletBuffer
+{
+    uint commandMeshlets[];
+};
+
+layout(binding = 2, std430) readonly buffer ObjectLodBuffer
+{
+    uvec2 objectLod[]; // lod group mask, index into activeLodBits
+};
+
+layout(binding = 3, std430) readonly buffer ActiveLodBitsBuffer
+{
+    uint activeLodBits[]; // per setup, the bit of the level it picked this frame
+};
+
 
 layout(binding = 7, std430) buffer OccludedBoundsDebugBuffer
 {
@@ -40,7 +57,7 @@ layout(binding = 7, std430) buffer OccludedBoundsDebugBuffer
 uniform bool g_bOcclusionDebugEnabled;
 
 // Depth pyramid (hierarchical depth buffer)
-layout(binding = 0) uniform sampler2D g_tDepthPyramid;
+uniform sampler2D g_tDepthPyramid; // bound above the reserved slots by Scene.SetOcclusionUniforms
 
 // Depth pyramid dimensions
 uniform int g_nDepthPyramidMaxMip;
@@ -50,6 +67,7 @@ uniform int g_nDepthPyramidHeight;
 uniform float g_flDepthRangeMin;
 uniform float g_flDepthRangeMax;
 uniform bool g_bOcclusionCullEnabled;
+uniform bool g_bSkyOcclusion;
 
 // Project AABB to screen space and test occlusion
 bool testAABBOcclusion(vec3 bmin, vec3 bmax)
@@ -57,18 +75,22 @@ bool testAABBOcclusion(vec3 bmin, vec3 bmax)
     // Offset camera forward to reduce false occlusions
     //vec3 cameraOffset = g_vCameraDirWs * g_flDepthPyramidCameraOffset;
 
-    // Project all 8 corners to clip space
-    vec4 corners[8];
-    for (int i = 0; i < 8; i++)
-    {
-        vec3 corner = vec3(
-            (i & 1) != 0 ? bmax.x : bmin.x,
-            (i & 2) != 0 ? bmax.y : bmin.y,
-            (i & 4) != 0 ? bmax.z : bmin.z
-        );
+    // Projection is linear before the divide, so project the min corner and the three
+    // axis extents once, then derive the other corners by adds
+    vec3 ext = bmax - bmin;
+    vec4 dx = g_matPrevWorldToProjection[0] * ext.x;
+    vec4 dy = g_matPrevWorldToProjection[1] * ext.y;
+    vec4 dz = g_matPrevWorldToProjection[2] * ext.z;
 
-        corners[i] = g_matPrevWorldToProjection * vec4(corner, 1.0);
-    }
+    vec4 corners[8];
+    corners[0] = g_matPrevWorldToProjection * vec4(bmin, 1.0);
+    corners[1] = corners[0] + dx;
+    corners[2] = corners[0] + dy;
+    corners[3] = corners[1] + dy;
+    corners[4] = corners[0] + dz;
+    corners[5] = corners[1] + dz;
+    corners[6] = corners[2] + dz;
+    corners[7] = corners[3] + dz;
 
     float minW = min(min(min(corners[0].w, corners[1].w), min(corners[2].w, corners[3].w)),
                      min(min(corners[4].w, corners[5].w), min(corners[6].w, corners[7].w)));
@@ -160,6 +182,12 @@ bool testAABBOcclusion(vec3 bmin, vec3 bmax)
     // Find minimum depth (furthest in reverse Z)
     float occluderDepth = min(min(depth0, depth1), min(depth2, depth3));
 
+    if (g_bSkyOcclusion)
+    {
+        // 3d sky tests the main scene depth
+        return occluderDepth >= g_flDepthRangeMin;
+    }
+
     // Less popping in when crossing geometry
     if (occluderDepth > 0.5)
     {
@@ -236,7 +264,16 @@ void main()
         return;
     }
 
-    MeshletCullInfo meshlet = meshlets[drawId];
+    uint objectId = drawCommands[drawId].baseInstance;
+    uvec2 lod = objectLod[objectId];
+
+    if (lod.x != 0u && (lod.x & activeLodBits[lod.y]) == 0u)
+    {
+        drawCommands[drawId].instanceCount = 0u;
+        return;
+    }
+
+    MeshletCullInfo meshlet = meshlets[commandMeshlets[drawId]];
 
     uint boundIndex = meshlet.m_nParentDrawBoundsIndex;
 
@@ -245,6 +282,49 @@ void main()
 
     vec3 meshletMin = unpackAABB(objectMin, objectMax, meshlet.m_PackedAABB.m_nMin);
     vec3 meshletMax = unpackAABB(objectMin, objectMax, meshlet.m_PackedAABB.m_nMax);
+
+    vec4 coneCullInfo = unpackSByteVector(meshlet.m_PackedCone);
+
+    // Shared cull data is stored in the aggregate's own space, so each instance moves it into
+    // world space with its own transform. Index zero is reserved for the identity transform.
+    uint transformIndex = objects[objectId].TransformIndex;
+
+    if (transformIndex != 0)
+    {
+        mat3x4 objectToWorld = transforms[transformIndex];
+
+        vec3 center = (meshletMin + meshletMax) * 0.5;
+        vec3 extents = (meshletMax - meshletMin) * 0.5;
+
+        // The three columns of a mat3x4 are the rows of the affine transform
+        vec3 worldCenter = vec3(
+            dot(objectToWorld[0].xyz, center) + objectToWorld[0].w,
+            dot(objectToWorld[1].xyz, center) + objectToWorld[1].w,
+            dot(objectToWorld[2].xyz, center) + objectToWorld[2].w
+        );
+
+        vec3 worldExtents = vec3(
+            dot(abs(objectToWorld[0].xyz), extents),
+            dot(abs(objectToWorld[1].xyz), extents),
+            dot(abs(objectToWorld[2].xyz), extents)
+        );
+
+        meshletMin = worldCenter - worldExtents;
+        meshletMax = worldCenter + worldExtents;
+
+        // Uniform scale falls out of the renormalize; a zero axis would normalize to NaN
+        vec3 coneAxis = vec3(
+            dot(objectToWorld[0].xyz, coneCullInfo.xyz),
+            dot(objectToWorld[1].xyz, coneCullInfo.xyz),
+            dot(objectToWorld[2].xyz, coneCullInfo.xyz)
+        );
+
+        float coneAxisLength = length(coneAxis);
+
+        coneCullInfo.xyz = coneAxisLength > 0.0
+            ? coneAxis * (length(coneCullInfo.xyz) / coneAxisLength)
+            : vec3(0.0);
+    }
 
     const bool FrustumCull = true;
     const bool BackfaceCull = true;
@@ -258,8 +338,6 @@ void main()
 
     if (visible && BackfaceCull)
     {
-        vec4 coneCullInfo = unpackSByteVector(meshlet.m_PackedCone);
-
         vec3 meshletCenter = (meshletMin + meshletMax) * 0.5;
         vec3 meshletSize = meshletMax - meshletMin;
 

@@ -23,8 +23,11 @@ namespace GUI.Types.GLViewers
         public UserInput Input { get; protected set; }
 
         public ValveResourceFormat.Renderer.TextRenderer TextRenderer { get; protected set; }
+        private readonly CrosshairRenderer crosshairRenderer;
 
         protected PickingTexture? Picker { get; set; }
+
+        protected QuadOverdraw? QuadOverdrawRenderer { get; set; }
 
         public Scene Scene { get; }
         public Scene? SkyboxScene => Renderer.SkyboxScene;
@@ -56,6 +59,7 @@ namespace GUI.Types.GLViewers
         private bool showStaticOctree;
         private bool showDynamicOctree;
         private bool showVisDebug;
+        protected bool ShowSpeed { get; set; }
         private bool showPhysicsTraces;
         private PhysicsTraceDebugRenderer? physicsTraceRenderer;
 
@@ -72,6 +76,7 @@ namespace GUI.Types.GLViewers
 
         /// <summary>Set by escape to release the mouse in walk mode, cleared by clicking back into the viewport.</summary>
         private bool mouseReleased;
+        private bool roundStarted;
 
         private readonly List<RenderModes.RenderMode> renderModes = new(RenderModes.Items.Count);
         private int renderModeCurrentIndex;
@@ -102,6 +107,7 @@ namespace GUI.Types.GLViewers
             Renderer = new(rendererContext);
             Input = new UserInput(Renderer);
             TextRenderer = new(rendererContext, Renderer.Camera);
+            crosshairRenderer = new CrosshairRenderer(rendererContext);
             Scene = Renderer.Scene;
 
 #if DEBUG
@@ -111,15 +117,19 @@ namespace GUI.Types.GLViewers
 
         public override void Dispose()
         {
-            base.Dispose();
-
+            // Delete GL resources before the base disposes the GL context
             physicsTraceRenderer?.Delete();
             physicsTraceRenderer = null;
 
             soundPlayer?.Dispose();
             soundPlayer = null;
 
+            QuadOverdrawRenderer?.Dispose();
+            QuadOverdrawRenderer = null;
+
             Renderer?.Dispose();
+
+            base.Dispose();
 
             perfDisplayComboBox?.Dispose();
             perfDisplayComboBox = null;
@@ -161,14 +171,16 @@ namespace GUI.Types.GLViewers
                     {
                         UiControl.AddCheckBox("Show Vis Debug", showVisDebug, v => showVisDebug = v);
                     }
+                }
 
-                    if (Scene.PhysicsWorld != null)
-                    {
-                        UiControl.AddCheckBox("Debug Physics Traces", showPhysicsTraces, v => showPhysicsTraces = v);
-                    }
+                if (Scene.PhysicsWorld != null)
+                {
+                    UiControl.AddCheckBox("Debug Physics Traces", showPhysicsTraces, v => showPhysicsTraces = v);
                 }
 
                 UiControl.AddCheckBox("Debug Sound Sources", Renderer.ShowSoundDebug, v => Renderer.ShowSoundDebug = v);
+
+                UiControl.AddCheckBox("Disable threaded sim", !Renderer.ParallelSimulation, v => Renderer.ParallelSimulation = !v);
 
                 perfDisplayComboBox = UiControl.AddSelection("Debug Performance", (_, i) => perfDisplay = (PerfDisplay)i);
                 perfDisplayComboBox.Items.AddRange([nameof(PerfDisplay.Off), nameof(PerfDisplay.Stats), nameof(PerfDisplay.Timings), nameof(PerfDisplay.Allocations)]);
@@ -205,12 +217,10 @@ namespace GUI.Types.GLViewers
 
         protected void UpdateSunAngles()
         {
-            // clamp and wrap angles
             sunAngles.X = Math.Clamp(sunAngles.X, 0f, 89f);
             sunAngles.Y %= 360f;
 
-            Scene.LightingInfo.LightingData.LightToWorld[0] = Matrix4x4.CreateRotationY(float.DegreesToRadians(sunAngles.X))
-                                                             * Matrix4x4.CreateRotationZ(float.DegreesToRadians(sunAngles.Y));
+            Scene.LightingInfo.SetSunDirectionFromAngles(new Vector3(sunAngles.X, sunAngles.Y, 0f));
         }
 
         public virtual void PostSceneLoad()
@@ -265,7 +275,7 @@ namespace GUI.Types.GLViewers
             }
 
             Scene.StaticOctree.DebugRenderer = new(Scene.StaticOctree, Scene.RendererContext, false);
-            Scene.DynamicOctree.DebugRenderer = new(Scene.DynamicOctree, Scene.RendererContext, true);
+            Scene.DynamicOctree.DebugRenderer = new(Scene.DynamicOctree, Scene.RendererContext);
         }
 
         protected abstract void LoadScene();
@@ -277,6 +287,10 @@ namespace GUI.Types.GLViewers
             base.OnResize(w, h);
 
             Renderer.Camera.SetViewportSize(w, h);
+
+            // The input camera frames objects against its own aspect ratio, so it needs the size too
+            Input.Camera.SetViewportSize(w, h);
+
             Picker?.Resize(w, h);
         }
 
@@ -284,7 +298,7 @@ namespace GUI.Types.GLViewers
         {
             base.OnMouseWheel(delta, location);
 
-            if (!Input.NoClip)
+            if (Input.WalkMode)
             {
                 return;
             }
@@ -305,7 +319,7 @@ namespace GUI.Types.GLViewers
         {
             base.OnMouseUp(sender, e);
 
-            if (!Input.NoClip)
+            if (Input.WalkMode)
             {
                 return;
             }
@@ -322,7 +336,7 @@ namespace GUI.Types.GLViewers
 
             mouseReleased = false;
 
-            if (!Input.NoClip)
+            if (Input.WalkMode)
             {
                 return;
             }
@@ -343,14 +357,10 @@ namespace GUI.Types.GLViewers
         {
             base.OnGLLoad();
 
-            GL.CreateQueries(QueryTarget.TimeElapsed, 1, out frametimeQuery1);
-            GL.CreateQueries(QueryTarget.TimeElapsed, 1, out frametimeQuery2);
+            ReportLoadingStatus("Preparing renderer…");
 
-#if DEBUG
-            const string queryLabel = "Frame Time Query";
-            GL.ObjectLabel(ObjectLabelIdentifier.Query, frametimeQuery1, queryLabel.Length, queryLabel);
-            GL.ObjectLabel(ObjectLabelIdentifier.Query, frametimeQuery2, queryLabel.Length, queryLabel);
-#endif
+            frametimeQuery1 = GraphicsDevice.CreateQuery(QueryTarget.TimeElapsed, "Frame Time Query");
+            frametimeQuery2 = GraphicsDevice.CreateQuery(QueryTarget.TimeElapsed, "Frame Time Query");
 
             // Needed to fix crash on certain drivers
             GL.BeginQuery(QueryTarget.TimeElapsed, frametimeQuery2);
@@ -359,9 +369,15 @@ namespace GUI.Types.GLViewers
             TextRenderer.Load();
             Renderer.Postprocess.Load(NumSamples);
 
+            Renderer.Postprocess.FullScreenGamma = 2.01f; // 100% Brightness
+            Renderer.Postprocess.ExposureCompensation = -0.4f; // eyeballed
+
             baseGrid = new InfiniteGrid(Scene);
             SelectedNodeRenderer = new(Scene.RendererContext);
             Picker = new(Scene.RendererContext, OnPicked);
+
+            QuadOverdrawRenderer = new(Scene.RendererContext);
+            QuadOverdrawRenderer.Load();
 
             Renderer.ShadowTextureSize = Settings.Config.ShadowResolution;
             Renderer.Initialize();
@@ -376,12 +392,9 @@ namespace GUI.Types.GLViewers
             timer.Stop();
             Log.Debug(GetType().Name, $"Loading scene time: {timer.Elapsed}, shader variants: {Scene.RendererContext.ShaderLoader.ShaderCount}, materials: {Scene.RendererContext.MaterialLoader.MaterialCount}");
 
-            PostSceneLoad();
+            ReportLoadingStatus("Initializing scene…");
 
-            if (this is GLWorldViewer)
-            {
-                PrewarmDrawCalls();
-            }
+            PostSceneLoad();
 
             GuiContext.ClearCache();
             GuiContext.GLPostLoadAction?.Invoke(this);
@@ -391,6 +404,10 @@ namespace GUI.Types.GLViewers
         /// <summary>
         /// Renders one full frame with culling disabled so the driver specializes every
         /// (program, vertex layout, framebuffer) combination once.
+        ///
+        /// Must run on the render loop thread. Nvidia specializes per thread, so a frame drawn while the
+        /// context still belongs to the loading thread specializes nothing the render loop can use, and every
+        /// program pays for it again on its first real draw.
         /// </summary>
         private void PrewarmDrawCalls()
         {
@@ -399,9 +416,13 @@ namespace GUI.Types.GLViewers
             Scene.RendererContext.ShaderLoader.LinkLoadedShaders();
             Renderer.DisableAllCulling = true;
 
+            Renderer.Camera.CopyFrom(Input.Camera);
+            Renderer.Prewarming = true;
+
             try
             {
-                OnPaint(0f);
+                // A non-zero delta so that particles actually simulate
+                OnPaint(1f / 60f);
 
                 foreach (var particleNode in Scene.AllNodes.OfType<ParticleSceneNode>())
                 {
@@ -411,20 +432,21 @@ namespace GUI.Types.GLViewers
             finally
             {
                 Renderer.DisableAllCulling = false;
+                Renderer.Prewarming = false;
             }
         }
 
-        protected override void OnFirstPaint()
-        {
-            base.OnFirstPaint();
+        protected void ReportLoadingStatus(string status) => GuiContext.LoadingProgress?.Report(status);
 
-            if (this is GLWorldViewer)
-            {
-                // Fixes compile stutters, but performance is lower!
-                // PrewarmDrawCalls();
-                // var elapsed = Stopwatch.GetElapsedTime(LastUpdate, Stopwatch.GetTimestamp());
-                // Log.Debug(GetType().Name, $"Prewarm time: {elapsed}");
-            }
+        protected override void PrewarmRenderer()
+        {
+            ReportLoadingStatus("Compiling shaders…");
+
+            var start = Stopwatch.GetTimestamp();
+
+            PrewarmDrawCalls();
+
+            Log.Debug(GetType().Name, $"Prewarm time: {Stopwatch.GetElapsedTime(start)}");
         }
 
         /// <summary>
@@ -490,7 +512,8 @@ namespace GUI.Types.GLViewers
             }
 
             Input.EnableMouseLook = true;
-            if (loadedDefaultLighting && (CurrentlyPressedKeys & TrackedKeys.Control) != 0)
+
+            if (loadedDefaultLighting && Input.NoClip && (CurrentlyPressedKeys & TrackedKeys.Control) != 0)
             {
                 var delta = new Vector2(LastMouseDelta.Y, LastMouseDelta.X);
 
@@ -503,7 +526,7 @@ namespace GUI.Types.GLViewers
 
             // Walk mode keeps simulating while the cursor is over the ui, otherwise player
             // physics and teleports stay frozen until the mouse moves back over the viewport.
-            if (MouseOverRenderArea || Input.ForceUpdate || !Input.NoClip)
+            if (MouseOverRenderArea || Input.ForceUpdate || Input.WalkMode)
             {
                 Input.MouseSensitivity = Settings.Config.MouseSensitivity;
                 Input.SmoothCameraEnabled = Settings.Config.SmoothCameraEnabled;
@@ -525,19 +548,32 @@ namespace GUI.Types.GLViewers
                 var wheelDelta = ConsumePendingMouseWheelDelta();
 
                 Input.MouseSensitivity = Settings.Config.MouseSensitivity;
-                var wasNoClip = Input.NoClip;
+                var wasWalkMode = Input.WalkMode;
                 Input.Tick(frameTime, pressedKeys, new Vector2(mouseDelta.X, mouseDelta.Y), Renderer.Camera);
                 LastMouseDelta = mouseDelta;
 
                 // cancel unintentional selection
-                if (wasNoClip && !Input.NoClip)
+                if (!wasWalkMode && Input.WalkMode)
                 {
                     SelectedNodeRenderer?.SelectNode(null);
+
+                    if (!roundStarted)
+                    {
+                        roundStarted = true;
+                        Scene.EntitySystem.StartRound();
+                    }
                 }
 
-                GrabbedMouse = MouseOverRenderArea && !Input.NoClip && !Paused && !mouseReleased;
-            }
+                // Walk mode aims with the mouse, so it holds the cursor. Leaving walk mode, pausing,
+                // or pressing escape hands it back.
+                var wantsMouseLook = Input.WalkMode && !Paused && !mouseReleased;
 
+                // Taking the cursor needs it over the viewport, but keeping it does not, or a fast
+                // look that outran the pointer would drop the grab on its way past the edge.
+                var alreadyHoldingCursor = GrabbedMouse;
+
+                GrabbedMouse = wantsMouseLook && (alreadyHoldingCursor || MouseOverRenderArea);
+            }
         }
 
         /// <summary>
@@ -589,15 +625,15 @@ namespace GUI.Types.GLViewers
 
         protected override void BlitFramebufferToScreen()
         {
-            if (MainFramebuffer == GLDefaultFramebuffer)
-            {
-                return; // not required
-            }
-
             Debug.Assert(MainFramebuffer != null);
             Debug.Assert(GLDefaultFramebuffer != null);
 
             Renderer.PostprocessRender(MainFramebuffer, GLDefaultFramebuffer);
+        }
+
+        protected override void OnBufferSwapped(double blockedMs, double framePeriodMs)
+        {
+            Renderer.PerfStats.Timings.SetBufferSwapTime(blockedMs, framePeriodMs);
         }
 
         protected override void OnPaint(float frameTime)
@@ -612,8 +648,6 @@ namespace GUI.Types.GLViewers
 
             Renderer.PerfStats.MarkFrameBegin();
             GL.BeginQuery(QueryTarget.TimeElapsed, frametimeQuery1);
-
-            UpdateSoundPlayer();
 
             var renderContext = new Scene.RenderContext
             {
@@ -634,10 +668,18 @@ namespace GUI.Types.GLViewers
 
                 Renderer.Update(updateContext);
 
+                Input.LateUpdate(Renderer.Camera);
+
                 SelectedNodeRenderer.Update(renderContext, updateContext);
             }
 
+            // After the update, so the listener is placed with this frame's camera vectors rather than
+            // this frame's position and last frame's facing
+            UpdateSoundPlayer();
+
             Renderer.ForceResolveSceneDepth = ShowBaseGrid;
+
+            var quadOverdrawThisFrame = false;
 
             using (new GLDebugGroup("Scenes Render"))
             {
@@ -654,8 +696,30 @@ namespace GUI.Types.GLViewers
                 {
                     renderContext.ReplacementShader = Picker.DebugShader;
                 }
+                else if (QuadOverdrawRenderer?.IsActive == true)
+                {
+                    QuadOverdrawRenderer.Prepare(MainFramebuffer.Width, MainFramebuffer.Height);
+
+                    quadOverdrawThisFrame = true;
+                }
 
                 Renderer.Render(renderContext);
+
+                if (quadOverdrawThisFrame)
+                {
+                    using (new GLDebugGroup("Quad Overdraw Counting Pass"))
+                    {
+                        QuadOverdrawRenderer!.BeginCountingPass(MainFramebuffer);
+
+                        renderContext.OverdrawShader = QuadOverdrawRenderer.SceneShader;
+                        Renderer.RenderScenesWithView(renderContext);
+                        renderContext.OverdrawShader = null;
+
+                        QuadOverdrawRenderer.EndCountingPass(MainFramebuffer);
+                    }
+
+                    QuadOverdrawRenderer!.Render();
+                }
             }
 
             using (new GLDebugGroup("Lines Render"))
@@ -742,7 +806,12 @@ namespace GUI.Types.GLViewers
 
             BlitFramebufferToScreen();
 
-            if (GrabbedMouse)
+            if (Input.ShowCrosshair)
+            {
+                crosshairRenderer.Render(Renderer.Camera);
+            }
+
+            if (GrabbedMouse && ShowSpeed)
             {
                 TextRenderer.AddTextRelative(new ValveResourceFormat.Renderer.TextRenderer.TextRenderRequest
                 {
@@ -888,6 +957,12 @@ namespace GUI.Types.GLViewers
                 var selectedIndex = 0;
                 var currentlySelected = keepCurrentSelection ? renderModeComboBox.SelectedItem?.ToString() : null;
                 var supportedRenderModes = new HashSet<string>(Picker.Shader.RenderModes);
+
+                if (QuadOverdrawRenderer != null)
+                {
+                    supportedRenderModes.UnionWith(QuadOverdrawRenderer.SceneShader.RenderModes);
+                }
+
                 foreach (var node in Scene.AllNodes)
                 {
                     supportedRenderModes.UnionWith(node.GetSupportedRenderModes());
@@ -953,8 +1028,10 @@ namespace GUI.Types.GLViewers
             Renderer.Postprocess.Enabled = Renderer.ViewBuffer.Data.RenderMode == 0;
 
             Scene.EnableCompaction = renderMode != "Meshlets";
+            SkyboxScene?.EnableCompaction = Scene.EnableCompaction;
 
             Picker.SetRenderMode(renderMode);
+            QuadOverdrawRenderer?.SetRenderMode(renderMode);
             SelectedNodeRenderer.SetRenderMode(renderMode);
 
             foreach (var node in Scene.AllNodes)

@@ -1,4 +1,4 @@
-// Credit to https://github.com/mafaca/Etc
+// Credit to https://github.com/mafaca/UtinyRipper (C# port of https://github.com/Ishotihadus/mikunyan)
 
 using System.Runtime.CompilerServices;
 
@@ -24,7 +24,6 @@ namespace ValveResourceFormat.TextureDecoders
             {0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1}
         };
         protected static readonly byte[] Etc2DistanceTable = [3, 6, 11, 16, 23, 32, 41, 64];
-
 
         protected readonly uint[] m_buf = new uint[16];
         protected readonly byte[,] m_c = new byte[3, 3];

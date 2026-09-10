@@ -3,6 +3,7 @@ using System.Linq;
 using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.Renderer.SceneNodes;
 using ValveResourceFormat.Renderer.World;
+using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Renderer
@@ -22,6 +23,9 @@ namespace ValveResourceFormat.Renderer
 
         /// <summary>Gets or sets optional debug text rendered in the top-left corner of the viewport.</summary>
         public string ScreenDebugText { get; set; } = string.Empty;
+
+        /// <summary>Gets a value indicating whether any node is currently selected.</summary>
+        public bool HasSelectedNodes => selectedNodes.Count > 0;
 
         /// <summary>Initializes the selected node renderer and creates GPU resources.</summary>
         /// <param name="rendererContext">Renderer context for loading shaders.</param>
@@ -182,6 +186,18 @@ namespace ValveResourceFormat.Renderer
         {
             disableDepth = selectedNodes.Count > 1;
 
+            // Draw the debug text even when nothing is selected
+            if (ScreenDebugText.Length > 0)
+            {
+                updateContext.TextRenderer.AddTextRelative(new TextRenderer.TextRenderRequest
+                {
+                    X = 0.005f,
+                    Y = 0.03f,
+                    Scale = 14f,
+                    Text = ScreenDebugText,
+                }, renderContext.Camera);
+            }
+
             if (selectedNodes.Count == 0)
             {
                 // We don't need to reupload an empty array
@@ -282,12 +298,12 @@ namespace ValveResourceFormat.Renderer
                         if (boundsMins != null && boundsMaxs != null && obbExtent != null && obbOrigin != null)
                         {
                             var bounds = new AABB(
-                                EntityTransformHelper.ParseVector(boundsMins),
-                                EntityTransformHelper.ParseVector(boundsMaxs)
+                                EntityTransformHelper.ParseVector3(boundsMins),
+                                EntityTransformHelper.ParseVector3(boundsMaxs)
                             );
 
-                            var origin = EntityTransformHelper.ParseVector(obbExtent);
-                            var extent = EntityTransformHelper.ParseVector(obbOrigin);
+                            var origin = EntityTransformHelper.ParseVector3(obbExtent);
+                            var extent = EntityTransformHelper.ParseVector3(obbOrigin);
 
                             AddBox(renderContext.Camera, updateContext.TextRenderer, vertices, Matrix4x4.Identity, bounds, new(0.0f, 1.0f, 0.0f, 1.0f));
 
@@ -310,17 +326,6 @@ namespace ValveResourceFormat.Renderer
                     CenterHorizontal = true,
                     TextOffset = SelectedNodeNameOffset
                 }, renderContext.Camera, fixedScale: false);
-            }
-
-            if (ScreenDebugText.Length > 0)
-            {
-                updateContext.TextRenderer.AddTextRelative(new TextRenderer.TextRenderRequest
-                {
-                    X = 0.005f,
-                    Y = 0.03f,
-                    Scale = 14f,
-                    Text = ScreenDebugText,
-                }, renderContext.Camera);
             }
 
             Upload(vertices);

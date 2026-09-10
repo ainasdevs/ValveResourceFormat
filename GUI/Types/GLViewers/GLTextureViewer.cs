@@ -11,7 +11,7 @@ using OpenTK.Graphics.OpenGL;
 using SkiaSharp;
 using Svg.Skia;
 using ValveResourceFormat;
-using ValveResourceFormat.CompiledShader;
+using ValveResourceFormat.Graphs;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Input;
 using ValveResourceFormat.Renderer.Materials;
@@ -116,8 +116,8 @@ namespace GUI.Types.GLViewers
         private bool IsZoomedIn;
         private bool MovedFromOrigin_Unzoomed;
 
-        private int LastRenderHash;
-        private int NumRendersLastHash;
+        protected int LastRenderHash;
+        protected bool RenderUpToDate;
 
         static readonly (ChannelMapping Channels, ChannelSplitting ChannelSplitMode, string ChoiceString)[] ChannelsComboBoxOrder = [
             (ChannelMapping.R, ChannelSplitting.None, "Red"),
@@ -133,11 +133,14 @@ namespace GUI.Types.GLViewers
         private GLTextureViewer(VrfGuiContext vrfGuiContext, RendererContext rendererContext) : base(rendererContext)
         {
             VrfGuiContext = vrfGuiContext;
+            rendererContext.MaxTextureSize = int.MaxValue;
 
 #if DEBUG
             ShaderHotReload.ShadersReloaded += OnHotReload;
 #endif
         }
+
+        protected virtual bool ShowResetZoomButton => true;
 
         protected override void AddUiControls()
         {
@@ -152,15 +155,18 @@ namespace GUI.Types.GLViewers
 
             UpdateZoomLabel();
 
-            var resetButton = new ThemedButton
+            if (ShowResetZoomButton)
             {
-                Text = "Reset zoom",
-                AutoSize = true,
-            };
+                var resetButton = new ThemedButton
+                {
+                    Text = "Reset zoom",
+                    AutoSize = true,
+                };
 
-            resetButton.Click += (_, __) => ResetZoom();
+                resetButton.Click += (_, __) => ResetZoom();
 
-            UiControl.AddControl(resetButton);
+                UiControl.AddControl(resetButton);
+            }
 
             AddSaveButton();
 
@@ -181,6 +187,9 @@ namespace GUI.Types.GLViewers
 
             base.AddUiControls();
         }
+
+        /// <summary>The save/copy row, exposed so a viewer can reorder it within its sidebar.</summary>
+        protected Control? SaveSection { get; private set; }
 
         private void AddSaveButton()
         {
@@ -214,6 +223,7 @@ namespace GUI.Types.GLViewers
             saveTable.Controls.Add(saveButton, 0, 0);
             saveTable.Controls.Add(copyLabel, 1, 0);
             UiControl.AddControl(saveTable);
+            SaveSection = saveTable;
         }
 
         private void InitializeUIControlsForResource()
@@ -526,7 +536,7 @@ namespace GUI.Types.GLViewers
                 };
 
                 texture.SetFiltering(min, mag);
-                texture.SetWrapMode(VisualizeTiling ? TextureWrapMode.Repeat : TextureWrapMode.ClampToEdge);
+                texture.SetWrapMode(VisualizeTiling ? RsTextureAddressMode.Wrap : RsTextureAddressMode.Clamp);
             }
         }
 
@@ -621,9 +631,15 @@ namespace GUI.Types.GLViewers
             base.Dispose();
         }
 
+        /// <summary>
+        /// Whether there is anything to write out. Viewers that draw their own content instead of
+        /// a texture override this and answer with <see cref="ReadPixelsToBitmap"/>.
+        /// </summary>
+        protected virtual bool CanSaveVisual => Resource != null || Svg != null || Bitmap != null;
+
         private void OnSaveButtonClick(object? sender, EventArgs e)
         {
-            if (Resource == null && Svg == null && Bitmap == null)
+            if (!CanSaveVisual)
             {
                 return;
             }
@@ -661,7 +677,7 @@ namespace GUI.Types.GLViewers
 
             if (isHdrTexture && selectedFilterIndex == 1)
             {
-                using var hdrBitmap = ReadPixelsToBitmap(hdr: true);
+                using var hdrBitmap = ReadTexturePixels(hdr: true);
                 fs.Write(ValveResourceFormat.IO.TextureExtract.ToExrImage(hdrBitmap));
                 return;
             }
@@ -729,10 +745,10 @@ namespace GUI.Types.GLViewers
                 return RasterizeSvg(Svg.Picture, svgWidth, svgHeight);
             }
 
-            return ReadPixelsToBitmap(hdr: false);
+            return ReadTexturePixels(hdr: false);
         }
 
-        protected SKBitmap ReadPixelsToBitmap(bool hdr = false)
+        private SKBitmap ReadTexturePixels(bool hdr)
         {
             var removeFlags = hdr
                 ? (TextureCodec.ColorSpaceLinear | TextureCodec.ColorSpaceSrgb)
@@ -757,7 +773,7 @@ namespace GUI.Types.GLViewers
                 // extract pixels from framebuffer
                 GL.Viewport(0, 0, bitmap.Width, bitmap.Height);
 
-                var fboFormat = GLTextureDecoder.GetPreferredFramebufferFormat(hdr);
+                var fboFormat = hdr ? GLTextureDecoder.HDRFormat : GLTextureDecoder.LDRFormat;
 
                 if (SaveAsFbo is not null)
                 {
@@ -787,7 +803,8 @@ namespace GUI.Types.GLViewers
 
                 SaveAsFbo.Bind(FramebufferTarget.ReadFramebuffer);
                 GL.ReadBuffer(ReadBufferMode.ColorAttachment0);
-                GL.ReadPixels(0, 0, bitmap.Width, bitmap.Height, SaveAsFbo.ColorFormat!.PixelFormat, SaveAsFbo.ColorFormat.PixelType, pixels);
+                var readFormat = MaterialLoader.GetImageExportFormat(hdr);
+                GL.ReadPixels(0, 0, bitmap.Width, bitmap.Height, readFormat.ToGLPixelFormat(), readFormat.ToGLPixelType(), pixels);
 
                 Debug.Assert(MainFramebuffer is not null);
                 MainFramebuffer.Bind(FramebufferTarget.Framebuffer);
@@ -822,7 +839,7 @@ namespace GUI.Types.GLViewers
             }
         }
 
-        private void UpdateZoomLabel() => SetMoveSpeedOrZoomLabel($"Zoom: {TextureScale * 100:0.0}% (scroll to change)");
+        protected void UpdateZoomLabel() => SetMoveSpeedOrZoomLabel($"Zoom: {TextureScale * 100:0.0}% (scroll to change)");
 
         protected override void OnKeyDown(Keys keyData)
         {
@@ -1025,8 +1042,9 @@ namespace GUI.Types.GLViewers
             var scaleMinMax = new Vector2(0.1f, 50f);
             scaleMinMax *= 256 / MathF.Max(ActualTextureSize.X, ActualTextureSize.Y);
 
-            if (this is GLNodeGraphViewer)
+            if (this is GLGraphViewer graphViewer)
             {
+                scaleMinMax.X = graphViewer.MinTextureScale();
                 scaleMinMax.Y = 2f;
             }
 
@@ -1162,7 +1180,7 @@ namespace GUI.Types.GLViewers
                 return;
             }
 
-            shader = RendererContext.ShaderLoader.LoadShader("vrf.texture_decode", (textureType, 1));
+            shader = RendererContext.ShaderLoader.LoadShader("texture_decode", (textureType, 1));
         }
 
         private void UploadTexture(bool forceSoftwareDecode)
@@ -1201,9 +1219,8 @@ namespace GUI.Types.GLViewers
                 var resolution = postProcessingData.GetColorCorrectionLUTDimension();
                 var data = postProcessingData.GetColorCorrectionLUT();
 
-                texture = new RenderTexture(TextureTarget.Texture3D, resolution, resolution, resolution, 1);
+                texture = RenderTexture.Create3D(TextureTarget.Texture3D, resolution, resolution, resolution, ImageFormat.RGBA8888, 1, "ColorCorrectionLUT");
 
-                GL.TextureStorage3D(texture.Handle, 1, SizedInternalFormat.Rgba8, resolution, resolution, resolution);
                 GL.TextureSubImage3D(texture.Handle, 0, 0, 0, 0, resolution, resolution, resolution, PixelFormat.Rgba, PixelType.UnsignedByte, data);
 
                 return;
@@ -1242,7 +1259,7 @@ namespace GUI.Types.GLViewers
                 return;
             }
 
-            texture = RendererContext.MaterialLoader.LoadTexture(Resource, isViewerRequest: true);
+            texture = RendererContext.MaterialLoader.LoadTexture(Resource);
             InvalidateRender();
         }
 
@@ -1313,7 +1330,11 @@ namespace GUI.Types.GLViewers
                 SetupTexture(false);
             }
 
-            // Use non-msaa framebuffer for texture viewer
+            UseDefaultFramebuffer();
+        }
+
+        protected void UseDefaultFramebuffer()
+        {
             if (MainFramebuffer != GLDefaultFramebuffer)
             {
                 MainFramebuffer?.Delete();
@@ -1383,7 +1404,29 @@ namespace GUI.Types.GLViewers
                 NextBitmapToSet = null;
             }
 
-            var renderHash = HashCode.Combine(
+            var renderHash = GetRenderHash();
+
+            if (renderHash != LastRenderHash)
+            {
+                LastRenderHash = renderHash;
+                InvalidateRender();
+            }
+
+            if (RenderUpToDate)
+            {
+                SkipBufferSwap = true;
+                return;
+            }
+
+            RenderUpToDate = true;
+            RenderToFramebuffer();
+        }
+
+        protected virtual int GetRenderHash()
+        {
+            Debug.Assert(MainFramebuffer is not null);
+
+            return HashCode.Combine(
                 HashCode.Combine(
                     GetCurrentPositionAndScale(),
                     SelectedMip,
@@ -1399,27 +1442,21 @@ namespace GUI.Types.GLViewers
                 MainFramebuffer.Width,
                 MainFramebuffer.Height
             );
+        }
 
-            if (renderHash != LastRenderHash)
-            {
-                InvalidateRender();
-            }
+        protected virtual void RenderToFramebuffer()
+        {
+            Debug.Assert(MainFramebuffer is not null);
+            Debug.Assert(GLControl is not null);
 
-            const int NumBackBuffers = 2;
-            if (NumRendersLastHash < NumBackBuffers)
-            {
-                GL.Viewport(0, 0, GLControl.Width, GLControl.Height);
-                MainFramebuffer.BindAndClear();
-                Draw(MainFramebuffer);
-
-                LastRenderHash = renderHash;
-                NumRendersLastHash++;
-            }
+            GL.Viewport(0, 0, GLControl.Width, GLControl.Height);
+            MainFramebuffer.BindAndClear();
+            Draw(MainFramebuffer);
         }
 
         protected void InvalidateRender()
         {
-            NumRendersLastHash = 0;
+            RenderUpToDate = false;
             GLControl?.Invalidate();
         }
 
@@ -1433,33 +1470,33 @@ namespace GUI.Types.GLViewers
 
             shader.Use();
 
-            shader.SetUniform1("g_bTextureViewer", true);
-            shader.SetUniform1("g_bShowLightBackground", ShowLightBackground);
-            shader.SetUniform2("g_vViewportSize", new Vector2(fbo.Width, fbo.Height));
+            shader.SetUniform("g_bTextureViewer", true);
+            shader.SetUniform("g_bShowLightBackground", ShowLightBackground);
+            shader.SetUniform("g_vViewportSize", new Vector2(fbo.Width, fbo.Height));
 
             var theme1 = Themer.CurrentTheme == Themer.AppTheme.Dark
                 ? Themer.CurrentThemeColors.Border
                 : Themer.CurrentThemeColors.AppMiddle;
-            shader.SetUniform3("g_vCheckerboardTheme", new Vector3(theme1.R, theme1.G, theme1.B) / 255f);
+            shader.SetUniform("g_vCheckerboardTheme", new Vector3(theme1.R, theme1.G, theme1.B) / 255f);
 
             var (scale, position) = captureFullSizeImage
                 ? (1f / (1 << SelectedMip), Vector2.Zero)
                 : GetCurrentPositionAndScale();
 
-            shader.SetUniform1("g_bCapturingScreenshot", captureFullSizeImage);
-            shader.SetUniform2("g_vViewportPosition", position);
-            shader.SetUniform1("g_flScale", scale);
+            shader.SetUniform("g_bCapturingScreenshot", captureFullSizeImage);
+            shader.SetUniform("g_vViewportPosition", position);
+            shader.SetUniform("g_flScale", scale);
 
             shader.SetTexture(0, "g_tInputTexture", texture);
-            shader.SetUniform4("g_vInputTextureSize", new Vector4(OriginalWidth, OriginalHeight, texture.Depth, texture.NumMipLevels));
-            shader.SetUniform1("g_nSelectedMip", SelectedMip);
-            shader.SetUniform1("g_nSelectedDepth", SelectedDepth);
-            shader.SetUniform1("g_nSelectedCubeFace", SelectedCubeFace);
-            shader.SetUniform1("g_nSelectedChannels", SelectedChannels.PackedValue);
-            shader.SetUniform1("g_bVisualizeTiling", VisualizeTiling);
-            shader.SetUniform1("g_nChannelSplitMode", (int)ChannelSplitMode);
-            shader.SetUniform1("g_nCubemapProjectionType", (int)CubemapProjectionType);
-            shader.SetUniform1("g_nDecodeFlags", (int)(decodeFlags & ~removeFlags));
+            shader.SetUniform("g_vInputTextureSize", new Vector4(OriginalWidth, OriginalHeight, texture.Depth, texture.NumMipLevels));
+            shader.SetUniform("g_nSelectedMip", SelectedMip);
+            shader.SetUniform("g_nSelectedDepth", SelectedDepth);
+            shader.SetUniform("g_nSelectedCubeFace", SelectedCubeFace);
+            shader.SetUniform("g_nSelectedChannels", SelectedChannels.PackedValue);
+            shader.SetUniform("g_bVisualizeTiling", VisualizeTiling);
+            shader.SetUniform("g_nChannelSplitMode", (int)ChannelSplitMode);
+            shader.SetUniform("g_nCubemapProjectionType", (int)CubemapProjectionType);
+            shader.SetUniform("g_nDecodeFlags", (int)(decodeFlags & ~removeFlags));
 
             GL.BindVertexArray(RendererContext.MeshBufferCache.EmptyVAO);
             GL.DrawArrays(PrimitiveType.Triangles, 0, 3);

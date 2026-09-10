@@ -16,12 +16,12 @@ namespace ValveResourceFormat.ResourceTypes
         /// <summary>
         /// Gets the time of the emphasis sample.
         /// </summary>
-        public float Time { get; }
+        public float Time { get; init; }
 
         /// <summary>
         /// Gets the emphasis value.
         /// </summary>
-        public float Value { get; }
+        public float Value { get; init; }
     }
 
     /// <summary>
@@ -62,12 +62,10 @@ namespace ValveResourceFormat.ResourceTypes
         /// </summary>
         public required PhonemeTag[] RunTimePhonemes { get; init; }
 
-        /*
         /// <summary>
         /// Gets the emphasis samples for voice modulation.
         /// </summary>
-        public EmphasisSample[] EmphasisSamples { get; init; }
-        */
+        public EmphasisSample[] EmphasisSamples { get; init; } = [];
     }
 
     /// <summary>
@@ -234,18 +232,19 @@ namespace ValveResourceFormat.ResourceTypes
             SampleCount = reader.ReadUInt32();
             Duration = reader.ReadSingle();
 
-            var sentenceOffset = reader.ReadUInt32();
-            var b = reader.ReadUInt32(); // size?
+            var sentencePosition = reader.BaseStream.Position;
+            var sentenceOffset = reader.ReadUInt32(); // CResourcePointer<CSentence_t> m_Sentence
 
-            if (sentenceOffset != 0)
-            {
-                sentenceOffset = (uint)(reader.BaseStream.Position + sentenceOffset);
-            }
-
+            var headerPosition = reader.BaseStream.Position;
+            var headerOffset = reader.ReadUInt32(); // CResourceArray<uint8> m_pHeader
             var headerSize = reader.ReadInt32();
             StreamingDataSize = reader.ReadUInt32();
 
-            // m_nSeekTable (seek table for seeking compressed audio)
+            if (sentenceOffset != 0)
+            {
+                sentenceOffset = (uint)(sentencePosition + sentenceOffset);
+            }
+
             if (Resource.Version >= 1)
             {
                 var d = reader.ReadUInt32();
@@ -280,7 +279,9 @@ namespace ValveResourceFormat.ResourceTypes
             if (headerSize > 0)
             {
                 Debug.Assert(AudioFormat == WaveAudioFormat.ADPCM);
+                Debug.Assert(reader.BaseStream.Position == headerPosition + headerOffset);
 
+                reader.BaseStream.Position = headerPosition + headerOffset;
                 Header = reader.ReadBytes(headerSize);
             }
 
@@ -375,39 +376,62 @@ namespace ValveResourceFormat.ResourceTypes
 
             reader.BaseStream.Position = sentenceOffset;
 
+            var shouldVoiceDuck = reader.ReadByte() != 0;
+            reader.BaseStream.Position += 3; // Padding to align the resource arrays
+
+            var phonemesPosition = reader.BaseStream.Position;
+            var phonemesOffset = reader.ReadInt32(); // CResourceArray<CBasePhonemeTag_t> m_RunTimePhonemes
             var numPhonemeTags = reader.ReadInt32();
 
-            var a = reader.ReadInt32(); // numEmphasisSamples ?
-            var b = reader.ReadInt32(); // Sentence.ShouldVoiceDuck ?
+            var emphasisPosition = reader.BaseStream.Position;
+            var emphasisOffset = reader.ReadInt32(); // CResourceArray<CEmphasisSample_t> m_EmphasisSamples
+            var numEmphasisSamples = reader.ReadInt32();
 
-            // Skip sounds that have these
-            if (a != 0 || b != 0)
+            var emphasisSamples = new EmphasisSample[numEmphasisSamples];
+
+            if (numEmphasisSamples > 0)
             {
-                return;
+                reader.BaseStream.Position = emphasisPosition + emphasisOffset;
+
+                for (var i = 0; i < numEmphasisSamples; i++)
+                {
+                    emphasisSamples[i] = new EmphasisSample
+                    {
+                        Time = reader.ReadSingle(),
+                        Value = reader.ReadSingle(),
+                    };
+                }
+            }
+
+            var phonemes = new PhonemeTag[numPhonemeTags];
+
+            if (numPhonemeTags > 0)
+            {
+                reader.BaseStream.Position = phonemesPosition + phonemesOffset;
+
+                for (var i = 0; i < numPhonemeTags; i++)
+                {
+                    var startTime = reader.ReadSingle();
+                    var endTime = reader.ReadSingle();
+                    var phonemeCode = reader.ReadUInt16();
+
+                    reader.BaseStream.Position += 2; // Padding, CBasePhonemeTag_t is 4-byte aligned
+
+                    phonemes[i] = new PhonemeTag
+                    {
+                        StartTime = startTime,
+                        EndTime = endTime,
+                        PhonemeCode = phonemeCode
+                    };
+                }
             }
 
             Sentence = new Sentence
             {
-                RunTimePhonemes = new PhonemeTag[numPhonemeTags]
+                ShouldVoiceDuck = shouldVoiceDuck,
+                RunTimePhonemes = phonemes,
+                EmphasisSamples = emphasisSamples,
             };
-
-            for (var i = 0; i < numPhonemeTags; i++)
-            {
-                var startTime = reader.ReadSingle();
-                var endTime = reader.ReadSingle();
-                var phonemeCode = reader.ReadUInt16();
-
-                reader.BaseStream.Position += 2;
-
-                var phonemeTag = new PhonemeTag
-                {
-                    StartTime = startTime,
-                    EndTime = endTime,
-                    PhonemeCode = phonemeCode
-                };
-
-                Sentence.RunTimePhonemes[i] = phonemeTag;
-            }
         }
 
         private void ReadSentenceFromCtrl(KVObject sound)
@@ -426,20 +450,36 @@ namespace ValveResourceFormat.ResourceTypes
                 return;
             }
 
-            Sentence = new Sentence
-            {
-                RunTimePhonemes = new PhonemeTag[phonemes.Count]
-            };
+            var runTimePhonemes = new PhonemeTag[phonemes.Count];
 
             for (var i = 0; i < phonemes.Count; i++)
             {
-                Sentence.RunTimePhonemes[i] = new PhonemeTag
+                runTimePhonemes[i] = new PhonemeTag
                 {
                     StartTime = phonemes[i].GetFloatProperty("m_flStartTime"),
                     EndTime = phonemes[i].GetFloatProperty("m_flEndTime"),
                     PhonemeCode = (ushort)phonemes[i].GetInt32Property("m_nPhonemeCode"),
                 };
             }
+
+            var emphasis = sentences[0].GetArray("m_EmphasisSamples");
+            var emphasisSamples = new EmphasisSample[emphasis?.Count ?? 0];
+
+            for (var i = 0; i < emphasisSamples.Length; i++)
+            {
+                emphasisSamples[i] = new EmphasisSample
+                {
+                    Time = emphasis![i].GetFloatProperty("m_flTime"),
+                    Value = emphasis[i].GetFloatProperty("m_flValue"),
+                };
+            }
+
+            Sentence = new Sentence
+            {
+                ShouldVoiceDuck = sentences[0].GetBooleanProperty("m_bShouldVoiceDuck"),
+                RunTimePhonemes = runTimePhonemes,
+                EmphasisSamples = emphasisSamples,
+            };
         }
 
         private static uint ExtractSub(uint l, byte offset, byte nrBits)
@@ -580,11 +620,15 @@ namespace ValveResourceFormat.ResourceTypes
 
             if (Sentence != null)
             {
-                writer.WriteLine($"Sentence[{Sentence.RunTimePhonemes.Length}]:");
+                writer.WriteLine($"Sentence[{Sentence.RunTimePhonemes.Length}] (voice duck: {Sentence.ShouldVoiceDuck}):");
                 writer.Indent++;
                 foreach (var phoneme in Sentence.RunTimePhonemes)
                 {
                     writer.WriteLine($"PhonemeTag(StartTime={phoneme.StartTime}, EndTime={phoneme.EndTime}, PhonemeCode={phoneme.PhonemeCode})");
+                }
+                foreach (var sample in Sentence.EmphasisSamples)
+                {
+                    writer.WriteLine($"EmphasisSample(Time={sample.Time}, Value={sample.Value})");
                 }
                 writer.Indent--;
             }

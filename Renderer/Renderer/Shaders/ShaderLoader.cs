@@ -73,8 +73,23 @@ namespace ValveResourceFormat.Renderer.Shaders
             /// <summary>Gets the set of render mode names declared in the shader source.</summary>
             public HashSet<string> RenderModes { get; } = [];
 
-            /// <summary>Gets the set of sampler and vector uniform names declared in the shader source.</summary>
+            /// <summary>Gets the set of uniform names declared in the shader source.</summary>
             public HashSet<string> Uniforms { get; } = [];
+
+            /// <summary>
+            /// Gets the <c>#extension</c> directives hoisted out of the shader source. They have to precede
+            /// every non-preprocessor token, and the packed uniform block is one, so the header emits them.
+            /// </summary>
+            public HashSet<string> Extensions { get; } = [];
+
+            /// <summary>Gets the packable uniform declarations collected from every stage, in source order.</summary>
+            public List<GlobalsDeclaration> GlobalsDeclarations { get; } = [];
+
+            /// <summary>
+            /// Gets the packed layout of <see cref="GlobalsDeclarations"/>. Built once all stages have been
+            /// preprocessed, and shared by every static combo variant compiled from this source.
+            /// </summary>
+            public GlobalsLayout GlobalsLayout { get; set; } = GlobalsLayout.Empty;
 
             /// <summary>Gets the set of uniform names annotated with <c>// SrgbRead(true)</c>.</summary>
             public HashSet<string> SrgbUniforms { get; } = [];
@@ -130,7 +145,7 @@ namespace ValveResourceFormat.Renderer.Shaders
         }
 
         /// <summary>Loads or retrieves a cached shader compiled with the specified static combos.</summary>
-        /// <param name="shaderName">The Source 2 shader name (e.g. <c>complex.vfx</c>).</param>
+        /// <param name="shaderName">The Source 2 shader name (e.g. <c>complex.vfx</c>), or a renderer shader file name that must exist (e.g. <c>grid</c>). See <see cref="GetShaderFileByName"/>.</param>
         /// <param name="combos">Static combo name/value pairs to activate.</param>
         public Shader LoadShader(string shaderName, params (string ComboName, byte ComboValue)[] combos)
         {
@@ -139,7 +154,7 @@ namespace ValveResourceFormat.Renderer.Shaders
         }
 
         /// <summary>Loads or retrieves a cached shader compiled with the given argument dictionary.</summary>
-        /// <param name="shaderName">The Source 2 shader name (e.g. <c>complex.vfx</c>).</param>
+        /// <param name="shaderName">The Source 2 shader name (e.g. <c>complex.vfx</c>), or a renderer shader file name that must exist (e.g. <c>grid</c>). See <see cref="GetShaderFileByName"/>.</param>
         /// <param name="arguments">Static combo parameter overrides, or <see langword="null"/> for defaults.</param>
         /// <param name="blocking">When <see langword="true"/>, waits for linking to complete before returning.</param>
         public Shader LoadShader(string shaderName, IReadOnlyDictionary<string, byte>? arguments = null, bool blocking = true)
@@ -178,6 +193,19 @@ namespace ValveResourceFormat.Renderer.Shaders
             }
         }
 
+        /// <summary>
+        /// Drops all preprocessed shader sources and rediscovers the available shader files. Called when the
+        /// <see cref="ShaderRegistry"/> changes; shader programs that have already been compiled are not affected.
+        /// </summary>
+        internal static void InvalidateParsedShaders()
+        {
+            using var _ = ParserLock.EnterScope();
+
+            ParsedCache.Clear();
+            Parser.ClearBuilder();
+            Parser.RefreshAvailableShaders();
+        }
+
         private static ParsedShaderData GetOrParseShader(string shaderFileName)
         {
             using var _ = ParserLock.EnterScope();
@@ -212,6 +240,8 @@ namespace ValveResourceFormat.Renderer.Shaders
                 Parser.ClearBuilder();
             }
 
+            parsedData.GlobalsLayout = GlobalsLayout.Build(parsedData.GlobalsDeclarations);
+
             ParsedCache[shaderFileName] = parsedData;
             return parsedData;
         }
@@ -224,41 +254,25 @@ namespace ValveResourceFormat.Renderer.Shaders
             {
                 var sources = parsedData.Sources;
 
-                if (shaderName == "vrf.depth_only" && arguments.Count == 0)
+                if (shaderName == "depth_only" && arguments.Count == 0)
                 {
                     sources = new(sources);
                     sources.Remove(ShaderProgramType.Fragment);
                 }
-
-                static ShaderType ToShaderType(ShaderProgramType type) => type switch
-                {
-                    ShaderProgramType.Vertex => ShaderType.VertexShader,
-                    ShaderProgramType.Fragment => ShaderType.FragmentShader,
-                    ShaderProgramType.Compute => ShaderType.ComputeShader,
-                    _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
-                };
 
                 var shaderObjects = new int[sources.Count];
                 var shaderSources = new string[sources.Count];
                 var s = 0;
                 foreach (var (stage, source) in sources)
                 {
-                    shaderObjects[s] = GL.CreateShader(ToShaderType(stage));
+                    shaderObjects[s] = GraphicsDevice.CreateShader(stage, shaderFileName);
                     shaderSources[s] = source!;
                     s++;
                 }
 
                 CompileShaderObjects(shaderObjects, shaderSources, shaderFileName, shaderName, arguments, parsedData);
 
-                shaderProgram = GL.CreateProgram();
-
-#if DEBUG
-                GL.ObjectLabel(ObjectLabelIdentifier.Program, shaderProgram, shaderFileName.Length, shaderFileName);
-                for (var i = 0; i < shaderObjects.Length; i++)
-                {
-                    GL.ObjectLabel(ObjectLabelIdentifier.Shader, shaderObjects[i], shaderFileName.Length, shaderFileName);
-                }
-#endif
+                shaderProgram = GraphicsDevice.CreateProgram(shaderFileName);
 
                 // What the source declares is known before the program links, and the renderer needs it that
                 // early to have a texture bound by the first draw that samples it. Only ever grows.
@@ -271,6 +285,8 @@ namespace ValveResourceFormat.Renderer.Shaders
 #endif
 
                     Parameters = arguments,
+                    Defines = parsedData.Defines,
+                    GlobalsLayout = parsedData.GlobalsLayout,
                     Program = shaderProgram,
                     ShaderObjects = shaderObjects,
                     RenderModes = parsedData.RenderModes,
@@ -302,7 +318,17 @@ namespace ValveResourceFormat.Renderer.Shaders
                 }
 
                 var argsDescription = GetArgumentDescription(SortAndFilterArguments(parsedData.Defines, arguments));
-                RendererContext.Logger.LogInformation("Shader '{ShaderName}' as '{ShaderFileName}'{ArgsDescription} compiled{CompiledStatus} successfully (program={Program})", shaderName, shaderFileName, argsDescription, blocking ? " and linked" : string.Empty, shader.Program);
+                var compiledStatus = blocking ? " and linked" : string.Empty;
+
+                // Only Valve shader names are resolved to a different file, so naming both would be noise
+                if (IsVfxShaderName(shaderName))
+                {
+                    RendererContext.Logger.LogInformation("Shader '{ShaderName}' as '{ShaderFileName}'{ArgsDescription} compiled{CompiledStatus} successfully (program={Program})", shaderName, shaderFileName, argsDescription, compiledStatus, shader.Program);
+                }
+                else
+                {
+                    RendererContext.Logger.LogInformation("Shader '{ShaderName}'{ArgsDescription} compiled{CompiledStatus} successfully (program={Program})", shaderName, argsDescription, compiledStatus, shader.Program);
+                }
 
                 return shader;
             }
@@ -317,7 +343,7 @@ namespace ValveResourceFormat.Renderer.Shaders
             }
         }
 
-        private static void CompileShaderObjects(int[] shaderObjects, string[] shaderSources, string shaderFile, ReadOnlySpan<char> originalShaderName, IReadOnlyDictionary<string, byte> arguments, ParsedShaderData parsedData)
+        private static void CompileShaderObjects(int[] shaderObjects, string[] shaderSources, string shaderFile, string originalShaderName, IReadOnlyDictionary<string, byte> arguments, ParsedShaderData parsedData)
         {
             var header = new StringBuilder();
             header.Append(ShaderParser.ExpectedShaderVersion);
@@ -326,7 +352,16 @@ namespace ValveResourceFormat.Renderer.Shaders
             header.Append("#extension GL_KHR_shader_subgroup_arithmetic : enable\n");
             header.Append("#extension GL_KHR_shader_subgroup_vote : enable\n");
 
-            var variantName = $"GameVfx_{Path.GetFileNameWithoutExtension(originalShaderName)}";
+            foreach (var extension in parsedData.Extensions)
+            {
+                header.Append(extension);
+                header.Append('\n');
+            }
+
+            // Only Valve shader names activate a shader variant, renderer shader files are loaded as themselves
+            var variantName = IsVfxShaderName(originalShaderName)
+                ? $"GameVfx_{Path.GetFileNameWithoutExtension(originalShaderName)}"
+                : null;
 
             // Add all defines (with argument overrides or defaults)
             foreach (var (defineName, defaultValue) in parsedData.Defines)
@@ -348,6 +383,8 @@ namespace ValveResourceFormat.Renderer.Shaders
                 header.Append(value.ToString(CultureInfo.InvariantCulture));
                 header.Append('\n');
             }
+
+            header.Append(parsedData.GlobalsLayout.BlockSource);
 
             var headerText = header.ToString();
 
@@ -455,10 +492,49 @@ namespace ValveResourceFormat.Renderer.Shaders
 
         /// <summary>The file extension used to identify vertex shader entry points (<c>.vert.slang</c>).</summary>
         public const string ShaderFileExtension = ".vert.slang";
+        // No longer used by the renderer itself, kept so that names that were required before still resolve
         const string VrfInternalShaderPrefix = "vrf.";
 
+        /// <summary>
+        /// Resolves a shader name to the renderer shader file that draws it. Mappings registered in
+        /// <see cref="ShaderRegistry"/> take priority over the built-in ones.
+        /// </summary>
+        /// <param name="shaderName">
+        /// A Source 2 shader name ending in <c>.vfx</c>, which is mapped to the renderer shader that best matches it and
+        /// falls back to <c>complex</c> when it is unknown. Any other name is the renderer shader file to load directly,
+        /// and must exist.
+        /// </param>
+        /// <returns>The renderer shader name without stage or extension (e.g. <c>complex</c>).</returns>
+        public static string GetShaderFileByName(string shaderName)
+        {
+            if (ShaderRegistry.Mappings.TryGetValue(shaderName, out var customShaderFile))
+            {
+                return customShaderFile;
+            }
+
+            // TODO: Consider naming renderer shaders with a .slang extension, so that they read as explicitly as .vfx names do
+            if (!IsVfxShaderName(shaderName))
+            {
+                // Not a Valve shader name, so it names a renderer shader file directly.
+                // Unknown names are not silently drawn with 'complex', loading them throws instead.
+                return shaderName.StartsWith(VrfInternalShaderPrefix, StringComparison.Ordinal)
+                    ? shaderName[VrfInternalShaderPrefix.Length..]
+                    : shaderName;
+            }
+
+            return GetBuiltinShaderFileByName(shaderName);
+        }
+
+        /// <summary>The file extension of Source 2 shader names (<c>.vfx</c>).</summary>
+        public const string VfxExtension = ".vfx";
+
+        private static bool IsVfxShaderName(string shaderName)
+        {
+            return shaderName.EndsWith(VfxExtension, StringComparison.Ordinal);
+        }
+
         // Map Valve's shader names to shader files VRF has
-        private static string GetShaderFileByName(string shaderName) => shaderName switch
+        private static string GetBuiltinShaderFileByName(string shaderName) => shaderName switch
         {
             "sky.vfx" => "sky",
             "tools_sprite.vfx" => "sprite",
@@ -476,7 +552,6 @@ namespace ValveResourceFormat.Renderer.Shaders
             "pbr.vfx" => "pbr",
             "citadel_overlay.vfx" => "citadel_overlay",
 
-            _ when shaderName.StartsWith(VrfInternalShaderPrefix, StringComparison.Ordinal) => shaderName[VrfInternalShaderPrefix.Length..],
             _ => "complex",
         };
 
@@ -491,6 +566,20 @@ namespace ValveResourceFormat.Renderer.Shaders
         /// <param name="disposing"><see langword="true"/> when called from <see cref="Dispose()"/>.</param>
         protected virtual void Dispose(bool disposing)
         {
+            DeleteCachedShaders();
+        }
+
+        /// <summary>
+        /// Deletes every compiled shader program and empties the cache. Shaders handed out before this runs are
+        /// left pointing at a deleted program, so only call it once nothing can draw with them.
+        /// </summary>
+        private void DeleteCachedShaders()
+        {
+            foreach (var shader in CachedShaders.Values)
+            {
+                shader.Delete();
+            }
+
             CachedShaders.Clear();
         }
 
@@ -560,11 +649,17 @@ namespace ValveResourceFormat.Renderer.Shaders
         }
 
 #if DEBUG
+        private static bool? _isCI;
+        private static bool IsCI => _isCI ??= Environment.GetEnvironmentVariable("CI") != null;
+
         /// <summary>Recompiles all cached shaders, or only those derived from the given file if specified (debug builds only).</summary>
         /// <param name="name">Optional shader file name that changed; when <see langword="null"/> all shaders are reloaded.</param>
         public void ReloadAllShaders(string? name = null)
         {
             Parser.ClearBuilder();
+
+            // Picks up shader files that were created after startup, including ones in mounted directories
+            Parser.RefreshAvailableShaders();
 
             if (name != null && ShaderParser.ExtensionToProgramType.Keys.Any(ext => name.EndsWith($".{ext}.slang", StringComparison.Ordinal)))
             {
@@ -591,159 +686,6 @@ namespace ValveResourceFormat.Renderer.Shaders
                 var newShader = CompileAndLinkShader(shader.Name, fileName, parsed, shader.Parameters, blocking: false);
                 shader.ReplaceWith(newShader);
             }
-        }
-
-        /// <summary>Compiles every known shader (and all their define combinations) to validate correctness (debug builds only).</summary>
-        /// <param name="progressReporter">Receives status messages as each shader variant is compiled.</param>
-        /// <param name="logger">Logger used when constructing the internal <see cref="RendererContext"/>.</param>
-        /// <param name="filter">Optional substring to restrict which shader files are validated.</param>
-        public static void ValidateShaders(IProgress<string> progressReporter, ILogger logger, string? filter = null)
-        {
-            using var renderContext = new RendererContext(new ValveResourceFormat.IO.GameFileLoader(null, null), logger);
-            var loader = renderContext.ShaderLoader;
-            var folder = ShaderParser.GetShaderDiskPath(string.Empty);
-
-            var vertShaders = Directory.GetFiles(folder, "*.vert.slang");
-            var compShaders = Directory.GetFiles(folder, "*.comp.slang");
-            var allShaders = vertShaders.Concat(compShaders).ToArray();
-
-            // Apply filter if specified
-            if (filter != null)
-            {
-                allShaders = [.. allShaders.Where(s => Path.GetFileName(s).Contains(filter, StringComparison.OrdinalIgnoreCase))];
-            }
-
-            GLEnvironment.Initialize(renderContext.Logger);
-
-            foreach (var shader in allShaders)
-            {
-                var shaderName = ShaderNameFromPath(shader);
-                var vrfFileName = string.Concat(VrfInternalShaderPrefix, shaderName);
-
-                if (IsCI)
-                {
-                    Console.WriteLine($"::group::Shader {shaderName}");
-                }
-
-                progressReporter.Report($"Compiling {vrfFileName}");
-
-                if (shaderName == "texture_decode")
-                {
-                    loader.LoadShader(vrfFileName, new Dictionary<string, byte>
-                    {
-                        ["S_TYPE_TEXTURE2D"] = 1,
-                    });
-                    continue;
-                }
-
-                loader.LoadShader(vrfFileName);
-
-                // Test all defines one by one
-                var parsed = GetOrParseShader(GetShaderFileByName(vrfFileName));
-                var defines = parsed.Defines.Where(static x => !x.Key.StartsWith("GameVfx_", StringComparison.Ordinal)).ToDictionary();
-                var variants = parsed.Defines.Keys.Where(static x => x.StartsWith("GameVfx_", StringComparison.Ordinal));
-                var sourceLines = parsed.SourceFileLines;
-                var maxValues = ExtractMaxDefineValues(defines, sourceLines);
-
-                foreach (var define in defines.Keys)
-                {
-                    var maxValue = maxValues.GetValueOrDefault(define, 1);
-
-                    for (var value = 1; value <= maxValue; value++)
-                    {
-                        progressReporter.Report($"Compiling {vrfFileName} with {define}={value}");
-
-                        loader.LoadShader(vrfFileName, new Dictionary<string, byte>
-                        {
-                            [define] = (byte)value,
-                        });
-                    }
-                }
-
-                // Test all variants
-                foreach (var name in variants)
-                {
-                    var vfxName = string.Concat(name.AsSpan()["GameVfx_".Length..], ".vfx");
-                    progressReporter.Report($"Compiling variant {vfxName}");
-
-                    loader.LoadShader(vfxName);
-
-                    // Test all defines one by one in combination with the shader variant name
-                    foreach (var define in defines.Keys)
-                    {
-                        var maxValue = maxValues.GetValueOrDefault(define, 1);
-
-                        // Test all values from 1 to maxValue
-                        for (var value = 1; value <= maxValue; value++)
-                        {
-                            progressReporter.Report($"Compiling variant {vfxName} with {define}={value}");
-
-                            loader.LoadShader(vfxName, new Dictionary<string, byte>
-                            {
-                                [define] = (byte)value,
-                            });
-                        }
-                    }
-
-                    // Test all defines at once with their maximum values
-                    progressReporter.Report($"Compiling variant {vfxName} with all defines");
-
-                    loader.LoadShader(vfxName, defines.Keys.ToDictionary(static d => d, d => (byte)maxValues.GetValueOrDefault(d, 1)));
-                }
-
-                if (IsCI)
-                {
-                    Console.WriteLine("::endgroup::");
-                }
-            }
-
-            progressReporter.Report($"Validated {loader.CachedShaders.Count} shader variants");
-        }
-
-        private static bool? _isCI;
-        private static bool IsCI => _isCI ??= Environment.GetEnvironmentVariable("CI") != null;
-
-        [GeneratedRegex(@"(?<DefineName>(?:F|S|D)_\S+)\s*(?<Operator>>=|<=|>|<|==|!=)\s*(?<Value>\d+)")]
-        private static partial Regex ShaderDefineConditions();
-
-        private static Dictionary<string, int> ExtractMaxDefineValues(Dictionary<string, byte> defines, List<List<string>> allSourceLines)
-        {
-            var maxValues = new Dictionary<string, int>();
-
-            foreach (var sourceLines in allSourceLines)
-            {
-                foreach (var line in sourceLines)
-                {
-                    var matches = ShaderDefineConditions().Matches(line);
-                    foreach (Match match in matches)
-                    {
-                        var defineName = match.Groups["DefineName"].Value;
-                        var operator_ = match.Groups["Operator"].Value;
-                        var value = int.Parse(match.Groups["Value"].Value, CultureInfo.InvariantCulture);
-
-                        if (defines.ContainsKey(defineName))
-                        {
-                            var testValue = operator_ switch
-                            {
-                                ">" => value + 1,
-                                "<" => Math.Max(1, value - 1),
-                                ">=" => value,
-                                "<=" => value,
-                                "==" => value,
-                                "!=" => Math.Max(value + 1, 2),
-                                _ => value
-                            };
-
-                            if (testValue > maxValues.GetValueOrDefault(defineName, 1))
-                            {
-                                maxValues[defineName] = testValue;
-                            }
-                        }
-                    }
-                }
-            }
-
-            return maxValues;
         }
 #endif
 

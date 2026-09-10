@@ -19,35 +19,30 @@ namespace ValveResourceFormat.Renderer.Buffers
         /// <summary>Gets or sets the current size of the buffer in bytes.</summary>
         public virtual int Size { get; set; }
 
+        private readonly BufferRangeTarget bindTarget;
 
         /// <summary>Initializes a new buffer with the given target, binding point, and debug name.</summary>
         protected Buffer(BufferTarget target, int bindingPoint, string name)
         {
             Target = target;
-            GL.CreateBuffers(1, out int handle);
-            Handle = handle;
+            bindTarget = (BufferRangeTarget)target;
+            Handle = GraphicsDevice.CreateBuffer(name);
             BindingPoint = bindingPoint;
             Name = name;
-
-#if DEBUG
-            GL.ObjectLabel(ObjectLabelIdentifier.Buffer, Handle, Name.Length, Name);
-#endif
         }
 
         /// <summary>Binds this buffer to its binding point using <c>glBindBufferBase</c>.</summary>
         public void BindBufferBase()
         {
-            GL.BindBufferBase((BufferRangeTarget)Target, BindingPoint, Handle);
+            GL.BindBufferBase(bindTarget, BindingPoint, Handle);
         }
 
-        /// <summary>Sets the uniform block binding in the given shader to match this buffer's binding point.</summary>
-        public void SetBlockBinding(Shader shader)
+        /// <summary>Binds this buffer to a binding point other than its own. Binding one buffer to several
+        /// points at once is allowed; all of the blocks reading it are declared <c>readonly</c>.</summary>
+        /// <param name="bindingPoint">The slot to bind to instead of <see cref="BindingPoint"/>.</param>
+        public void BindBufferBase(ReservedBufferSlots bindingPoint)
         {
-            var blockIndex = shader.GetUniformBlockIndex(Name);
-            if (blockIndex > -1)
-            {
-                GL.UniformBlockBinding(shader.Program, blockIndex, BindingPoint);
-            }
+            GL.BindBufferBase(bindTarget, (int)bindingPoint, Handle);
         }
 
         /// <summary>Deletes the underlying OpenGL buffer object.</summary>

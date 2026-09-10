@@ -5,9 +5,10 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using GUI.Forms;
 using GUI.Types.Viewers;
 using GUI.Utils;
-using SteamDatabase.ValvePak;
+using ValvePak;
 using ValveResourceFormat;
 using ValveResourceFormat.Blocks.ResourceEditInfoStructs;
 using ValveResourceFormat.IO;
@@ -27,7 +28,7 @@ namespace GUI.Types.PackageViewer
 
         public static bool IsAccepted(uint magic)
         {
-            return magic == SteamDatabase.ValvePak.Package.MAGIC;
+            return magic == ValvePak.Package.MAGIC;
         }
 
         public Control CreateEmpty()
@@ -125,7 +126,7 @@ namespace GUI.Types.PackageViewer
                 directory = Path.Join(prefix, directory);
             }
 
-            directory = directory.Replace('\\', SteamDatabase.ValvePak.Package.DirectorySeparatorChar);
+            directory = directory.Replace('\\', ValvePak.Package.DirectorySeparatorChar);
 
             TreeView?.AddFolderNode(directory);
         }
@@ -265,8 +266,6 @@ namespace GUI.Types.PackageViewer
                             continue;
                         }
                     }
-
-
                 }
             }
 #endif
@@ -341,7 +340,7 @@ namespace GUI.Types.PackageViewer
             _ = AppMessageDialogs.ShowMessageAsync(result, "VPK created");
         }
 
-        internal static List<PackageEntry> RecoverDeletedFiles(Package package, Action<string> setProgress)
+        internal static List<PackageEntry> RecoverDeletedFiles(Package package, GenericProgressForm progress)
         {
             if (package.Entries == null)
             {
@@ -354,6 +353,10 @@ namespace GUI.Types.PackageViewer
                 .GroupBy(file => file.ArchiveIndex)
                 .OrderBy(x => x.Key)
                 .ToDictionary(x => x.Key, x => x.ToList());
+
+            // Every known entry has a gap in front of it to scan, so that is the unit of progress
+            progress.SetBarMax(allEntries.Sum(x => x.Value.Count));
+            var processed = 0;
 
             var hiddenIndex = 0;
             var totalSlackSize = 0u;
@@ -465,13 +468,13 @@ namespace GUI.Types.PackageViewer
                                 var dirName = Path.GetDirectoryName(filepath);
                                 if (dirName != null)
                                 {
-                                    newEntry.DirectoryName = dirName.Replace('\\', SteamDatabase.ValvePak.Package.DirectorySeparatorChar);
+                                    newEntry.DirectoryName = dirName.Replace('\\', ValvePak.Package.DirectorySeparatorChar);
                                 }
                                 newEntry.FileName = Path.GetFileNameWithoutExtension(filepath);
                             }
                             else
                             {
-                                newEntry.DirectoryName += string.Concat(SteamDatabase.ValvePak.Package.DirectorySeparatorChar, resource.ResourceType);
+                                newEntry.DirectoryName += string.Concat(ValvePak.Package.DirectorySeparatorChar, resource.ResourceType);
                             }
                         }
                         catch (Exception ex)
@@ -505,16 +508,15 @@ namespace GUI.Types.PackageViewer
                         typeEntries.Add(newEntry);
                         hiddenFiles.Add(newEntry);
 
-                        if (hiddenFiles.Count % 100 == 0)
-                        {
-                            setProgress($"Scanning for deleted files, this may take a while… Found {hiddenFiles.Count} files ({HumanReadableByteSizeFormatter.Format(totalSlackSize)}) so far…");
-                        }
+                        progress.SetProgress($"Found {hiddenFiles.Count} files ({HumanReadableByteSizeFormatter.Format(totalSlackSize)}) so far…");
                     }
                 }
 
                 // Recover files in gaps between entries
                 foreach (var entry in entries)
                 {
+                    progress.SetBarValue(++processed);
+
                     if (entry.Length == 0)
                     {
                         continue;

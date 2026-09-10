@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using ValveResourceFormat.IO;
-using ValveResourceFormat.Renderer.Buffers;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.ResourceTypes.ModelAnimation;
 using ValveResourceFormat.ResourceTypes.ModelAnimation2;
@@ -111,19 +110,10 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             {
                 foreach (var skeletonName in nmSkelRefs)
                 {
-                    var resource = Scene.RendererContext.FileLoader.LoadFileCompiled(skeletonName);
-                    if (resource?.DataBlock is not BinaryKV3 skeletonData)
+                    if (Skeleton.FromSkeletonResource(Scene.RendererContext.FileLoader, skeletonName) is { } skeleton)
                     {
-                        continue;
+                        AnimationController.RegisterExternalSkeleton(skeletonName, skeleton);
                     }
-
-                    var skeleton = Skeleton.FromSkeletonData(skeletonData.Data);
-                    AnimationController.RegisterExternalSkeleton(skeletonName, skeleton);
-                }
-
-                foreach (var clipName in AnimationGraphLoader.GetClipNames(model, Scene.RendererContext.FileLoader))
-                {
-                    LoadAnimationClip(clipName);
                 }
             }
 
@@ -142,6 +132,11 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             SetCharacterEyeRenderParams();
             Attachments = model.Attachments;
             AnimationController.TwistConstraints = ParseTwistConstraints(model);
+
+            dotToMorphConstraints = ParseDotToMorphConstraints(model);
+            dotToMorphValues = dotToMorphConstraints.Length > 0
+                ? new float[Math.Max(model.FlexControllers.Length, AnimationController.AnimationFrame?.Datas.Length ?? 0)]
+                : [];
 
             // GetAttachmentOrSelfTransform already falls back to this node's own world Transform for an empty/
             // unmatched name - AnimationController.Transform is not it (see its doc comment), so route through here.
@@ -191,8 +186,8 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         {
             var eyeEnablingMaterials = meshRenderers
                 .SelectMany(Mesh => Mesh.DrawCallsOpaque.Select(Draw => (Mesh, Draw)))
-                .Where(meshDraw => meshDraw.Draw.Material.Material.IntParams.GetValueOrDefault("F_EYEBALLS") == 1)
-                .Select(meshDraw => (meshDraw.Mesh, meshDraw.Draw.Material.Material))
+                .Where(meshDraw => meshDraw.Draw.Material.IntParams.GetValueOrDefault("F_EYEBALLS") == 1)
+                .Select(meshDraw => (meshDraw.Mesh, meshDraw.Draw.Material))
                 .ToList();
 
             if (eyeEnablingMaterials.Count == 0)
@@ -207,8 +202,10 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 return;
             }
 
-            foreach (var (mesh, materialData) in eyeEnablingMaterials)
+            foreach (var (mesh, material) in eyeEnablingMaterials)
             {
+                var materialData = material;
+
                 materialData.IntParams["g_nEyeLBindIdx"] = GetMeshBoneIndex(eyes.LeftEyeBoneIndex, mesh);
                 materialData.IntParams["g_nEyeRBindIdx"] = GetMeshBoneIndex(eyes.RightEyeBoneIndex, mesh);
                 materialData.IntParams["g_nEyeTargetBindIdx"] = GetMeshBoneIndex(eyes.TargetBoneIndex, mesh);
@@ -247,19 +244,16 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             {
                 Debug.Assert(boneMatricesGpu != null, "boneMatricesGpu should not be null when IsAnimated is true");
 
-                // Update animation matrices
                 var meshBoneCount = remappingTable.Length;
 
                 var floatBufferSizeMeshBones = meshBoneCount * 12;
                 var floatBufferSizeModelBones = boneCount * 16;
 
-                var floatBuffer = ArrayPool<float>.Shared.Rent(floatBufferSizeMeshBones + floatBufferSizeModelBones);
-
-                var meshBones = MemoryMarshal.Cast<float, OpenTK.Mathematics.Matrix3x4>(floatBuffer.AsSpan(0, floatBufferSizeMeshBones));
-                var modelBones = MemoryMarshal.Cast<float, Matrix4x4>(floatBuffer.AsSpan(floatBufferSizeMeshBones));
-
-                try
+                using (var floatBuffer = new RentedBuffer<float>(floatBufferSizeMeshBones + floatBufferSizeModelBones))
                 {
+                    var meshBones = MemoryMarshal.Cast<float, OpenTK.Mathematics.Matrix3x4>(floatBuffer.Span[..floatBufferSizeMeshBones]);
+                    var modelBones = MemoryMarshal.Cast<float, Matrix4x4>(floatBuffer.Span[floatBufferSizeMeshBones..]);
+
                     AnimationController.GetSkinningMatrices(modelBones);
 
                     for (var i = 0; i < meshBoneCount; i++)
@@ -273,13 +267,9 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                         }
                     }
 
-                    boneMatricesGpu.Update(floatBuffer, 0, floatBufferSizeMeshBones * sizeof(float));
+                    boneMatricesGpu.Update(floatBuffer.ByteArray, 0, floatBufferSizeMeshBones * sizeof(float));
 
                     UpdateAnimatedBoundingBox();
-                }
-                finally
-                {
-                    ArrayPool<float>.Shared.Return(floatBuffer);
                 }
             }
 
@@ -291,6 +281,14 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                     if (renderableMesh.FlexStateManager == null)
                     {
                         continue;
+                    }
+
+                    // A bone driven morph is not in the animation, so it is layered on afterwards.
+                    if (dotToMorphConstraints.Length > 0)
+                    {
+                        datas.CopyTo(dotToMorphValues, 0);
+                        ApplyDotToMorphConstraints(dotToMorphConstraints, dotToMorphValues);
+                        datas = dotToMorphValues;
                     }
 
                     if (renderableMesh.FlexStateManager.SetControllerValues(datas))
@@ -307,17 +305,11 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             foreach (var attachment in AttachedNodes)
             {
                 var child = attachment.Node;
-                var oldBounds = child.BoundingBox;
 
                 // keep the child's own scale; the parent drives the rest of its transform
                 var localTransform = Matrix4x4.CreateScale(GetScale(child.Transform)) * Matrix4x4.CreateFromQuaternion(attachment.Rotation) * Matrix4x4.CreateTranslation(attachment.Offset);
                 child.Transform = localTransform * GetAttachmentOrSelfTransform(attachment.AttachmentName);
                 child.Update(context);
-
-                if (child.LayerEnabled)
-                {
-                    child.Scene.DynamicOctree.Update(child, oldBounds);
-                }
             }
         }
 
@@ -417,6 +409,8 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 ? model.GetEmbeddedAnimations()
                 : model.GetAllAnimations(Scene.RendererContext.FileLoader)).ToList();
 
+            animations.RemoveAll(animation => !AnimationController.IsPlayable(animation));
+
             AddAnimations(animations);
 
             if (Animations.Count != 0)
@@ -447,6 +441,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             var anim = new ClipAnimation(clip);
             Animations[anim.Name] = anim;
             AnimationPlayer.PrewarmAnimationSounds(anim);
+            SetupBoneMatrixBuffers();
         }
 
         /// <summary>
@@ -459,6 +454,11 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             if (!clipName.EndsWith(".vnmclip", StringComparison.OrdinalIgnoreCase))
             {
                 throw new ArgumentException($"Clip must be a {ResourceType.NmClip} resource.", nameof(clipName));
+            }
+
+            if (Animations.ContainsKey(clipName))
+            {
+                return true;
             }
 
             var clipResource = Scene.RendererContext.FileLoader.LoadFileCompiled(clipName);
@@ -496,7 +496,6 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 meshRenderers.Add(new RenderableMesh(mesh, refMesh.MeshIndex, Scene, model, materialTable));
             }
 
-            // Set active meshes to default
             SetActiveMeshGroups(model.GetDefaultMeshGroups());
         }
 
@@ -507,14 +506,14 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                 return;
             }
 
-            boneMatricesGpu = new StorageBuffer(ReservedBufferSlots.BoneTransforms);
+            boneMatricesGpu = new StorageBuffer(ReservedBufferSlots.BoneTransforms, nameof(ReservedBufferSlots.BoneTransforms));
         }
 
         /// <summary>Activates the animation with the given name, or stops animation if not found.</summary>
-        public void SetAnimationByName(string animationName, float blendTime = 0f)
+        public void SetAnimationByName(string animationName, float blendTime = 0f, bool warp = false)
         {
             Animations.TryGetValue(animationName, out var activeAnimation);
-            SetAnimation(activeAnimation, blendTime);
+            SetAnimation(activeAnimation, blendTime, warp);
         }
 
         /// <summary>
@@ -545,16 +544,17 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         /// <summary>Activates the given animation instance with a blend-in time, or clears the active animation when <see langword="null"/>.</summary>
         /// <param name="activeAnimation">The animation to activate, or <see langword="null"/> to clear.</param>
         /// <param name="blendTime">The time in seconds to blend from the current animation to the new one.</param>
-        public void SetAnimation(Animation? activeAnimation, float blendTime = 0f)
+        /// <param name="warp">Whether re-activating the animation already playing should cross over
+        /// into a second instance of it rather than restarting it in place.</param>
+        public void SetAnimation(Animation? activeAnimation, float blendTime = 0f, bool warp = false)
         {
-            AnimationController.SetAnimation(activeAnimation, blendTime);
+            AnimationController.SetAnimation(activeAnimation, blendTime, warp);
             UpdateBoundingBox();
 
             if (activeAnimation != default)
             {
                 foreach (var renderer in meshRenderers)
                 {
-                    // renderer.SetMaterialCombo(("D_ANIMATED", 1));
                     renderer.SetBoneMatricesBuffer(boneMatricesGpu);
                 }
             }
@@ -562,7 +562,6 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             {
                 foreach (var renderer in meshRenderers)
                 {
-                    // renderer.SetMaterialCombo(("D_ANIMATED", 0));
                     renderer.SetBoneMatricesBuffer(null);
                 }
             }
@@ -614,32 +613,42 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         /// </summary>
         public Matrix4x4 GetAttachmentTransform(string attachmentName)
         {
+            var attachment = Attachments.GetValueOrDefault(attachmentName);
+            if (attachment == null)
+            {
+                return Transform;
+            }
+
+            return GetAttachmentLocalTransform(attachment, AnimationController.FrameCache.Skeleton, AnimationController.Pose) * Transform;
+        }
+
+        /// <summary>
+        /// Computes the model-local transform of an attachment from the given bone pose.
+        /// </summary>
+        public static Matrix4x4 GetAttachmentLocalTransform(Attachment attachment, Skeleton skeleton, Matrix4x4[] pose)
+        {
             var transform = Matrix4x4.Identity;
 
-            var attachment = Attachments.GetValueOrDefault(attachmentName);
-            if (attachment != null)
+            for (var i = 0; i < attachment.Length; i++)
             {
-                for (var i = 0; i < attachment.Length; i++)
+                var influence = attachment[i];
+                var boneIndex = skeleton.GetBoneIndex(influence.Name);
+                if (boneIndex != -1)
                 {
-                    var influence = attachment[i];
-                    var boneIndex = AnimationController.FrameCache.Skeleton.GetBoneIndex(influence.Name);
-                    if (boneIndex != -1)
-                    {
-                        var boneTransform = AnimationController.Pose[boneIndex];
-                        var influenceTransform = Matrix4x4.CreateFromQuaternion(influence.Rotation) * Matrix4x4.CreateTranslation(influence.Offset);
-                        transform *= Matrix4x4.Lerp(Matrix4x4.Identity, influenceTransform * boneTransform, influence.Weight);
-                    }
-                }
-
-                if (attachment.IgnoreRotation)
-                {
-                    var scale = transform.M22;
-                    var translation = transform.Translation;
-                    transform = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(translation);
+                    var boneTransform = pose[boneIndex];
+                    var influenceTransform = Matrix4x4.CreateFromQuaternion(influence.Rotation) * Matrix4x4.CreateTranslation(influence.Offset);
+                    transform *= Matrix4x4.Lerp(Matrix4x4.Identity, influenceTransform * boneTransform, influence.Weight);
                 }
             }
 
-            return transform * Transform;
+            if (attachment.IgnoreRotation)
+            {
+                var scale = transform.M22;
+                var translation = transform.Translation;
+                transform = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(translation);
+            }
+
+            return transform;
         }
 
 #pragma warning disable CA1024 // Use properties where appropriate
@@ -848,6 +857,100 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             boneMatricesGpu?.Delete();
         }
 
+        private DotToMorphConstraint[] dotToMorphConstraints = [];
+        private float[] dotToMorphValues = [];
+
+        /// <summary>
+        /// Parses the constraints that drive a morph from a bone's facing, resolving the bones and the
+        /// flex controller they name so the update does not have to search per frame.
+        /// </summary>
+        protected static DotToMorphConstraint[] ParseDotToMorphConstraints(Model model)
+        {
+            var keyvalues = model.KeyValues;
+            if (keyvalues == null || !keyvalues.ContainsKey("BoneConstraintList"))
+            {
+                return [];
+            }
+
+            var bones = model.Skeleton.Bones;
+            var controllers = model.FlexControllers;
+            var constraints = new List<DotToMorphConstraint>();
+
+            foreach (var constraintData in keyvalues.GetArray("BoneConstraintList"))
+            {
+                if (constraintData.GetStringProperty("_class") != "CBoneConstraintDotToMorph")
+                {
+                    continue;
+                }
+
+                var remap = constraintData.GetFloatArray("m_flRemap");
+                if (remap == null || remap.Length < 4)
+                {
+                    continue;
+                }
+
+                var boneName = constraintData.GetStringProperty("m_sBoneName");
+                var targetName = constraintData.GetStringProperty("m_sTargetBoneName");
+                var channel = constraintData.GetStringProperty("m_sMorphChannelName");
+
+                var constraint = new DotToMorphConstraint
+                {
+                    BoneName = boneName,
+                    TargetBoneName = targetName,
+                    MorphChannelName = channel,
+                    InputMin = remap[0],
+                    InputMax = remap[1],
+                    OutputMin = remap[2],
+                    OutputMax = remap[3],
+                    BoneIndex = Array.FindIndex(bones, b => b.Name == boneName),
+                    TargetBoneIndex = Array.FindIndex(bones, b => b.Name == targetName),
+                    MorphChannelIndex = Array.FindIndex(controllers, c => c.Name == channel),
+                };
+
+                if (constraint.BoneIndex >= 0 && constraint.TargetBoneIndex >= 0 && constraint.MorphChannelIndex >= 0)
+                {
+                    constraints.Add(constraint);
+                }
+            }
+
+            return [.. constraints];
+        }
+
+        /// <summary>
+        /// Applies the bone driven morphs on top of the animated controller values.
+        /// </summary>
+        private void ApplyDotToMorphConstraints(DotToMorphConstraint[] constraints, float[] controllerValues)
+        {
+            var pose = AnimationController.Pose;
+
+            foreach (var constraint in constraints)
+            {
+                if (constraint.MorphChannelIndex >= controllerValues.Length)
+                {
+                    continue;
+                }
+
+                var bone = pose[constraint.BoneIndex];
+                var target = pose[constraint.TargetBoneIndex];
+
+                // Measured against the bone's down axis: level with the target it reads a right angle,
+                // which is what both remaps start from, and looking down opens the angle further.
+                var facing = Vector3.Normalize(new Vector3(-bone.M31, -bone.M32, -bone.M33));
+                var toTarget = target.Translation - bone.Translation;
+
+                if (toTarget.LengthSquared() < 1e-12f)
+                {
+                    continue;
+                }
+
+                var dot = Math.Clamp(Vector3.Dot(facing, Vector3.Normalize(toTarget)), -1f, 1f);
+                var degrees = MathF.Acos(dot) * (180f / MathF.PI);
+
+                controllerValues[constraint.MorphChannelIndex] = MathUtils.RemapValClamped(
+                    degrees, constraint.InputMin, constraint.InputMax, constraint.OutputMin, constraint.OutputMax);
+            }
+        }
+
         /// <summary>
         /// Parses tilt-twist constraints from the model's keyvalues.
         /// </summary>
@@ -880,7 +983,6 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                     SlaveAxis = (int)constraintData.GetIntegerProperty("m_nSlaveAxis"),
                 };
 
-                // Parse slaves
                 var slaves = constraintData.GetArray("m_slaves");
                 constraint.Slaves = slaves.Select(s =>
                 {
@@ -897,7 +999,6 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                     };
                 }).ToArray();
 
-                // Parse targets
                 var targets = constraintData.GetArray("m_targets");
                 constraint.Targets = targets.Select(t =>
                 {

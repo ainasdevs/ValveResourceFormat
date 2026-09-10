@@ -11,7 +11,7 @@ namespace ValveResourceFormat.CompiledShader;
 public class VfxShaderFileVulkan : VfxShaderFile
 {
     /// <inheritdoc/>
-    public override string BlockName => "VULKAN";
+    public override string SourceType => "VULKAN";
     /// <summary>Gets the shader file version.</summary>
     public int Version { get; private set; }
     /// <summary>Gets the size of the bytecode.</summary>
@@ -62,14 +62,18 @@ public class VfxShaderFileVulkan : VfxShaderFile
     public uint[]? DescriptorSetHashes { get; }
     public uint[]? EntryPoints { get; }
     public short RequiredSubgroupSize { get; }
-    public byte[]? UnknownTrailingData { get; }
+    /// <summary>
+    /// Base scalar type of every vertex shader input location, one byte per entry of <see cref="AttribMap"/>.
+    /// The known values are 4 for float and 2 for unsigned int. It is null for stages other than the vertex shader.
+    /// </summary>
+    public byte[]? VertexInputScalarTypes { get; }
 #pragma warning restore CS1591
 
     /// <summary>
     /// Initializes a new instance with explicit size and hash.
     /// </summary>
-    public VfxShaderFileVulkan(BinaryReader datareader, int sourceId, int size, Guid hash, VfxStaticComboData parent)
-        : base(sourceId, parent)
+    public VfxShaderFileVulkan(BinaryReader datareader, int shaderFileId, int size, Guid hash, VfxStaticComboData parent)
+        : base(shaderFileId, parent)
     {
         HashMD5 = hash;
         Size = size;
@@ -100,8 +104,8 @@ public class VfxShaderFileVulkan : VfxShaderFile
     /// <summary>
     /// Initializes a new instance from a binary reader.
     /// </summary>
-    public VfxShaderFileVulkan(BinaryReader datareader, int sourceId, VfxStaticComboData parent, bool isMobile)
-        : base(datareader, sourceId, parent)
+    public VfxShaderFileVulkan(BinaryReader datareader, int shaderFileId, VfxStaticComboData parent, bool isMobile)
+        : base(datareader, shaderFileId, parent)
     {
         // CVfxShaderFile::Unserialize
         if (Size > 0)
@@ -204,10 +208,10 @@ public class VfxShaderFileVulkan : VfxShaderFile
 
                 RequiredSubgroupSize = datareader.ReadInt16();
 
-                var trailingByteCount = datareader.ReadByte();
-                if (trailingByteCount > 0)
+                var vertexInputScalarTypeCount = datareader.ReadByte();
+                if (vertexInputScalarTypeCount > 0)
                 {
-                    UnknownTrailingData = datareader.ReadBytes(trailingByteCount);
+                    VertexInputScalarTypes = datareader.ReadBytes(vertexInputScalarTypeCount);
                 }
             }
         }
@@ -241,8 +245,8 @@ public class VfxShaderFileVulkan : VfxShaderFile
     }
 
     /// <summary>
-    /// Gets the Direct3D vertex semantic the vertex layout assigns to a shader input location,
-    /// or <see langword="false"/> when this shader has no attribute map or does not use that location.
+    /// Gets the Direct3D vertex semantic the vertex layout assigns to a shader input location.
+    /// Returns <see langword="false"/> when this shader has no attribute map or does not use that location.
     /// </summary>
     /// <param name="location">The SPIR-V input location.</param>
     /// <param name="semanticName">The Direct3D semantic name, e.g. <c>TEXCOORD</c>.</param>

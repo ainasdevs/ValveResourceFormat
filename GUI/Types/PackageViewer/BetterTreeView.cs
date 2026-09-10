@@ -9,7 +9,7 @@ using System.Windows.Forms;
 using GUI.Controls;
 using GUI.Forms;
 using GUI.Utils;
-using SteamDatabase.ValvePak;
+using ValvePak;
 
 namespace GUI.Types.PackageViewer
 {
@@ -143,7 +143,7 @@ namespace GUI.Types.PackageViewer
             {
                 Text = "Searching file contents…"
             };
-            progressDialog.OnProcess += (_, __) =>
+            progressDialog.OnProcess = _ =>
             {
                 Log.Info(nameof(BetterTreeView), "Pattern search");
 
@@ -230,6 +230,8 @@ namespace GUI.Types.PackageViewer
                 Log.Info(nameof(BetterTreeView), $"Found {results.Count} matches");
 
                 progressDialog.SetProgress($"Found {results.Count} matches");
+
+                return Task.CompletedTask;
             };
             progressDialog.ShowDialog();
         }

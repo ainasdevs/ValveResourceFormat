@@ -4,7 +4,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -17,9 +16,10 @@ using GUI.Types.GLViewers;
 using GUI.Types.PackageViewer;
 using GUI.Utils;
 using OpenTK.Windowing.Desktop;
-using SteamDatabase.ValvePak;
 using Svg.Skia;
+using ValvePak;
 using ValveResourceFormat.IO;
+using ValveResourceFormat.TextureDecoders;
 using Windows.Win32;
 using Windows.Win32.Graphics.Gdi;
 using Windows.Win32.UI.WindowsAndMessaging;
@@ -64,6 +64,7 @@ namespace GUI
 
             Themer.ApplyTheme(this);
 
+#if !SCREENSHOT_MODE
             if (Settings.Config.WindowWidth > 0 && Settings.Config.WindowHeight > 0)
             {
                 StartPosition = FormStartPosition.Manual;
@@ -73,6 +74,7 @@ namespace GUI
                     WindowState = FormWindowState.Maximized;
                 }
             }
+#endif
 
             mainTabs.ImageList = AppIcons.ImageList;
             mainTabs.SelectedIndexChanged += OnMainSelectedTabChanged;
@@ -92,12 +94,12 @@ namespace GUI
                 var versionPlus = version.IndexOf('+', StringComparison.InvariantCulture);
                 string versionDisplay;
 
-                if (versionPlus > 0)
+                if (versionPlus > 1)
                 {
                     // If version ends with ".0", display part of the commit hash, otherwise the zero is replaced with CI build number
                     if (version[versionPlus - 2] == '.' && version[versionPlus - 1] == '0')
                     {
-                        versionPlus += 8;
+                        versionPlus = Math.Min(versionPlus + 8, version.Length);
                     }
 
                     versionDisplay = string.Concat("v", version.AsSpan(0, versionPlus));
@@ -106,9 +108,10 @@ namespace GUI
                 {
                     versionDisplay = string.Concat("v", version);
 
-#if !CI_RELEASE_BUILD // Set in Directory.Build.props
-                    versionDisplay += "-dev";
-#endif
+                    if (!Program.IsReleaseBuild)
+                    {
+                        versionDisplay += "-dev";
+                    }
                 }
 
 #if DEBUG
@@ -156,9 +159,19 @@ namespace GUI
                 {
                     file = System.Net.WebUtility.UrlDecode(file[4..]);
 
-                    var innerFilePosition = file.LastIndexOf(".vpk:", StringComparison.InvariantCulture);
+                    // Every ".vpk:" separates a package from the path inside it, so nested packages
+                    // can be addressed as "outer_dir.vpk:maps/inner.vpk:models/file.vmdl_c"
+                    var packagePaths = new List<string>();
+                    var innerFile = file;
+                    int separator;
 
-                    if (innerFilePosition == -1)
+                    while ((separator = innerFile.IndexOf(".vpk:", StringComparison.OrdinalIgnoreCase)) != -1)
+                    {
+                        packagePaths.Add(innerFile[..(separator + 4)]);
+                        innerFile = innerFile[(separator + 5)..];
+                    }
+
+                    if (packagePaths.Count == 0)
                     {
                         Log.Error(nameof(MainForm), $"For vpk: protocol to work, specify a file path inside of the package, for example: \"vpk:C:/path/pak01_dir.vpk:inner/file.vmdl_c\"");
 
@@ -166,12 +179,11 @@ namespace GUI
                         continue;
                     }
 
-                    var innerFile = file[(innerFilePosition + 5)..];
-                    file = file[..(innerFilePosition + 4)];
+                    file = packagePaths[0];
 
                     if (!File.Exists(file))
                     {
-                        var dirFile = file[..innerFilePosition] + "_dir.vpk";
+                        var dirFile = string.Concat(file.AsSpan(0, file.Length - 4), "_dir.vpk");
 
                         if (!File.Exists(dirFile))
                         {
@@ -186,36 +198,79 @@ namespace GUI
                     file = Path.GetFullPath(file);
                     Log.Info(nameof(MainForm), $"Opening {file}");
 
-                    var package = new Package();
+                    VrfGuiContext? packageContext = null;
+
                     try
                     {
-                        package.OptimizeEntriesForBinarySearch(StringComparison.OrdinalIgnoreCase);
-                        package.Read(file);
+                        var package = new Package();
+                        try
+                        {
+                            package.OptimizeEntriesForBinarySearch(StringComparison.OrdinalIgnoreCase);
+                            package.Read(file);
+                            packageContext = new VrfGuiContext(file, null)
+                            {
+                                CurrentPackage = package
+                            };
+                            package = null;
+                        }
+                        finally
+                        {
+                            package?.Dispose();
+                        }
 
-                        var packageFile = package.FindEntry(innerFile);
+                        var missingFile = false;
+
+                        for (var depth = 1; depth < packagePaths.Count; depth++)
+                        {
+                            var nestedPath = packagePaths[depth];
+                            var nestedEntry = packageContext.CurrentPackage!.FindEntry(nestedPath);
+
+                            if (nestedEntry == null)
+                            {
+                                Log.Error(nameof(MainForm), $"File '{nestedPath}' does not exist in package '{packageContext.FileName}'.");
+                                mainTabs.OpenTab("Console");
+                                missingFile = true;
+                                break;
+                            }
+
+                            var nestedPackage = new Package();
+                            try
+                            {
+                                nestedPackage.OptimizeEntriesForBinarySearch(StringComparison.OrdinalIgnoreCase);
+                                nestedPackage.SetFileName(nestedPath);
+                                nestedPackage.Read(GameFileLoader.GetPackageEntryStream(packageContext.CurrentPackage!, nestedEntry));
+                                packageContext = new VrfGuiContext(nestedPath, packageContext)
+                                {
+                                    CurrentPackage = nestedPackage
+                                };
+                                nestedPackage = null;
+                            }
+                            finally
+                            {
+                                nestedPackage?.Dispose();
+                            }
+                        }
+
+                        if (missingFile)
+                        {
+                            continue;
+                        }
+
+                        var packageFile = packageContext.CurrentPackage!.FindEntry(innerFile)
+                            ?? packageContext.CurrentPackage.FindEntry(innerFile + GameFileLoader.CompiledFileSuffix);
 
                         if (packageFile == null)
                         {
-                            packageFile = package.FindEntry(innerFile + GameFileLoader.CompiledFileSuffix);
-
-                            if (packageFile == null)
-                            {
-                                Log.Error(nameof(MainForm), $"File '{innerFile}' does not exist in package '{file}'.");
-                                mainTabs.OpenTab("Console");
-                                continue;
-                            }
+                            Log.Error(nameof(MainForm), $"File '{innerFile}' does not exist in package '{packageContext.FileName}'.");
+                            mainTabs.OpenTab("Console");
+                            continue;
                         }
 
                         innerFile = packageFile.GetFullPath();
 
                         Log.Info(nameof(MainForm), $"Opening {innerFile}");
 
-                        var vrfGuiContext = new VrfGuiContext(file, null)
-                        {
-                            CurrentPackage = package
-                        };
-                        var fileContext = new VrfGuiContext(innerFile, vrfGuiContext);
-                        package = null;
+                        var fileContext = new VrfGuiContext(innerFile, packageContext);
 
                         try
                         {
@@ -225,12 +280,15 @@ namespace GUI
                         finally
                         {
                             fileContext?.Dispose();
-                            vrfGuiContext?.Dispose();
                         }
                     }
                     finally
                     {
-                        package?.Dispose();
+                        // Contexts still referenced by an opened tab are only marked here and dispose when the tab closes
+                        for (var context = packageContext; context != null; context = context.ParentGuiContext)
+                        {
+                            context.Dispose();
+                        }
                     }
 
                     continue;
@@ -379,22 +437,17 @@ namespace GUI
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
-
         private void OnMainSelectedTabChanged(object? sender, EventArgs e)
         {
-#if !SCREENSHOT_MODE
             UpdateWindowTitle(mainTabs.SelectedTab?.ToolTipText);
             UpdateBottomPanelKeybindings();
-#endif
         }
 
         private void UpdateWindowTitle(string? toolTipText)
         {
-#if !SCREENSHOT_MODE
             Text = string.IsNullOrEmpty(toolTipText)
                 ? "Source 2 Viewer"
                 : $"Source 2 Viewer - {toolTipText}";
-#endif
         }
 
         /// <summary>
@@ -539,8 +592,7 @@ namespace GUI
 
         private void OnAboutItemClick(object sender, EventArgs e)
         {
-            using var form = new AboutForm();
-            form.ShowDialog(this);
+            mainFormBottomPanel.ShowAboutDialog();
         }
 
         private void OnSettingsItemClick(object sender, EventArgs e)
@@ -644,8 +696,10 @@ namespace GUI
 
                 if (oldTag is ExportData exportData)
                 {
-                    exportData.VrfGuiContext.Dispose();
+                    // Contents first: disposing them cancels loading and waits for it, and the context
+                    // disposes the resources that loading is still reading until it does
                     exportData.DisposableContents?.Dispose();
+                    exportData.VrfGuiContext.Dispose();
                 }
             }
 
@@ -719,6 +773,8 @@ namespace GUI
                 loadingFile = new LoadingFile(vrfGuiContext.FileName);
 #pragma warning restore CA2000
                 tab.Controls.Add(loadingFile);
+
+                vrfGuiContext.LoadingProgress = new Progress<string>(loadingFile.SetStatus);
 
                 if (isPreview)
                 {
@@ -824,6 +880,8 @@ namespace GUI
             {
                 BeginInvoke(() =>
                 {
+                    vrfGuiContext.LoadingProgress = null;
+
                     if (keepFrozen)
                     {
                         // Same-type preview: swap the frozen previous view for the newly loaded viewer.
@@ -975,6 +1033,11 @@ namespace GUI
 
         private void OpenWelcome()
         {
+            if (mainTabs.OpenTab("Welcome"))
+            {
+                return;
+            }
+
             var welcomeTab = new ThemedTabPage("Welcome")
             {
                 ToolTipText = "Welcome",
@@ -1009,48 +1072,16 @@ namespace GUI
             mainFormBottomPanel.Text = Text;
         }
 
-        private void CheckForUpdatesIfNecessary()
+        private async void CheckForUpdatesIfNecessary()
         {
-            if (!Settings.Config.Update.CheckAutomatically)
-            {
-                return;
-            }
+            await UpdateChecker.CheckForUpdatesIfNecessary().ConfigureAwait(true);
 
-            if (Settings.Config.Update.UpdateAvailable)
-            {
-                mainFormBottomPanel.SetNewVersionAvailable();
-                return;
-            }
-
-            var now = DateTime.UtcNow;
-
-            if (DateTime.TryParseExact(Settings.Config.Update.LastCheck, "s", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var lastCheck))
-            {
-                var diff = now.Subtract(lastCheck);
-
-                // Perform auto update check once a day
-                if (diff.TotalDays < 1)
-                {
-                    return;
-                }
-            }
-
-            Settings.Config.Update.LastCheck = now.ToString("s");
-
-            Task.Run(CheckForUpdates);
+            mainFormBottomPanel.RefreshUpdateState();
         }
 
-        private async Task CheckForUpdates()
+        public void ShowUpdateAfterError()
         {
-            await UpdateChecker.CheckForUpdates().ConfigureAwait(false);
-
-            if (UpdateChecker.IsNewVersionAvailable)
-            {
-                await InvokeAsync(() =>
-                {
-                    mainFormBottomPanel.SetNewVersionAvailable();
-                }).ConfigureAwait(false);
-            }
+            mainFormBottomPanel.ShowUpdateAfterError();
         }
 
 #if DEBUG
@@ -1060,7 +1091,7 @@ namespace GUI
             {
                 Text = "Compiling shaders…"
             };
-            progressDialog.OnProcess += (_, __) =>
+            progressDialog.OnProcess = _ =>
             {
                 var window = NativeWindowFactory.Create(new()
                 {
@@ -1080,6 +1111,8 @@ namespace GUI
                 {
                     NativeWindowFactory.Destroy(window);
                 }
+
+                return Task.CompletedTask;
             };
             progressDialog.ShowDialog();
         }

@@ -7,6 +7,7 @@
 // tau = PI*2
 #define TAU 6.2831853071795864769252867665590
 
+#define INCH_TO_M 0.0254
 
 // clamp(value, 0.0, 1.0)
 float saturate(float val) {
@@ -91,15 +92,13 @@ float length_squared(vec4 vector)
 }
 
 
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Color
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 const vec3 gamma = vec3(2.4);
 const vec3 invGamma = vec3(1.0 / gamma);
 
 float GetLuma(vec3 Color) {
-	return dot( Color, vec3(0.2126, 0.7152, 0.0722) );
+	return dot( Color, vec3(0.2125, 0.7154, 0.0721) ); // BT.709-1, same as Valve
 }
 
 float LevelsAdjust(float component, vec3 L_BlackWhiteGamma)
@@ -248,7 +247,6 @@ vec3 QuaternionRotation( vec3 v, vec4 q )
 // All of this is directly ported from The Lab Renderer from the unity store.
 // These are their utility functions, at least as of the lab.
 
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 float ClampToPositive( float flValue )
 {
 	return max( 0.0, flValue );
@@ -269,16 +267,13 @@ vec4 ClampToPositive( vec4 vValue )
 	return max( vec4(0.0), vValue.xyzw );
 }
 
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 // basically map to 0-1
 float LinearRamp( float flMin, float flMax, float flInput )
 {
 	return saturate( ( flInput - flMin ) / ( flMax - flMin ) );
 }
 
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Remap a value in the range [A,B] to [C,D].
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 float RemapVal( float flOldVal, float flOldMin, float flOldMax, float flNewMin, float flNewMax )
 {
 	// Put the old val into 0-1 range based on the old min/max
@@ -288,9 +283,7 @@ float RemapVal( float flOldVal, float flOldMin, float flOldMax, float flNewMin, 
 	return ( flValNormalized * ( flNewMax - flNewMin ) ) + flNewMin;
 }
 
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Remap a value in the range [A,B] to [C,D]. Values <A map to C, and >B maps to D.
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 float RemapValClamped( float flOldVal, float flOldMin, float flOldMax, float flNewMin, float flNewMax )
 {
 	// Put the old val into 0-1 range based on the old min/max
@@ -300,7 +293,6 @@ float RemapValClamped( float flOldVal, float flOldMin, float flOldMax, float flN
 	return ( flValNormalized * ( flNewMax - flNewMin ) ) + flNewMin;
 }
 
-//-------------------------------------------------------------------------------------------------------------------------------------------------------------
 vec4 PackToColor( vec4 vValue )
 {
 	return ( ( vValue.xyzw * 0.5 ) + 0.5 );
@@ -348,9 +340,24 @@ vec3 DecodeDxt5Normal(vec4 bumpTexel)
     return vec3(temp, sqrt(saturate(1 - dot(temp, temp))));
 }
 
+vec2 sign_not_zero(vec2 v)
+{
+    return step(0.0, v) * 2.0 - 1.0;
+}
+
+vec3 hemi_oct_to_float32x3(vec2 e)
+{
+    vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    return normalize(v);
+}
+
 vec3 oct_to_float32x3(vec2 e)
 {
     vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+    if (v.z < 0.0)
+    {
+        v.xy = (1.0 - abs(v.yx)) * sign_not_zero(v.xy);
+    }
     return normalize(v);
 }
 
@@ -370,7 +377,7 @@ vec3 DecodeHemiOctahedronNormal(vec2 vHemiOct)
 {
     //Reconstruct the tangent vector from the map
     vec2 temp = vec2(vHemiOct.x + vHemiOct.y - 1.003922, vHemiOct.x - vHemiOct.y);
-    vec3 tangentNormal = oct_to_float32x3(temp);
+    vec3 tangentNormal = hemi_oct_to_float32x3(temp);
 
     // This is free, it gets compiled into the TS->WS matrix mul
     tangentNormal.y = -tangentNormal.y;

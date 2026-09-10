@@ -28,6 +28,50 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets the decoded animation frame data for the current tick, or <see langword="null"/> when no animation is active.</summary>
         public Frame? AnimationFrame { get; private set; }
 
+        /// <summary>
+        /// Gets the root motion the active clip has moved through since this was last consumed, as a rigid
+        /// transform. Seeking contributes too, backwards as the motion in reverse.
+        /// </summary>
+        public Matrix4x4 RootMotionDelta { get; private set; } = Matrix4x4.Identity;
+
+        /// <summary>
+        /// Takes <see cref="RootMotionDelta"/> and clears it, so a caller running at a different rate than the
+        /// animation neither applies a step twice nor loses one.
+        /// </summary>
+        public Matrix4x4 ConsumeRootMotionDelta()
+        {
+            var delta = RootMotionDelta;
+            RootMotionDelta = Matrix4x4.Identity;
+            return delta;
+        }
+
+        // Root motion is measured between the times the pose was sampled at, so whatever moves the pose moves it.
+        private float sampledTime;
+        private bool hasSampledTime;
+
+        /// <summary>
+        /// Adds the motion covered since the pose was last sampled to the pending delta.
+        /// </summary>
+        private void AccumulateRootMotion()
+        {
+            if (activeClip is not { } clip)
+            {
+                hasSampledTime = false;
+                return;
+            }
+
+            // Mirrors how the frame was sampled: an exact lookup rounds playback to that frame.
+            var sampleTime = clip.IsPaused ? clip.Animation.SnapTimeToFrame(clip.Time) : clip.Time;
+
+            if (hasSampledTime)
+            {
+                RootMotionDelta *= clip.Animation.GetRootMotionDelta(sampledTime, sampleTime);
+            }
+
+            sampledTime = sampleTime;
+            hasSampledTime = true;
+        }
+
         private bool forceUpdate;
 
         /// <summary>Gets or sets whether animation playback is paused. Changing the value forces a pose update.</summary>
@@ -36,18 +80,43 @@ namespace ValveResourceFormat.Renderer
             get => field;
             set
             {
-                forceUpdate = field != value;
+                forceUpdate |= field != value;
                 field = value;
             }
         }
 
-        /// <summary>Gets or sets the current frame index of the active animation.</summary>
+        /// <summary>
+        /// Gets or sets whether the active animation is composed over the bind pose. Seeded from the
+        /// animation's additive flag on activation. Changing the value forces a pose update.
+        /// </summary>
+        public bool ApplyAdditive
+        {
+            get => field;
+            set
+            {
+                forceUpdate |= field != value;
+                field = value;
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the current frame index of the active animation. Seeking targets a position in the
+        /// cycle being played rather than the first one, so scrubbing a looping animation walks within that
+        /// cycle instead of unwinding everything played so far.
+        /// </summary>
         public int Frame
         {
             get => activeClip?.Frame ?? 0;
             set
             {
-                activeClip?.Frame = value;
+                if (activeClip is { } clip)
+                {
+                    var (cycle, _, _) = clip.Animation.GetCyclePosition(clip.Time);
+
+                    clip.Frame = value;
+                    clip.Time += cycle * clip.Animation.CycleDuration;
+                }
+
                 forceUpdate = true;
             }
         }
@@ -78,7 +147,10 @@ namespace ValveResourceFormat.Renderer
             Pose = pose;
             FrameCache = new(skeleton, flexControllers);
             BlendedFrame = new(skeleton, flexControllers);
+            AdditiveFrame = new(skeleton, flexControllers);
         }
+
+        private readonly Frame AdditiveFrame;
 
         /// <summary>
         /// Advances the animation by <paramref name="timeStep"/> seconds and writes the skeleton's
@@ -102,24 +174,24 @@ namespace ValveResourceFormat.Renderer
             AnimationFrame = GetFrame();
             forceUpdate = false;
 
+            AccumulateRootMotion();
+
             if (AnimationFrame == null)
             {
                 BindPose.AsSpan().CopyTo(Pose);
                 return true;
             }
 
-            if (!IsUsingMixer && ActiveAnimation is { IsAdditive: true })
+            if (!IsUsingMixer && ApplyAdditive && ActiveAnimation is { } animation)
             {
-                // We need a frame we can write to without ruining the frame cache
-                AnimationFrame.Bones.CopyTo(FrameCache.InterpolatedFrame.Bones);
-                AnimationFrame = FrameCache.InterpolatedFrame;
+                // Composed in a scratch frame so the frame cache is not written to
+                AnimationFrame.Bones.CopyTo(AdditiveFrame.Bones.AsSpan());
+                AnimationFrame.Datas.CopyTo(AdditiveFrame.Datas.AsSpan());
+                AdditiveFrame.Movement = AnimationFrame.Movement;
+                AdditiveFrame.FrameIndex = AnimationFrame.FrameIndex;
+                AnimationFrame = AdditiveFrame;
 
-                // Add over bind pose
-                for (var i = 0; i < AnimationFrame.Bones.Length; i++)
-                {
-                    var bindPose = new FrameBone(Skeleton.Bones[i].Position, 1f, Skeleton.Bones[i].Angle);
-                    AnimationFrame.Bones[i] = AnimationFrame.Bones[i].BlendAdd(bindPose, 1f);
-                }
+                animation.ComposeAdditiveOverBindPose(AnimationFrame.Bones, Skeleton);
             }
 
             foreach (var root in Skeleton.Roots)
@@ -129,7 +201,7 @@ namespace ValveResourceFormat.Renderer
                     continue;
                 }
 
-                FramePose.ComputeWorldSubtree(root, rootTransform, AnimationFrame, Pose);
+                Skeleton.ComputeWorldSubtree(root, rootTransform, AnimationFrame, Pose);
             }
 
             return true;
@@ -141,13 +213,18 @@ namespace ValveResourceFormat.Renderer
         /// <param name="animation">The animation to activate, or <see langword="null"/> to clear.</param>
         /// <param name="blendTime">The time in seconds to blend from previous animations to the new animation.</param>
         /// <param name="looping">Whether the clip should loop when reaching the end.</param>
-        public void SetAnimation(Animation? animation, float blendTime, bool looping)
+        /// <param name="warp">Whether re-activating the animation already playing should cross over
+        /// into a second instance of it rather than restarting it in place.</param>
+        public void SetAnimation(Animation? animation, float blendTime, bool looping, bool warp = false)
         {
             FrameCache.PurgeCache();
+            ApplyAdditive = animation?.IsAdditive ?? false;
+
+            hasSampledTime = false;
 
             if (animation != null)
             {
-                TransitionToClip(animation, blendTime, looping);
+                TransitionToClip(animation, blendTime, looping, warp);
             }
             else
             {

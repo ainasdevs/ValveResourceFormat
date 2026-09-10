@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.ResourceTypes;
 
@@ -20,7 +21,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         // sphere/capsule constants
         private const int SphereSegments = 8;
         private const int SphereBands = 5;
-        // constants for sizes of spheres/capsules
+
         /// <summary>Number of vertices in one hemisphere (used for sphere and capsule allocation).</summary>
         public const int HemisphereVerts = SphereBands * SphereSegments + 1;
 
@@ -37,7 +38,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         protected int indexCount { get; private set; }
 
         /// <summary>Gets the vertex array state for this shape.</summary>
-        protected RenderVao vao { get; private set; } = null!;
+        protected int vao { get; private set; }
 
         /// <summary>Gets whether this shape uses normal-based shading.</summary>
         protected virtual bool Shaded { get; } = true;
@@ -47,7 +48,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
 
         private ShapeSceneNode(Scene scene) : base(scene)
         {
-            shader = Scene.RendererContext.ShaderLoader.LoadShader("vrf.basic_shape");
+            shader = Scene.RendererContext.ShaderLoader.LoadShader("basic_shape");
         }
 
         internal ShapeSceneNode(Scene scene, List<SimpleVertexNormal> verts, List<int> inds) : this(scene)
@@ -109,19 +110,11 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         {
             indexCount = inds.Count;
 
-            GL.CreateBuffers(1, out int vboHandle);
-            GL.CreateBuffers(1, out int iboHandle);
+            var label = GetType().Name;
+            var vboHandle = GraphicsDevice.CreateBuffer<SimpleVertexNormal>(label, CollectionsMarshal.AsSpan(verts), BufferUsage.Static);
+            var iboHandle = GraphicsDevice.CreateBuffer<int>(label, CollectionsMarshal.AsSpan(inds), BufferUsage.Static);
 
-            GL.NamedBufferData(vboHandle, verts.Count * SimpleVertexNormal.SizeInBytes, ListAccessors<SimpleVertexNormal>.GetBackingArray(verts), BufferUsageHint.StaticDraw);
-            GL.NamedBufferData(iboHandle, inds.Count * sizeof(int), ListAccessors<int>.GetBackingArray(inds), BufferUsageHint.StaticDraw);
-
-            vao = new RenderVao(Scene.RendererContext.MeshBufferCache, nameof(ShapeSceneNode), vboHandle, SimpleVertexNormal.SizeInBytes, SimpleVertexNormal.InputLayout, iboHandle);
-
-#if DEBUG
-            var vaoLabel = nameof(PhysSceneNode);
-            GL.ObjectLabel(ObjectLabelIdentifier.Buffer, vboHandle, vaoLabel.Length, vaoLabel);
-            GL.ObjectLabel(ObjectLabelIdentifier.Buffer, iboHandle, vaoLabel.Length, vaoLabel);
-#endif
+            vao = SimpleVertexNormal.InputLayout.CreateVertexArray(nameof(ShapeSceneNode), vboHandle, iboHandle);
         }
 
         /// <summary>Appends two triangles forming a quad face from four vertex indices.</summary>
@@ -357,48 +350,47 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             renderShader.SetUniform3x4("transform", Transform);
             renderShader.SetBoneAnimationData(false);
 
-            renderShader.SetUniform1("g_bNormalShaded", Shaded);
-            renderShader.SetUniform1("g_bTriplanarMapping", ToolTexture != null);
+            renderShader.SetUniform("g_bNormalShaded", Shaded);
+            renderShader.SetUniform("g_bTriplanarMapping", ToolTexture != null);
 
-            if (ToolTexture != null)
-            {
-                renderShader.SetTexture(0, "g_tColor", ToolTexture);
-            }
+            renderShader.SetTexture(0, "g_tColor", ToolTexture ?? Scene.RendererContext.MaterialLoader.GetDefaultColor());
 
-            GL.BindVertexArray(vao.Get(renderShader));
+            VertexArray.Bind(vao, renderShader);
 
-            GL.DepthFunc(DepthFunction.Gequal);
+            var renderState = GraphicsContext.RenderState;
+            var state = renderState.CurrentPass;
+            state.DepthStencil.DepthFunc = RsComparison.CloserEqual;
 
             if (isTranslucent)
             {
-                GL.Disable(EnableCap.CullFace);
+                state.Rasterizer.CullMode = RsCullMode.None;
+            }
 
+            using var _ = renderState.Scope(in state);
+
+            if (isTranslucent)
+            {
                 // Lines
-                GL.PolygonMode(TriangleFace.FrontAndBack, PolygonMode.Line);
-                GL.Disable(EnableCap.Blend);
+                var lineState = state;
+                lineState.Rasterizer.FillMode = RsFillMode.Wireframe;
+                lineState.BlendEnable = false;
+                renderState.Apply(in lineState);
                 GL.DrawElements(PrimitiveType.Triangles, indexCount, DrawElementsType.UnsignedInt, 0);
 
                 // Triangles
-                GL.PolygonMode(TriangleFace.FrontAndBack, PolygonMode.Fill);
-                GL.Enable(EnableCap.Blend);
-                GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-                GL.Enable(EnableCap.PolygonOffsetLine);
-                GL.Enable(EnableCap.PolygonOffsetFill);
-                GL.PolygonOffsetClamp(2, 100, 0.05f);
-
+                var fillState = state;
+                fillState.BlendEnable = true;
+                fillState.SetBlend(RsBlendMode.SrcAlpha, RsBlendMode.InvSrcAlpha);
+                fillState.Rasterizer.SlopeScaledDepthBias = 2f;
+                fillState.Rasterizer.DepthBias = 100;
+                fillState.Rasterizer.DepthBiasClamp = 0.05f;
+                renderState.Apply(in fillState);
                 GL.DrawElementsInstancedBaseInstance(PrimitiveType.Triangles, indexCount, DrawElementsType.UnsignedInt, 0, 1, Id);
-
-                GL.Disable(EnableCap.PolygonOffsetLine);
-                GL.Disable(EnableCap.PolygonOffsetFill);
-                GL.PolygonOffsetClamp(0, 0, 0);
-                GL.Enable(EnableCap.CullFace);
             }
             else
             {
                 GL.DrawElementsInstancedBaseInstance(PrimitiveType.Triangles, indexCount, DrawElementsType.UnsignedInt, 0, 1, Id);
             }
-
-            GL.DepthFunc(DepthFunction.Greater);
         }
 
         /// <inheritdoc/>

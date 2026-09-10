@@ -54,17 +54,17 @@ layout(binding = 5, std140) uniform CullParams_t
     CullBatch_t g_BinBatches[3];
 };
 
-layout(binding = 15, std430) readonly buffer CullPlanesBuffer
+layout(binding = 3, std430) readonly buffer CullPlanesBuffer
 {
     vec2 g_CullPlanes[];
 };
 
-layout(binding = 14, std430) readonly buffer CullItemsBuffer
+layout(binding = 2, std430) readonly buffer CullItemsBuffer
 {
     CullItem_t g_CullItems[];
 };
 
-layout(binding = 13, std430) writeonly buffer OutputCullBitsBuffer
+layout(binding = 12, std430) writeonly buffer OutputCullBitsBuffer
 {
     uint g_OutputCullBits[];
 };
@@ -76,7 +76,7 @@ shared uint g_nGroupMask;
 
 const bool OCCLUSION_CULL = true;
 
-layout(binding = 0) uniform sampler2D g_tDepthPyramid;
+uniform sampler2D g_tDepthPyramid; // bound above the reserved slots by Scene.SetOcclusionUniforms
 uniform int g_nDepthPyramidMaxMip;
 uniform int g_nDepthPyramidWidth;
 uniform int g_nDepthPyramidHeight;
@@ -241,6 +241,9 @@ void main()
 
     uint nBits = 0u;
 
+    vec2 vTilePixelMin = vTileCenter - g_vTileToCenterOffset;
+    vec2 vTilePixelMax = vTileCenter + g_vTileToCenterOffset;
+
     for (uint nMask = nGroupMask; nMask != 0u; nMask &= nMask - 1u)
     {
         uint nBit = uint(findLSB(nMask));
@@ -249,6 +252,14 @@ void main()
         bool bVisible = TestConic(vTileCenter, item)
                      && TestHull(vTileCenter, item.nFirstPlane, item.nNumPlanes0)
                      && TestHull(vTileCenter, item.nFirstPlane + item.nNumPlanes0, item.nNumPlanes1);
+
+        if (bVisible && OCCLUSION_CULL && g_bOcclusionCullEnabled)
+        {
+            bVisible = !IsItemOccluded(
+                max(item.vBoundsMin, vTilePixelMin),
+                min(item.vBoundsMax, vTilePixelMax),
+                item.vNdcDepthNear.x);
+        }
 
         if (bVisible)
         {

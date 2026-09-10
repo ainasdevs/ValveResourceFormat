@@ -83,10 +83,8 @@ vec3 calculateWorldNormal(vec3 vNormalTs)
     vec3 tangent = vTangentOut.xyz;
     vec3 bitangent = vBitangentOut;
 
-    //Make the tangent space matrix
     mat3 tangentSpace = mat3(tangent, bitangent, normal);
 
-    //Calculate the tangent normal in world space and return it
     return normalize(tangentSpace * vNormalTs);
 }
 
@@ -128,7 +126,7 @@ void main()
     }
 #endif
 
-    vec3 lightDirection = GetEnvLightDirection(0u);
+    vec3 lightDirection = GetSunDirection();
     vec3 viewDirection = normalize(g_vCameraPositionWs - vFragPosition);
 
 #if F_FULLBRIGHT == 1 || (F_TRANSLUCENT == 1 && F_ALLOW_LIGHTING_ON_TRANSLUCENT == 0)
@@ -156,7 +154,6 @@ void main()
 
     tintFactor *= g_vColorTint.rgb;
 
-    //Simply multiply the color from the color texture with the illumination
     outputColor = vec4(illumination * 2.0 * color.rgb * tintFactor, color.a);
 
     #if (F_PAINT_VERTEX_COLORS == 1)

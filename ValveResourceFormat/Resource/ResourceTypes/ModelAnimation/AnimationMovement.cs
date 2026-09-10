@@ -76,8 +76,8 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         {
             EndFrame = frameBlock.GetInt32Property("endframe");
             MotionFlags = (ModelAnimationMotionFlags)frameBlock.GetInt32Property("motionflags");
-            V0 = frameBlock.GetInt32Property("v0");
-            V1 = frameBlock.GetInt32Property("v1");
+            V0 = frameBlock.GetFloatProperty("v0");
+            V1 = frameBlock.GetFloatProperty("v1");
             Angle = frameBlock.GetFloatProperty("angle");
             Vector = new Vector3(frameBlock.GetFloatArray("vector"));
             Position = new Vector3(frameBlock.GetFloatArray("position"));
@@ -96,6 +96,12 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                 _ => Lerp(a.Position, a.Angle, b.Position, b.Angle, t),
             };
         }
+
+        /// <summary>
+        /// Interpolates linearly between two movement samples using <paramref name="t"/> in the range [0, 1].
+        /// </summary>
+        public static MovementData Lerp(in MovementData a, in MovementData b, float t)
+            => Lerp(a.Position, a.Angle, b.Position, b.Angle, t);
 
         private static MovementData Lerp(Vector3 aPos, float aAngle, Vector3 bPos, float bAngle, float t)
         {

@@ -301,8 +301,8 @@ public static partial class ShaderSpirvReflection
         if (program.StaticComboArray.Length > 0)
         {
             var parts = new List<string>();
-            var configGen = new ConfigMappingParams(program);
-            var state = configGen.GetConfigState(staticCombo.StaticComboId);
+            var configMapping = new ComboConfigMapping(program);
+            var state = configMapping.GetConfigState(staticCombo.StaticComboId);
 
             for (var i = 0; i < state.Length; i++)
             {
@@ -320,13 +320,13 @@ public static partial class ShaderSpirvReflection
             }
         }
 
-        var dynamicComboEntry = Array.Find(staticCombo.DynamicCombos, r => r.ShaderFileId == shaderFile.ShaderFileId);
+        var dynamicComboEntry = Array.Find(staticCombo.DynamicComboRenderStates, r => r.ShaderFileId == shaderFile.ShaderFileId);
         var dynamicComboId = dynamicComboEntry?.DynamicComboId ?? 0;
 
         if (dynamicComboId != 0)
         {
             var parts = new List<string>();
-            var state = program.GetDBlockConfig(dynamicComboId);
+            var state = program.GetDynamicComboConfig(dynamicComboId);
 
             for (var i = 0; i < state.Length; i++)
             {
@@ -356,17 +356,15 @@ public static partial class ShaderSpirvReflection
             return;
         }
 
-        // var leadingWriteSequence = shader.ZFrameCache.Get(zFrameId).DataBlocks[dynamicId];
-
-        // Arrays that are one entry per dynamic combo (such as VShaderInputs) are indexed by the position of the
+        // Arrays that are one entry per dynamic combo (such as VsInputSignatureIndices) are indexed by the position of the
         // combo, which is only the same as its id when no combos were skipped, and never the same as the shader file id.
-        var dynamicComboIndex = Array.FindIndex(staticComboData.DynamicCombos, r => r.ShaderFileId == shaderFile.ShaderFileId);
-        var dynamicComboId = dynamicComboIndex >= 0 ? staticComboData.DynamicCombos[dynamicComboIndex].DynamicComboId : 0;
+        var dynamicComboIndex = Array.FindIndex(staticComboData.DynamicComboRenderStates, r => r.ShaderFileId == shaderFile.ShaderFileId);
+        var dynamicComboId = dynamicComboIndex >= 0 ? staticComboData.DynamicComboRenderStates[dynamicComboIndex].DynamicComboId : 0;
         var writeSequence = staticComboData.DynamicComboVariables[Math.Max(staticComboData.GetDynamicComboIndex(dynamicComboId), 0)];
 
         var bindingConfig = GetBindingConfiguration(program.VcsVersion, program.VcsProgramType);
         var hasBindlessResources =
-            staticComboData.Attributes.FirstOrDefault(a => a.Name0 == "BindlessResources")?.ConstValue is true;
+            staticComboData.Attributes.FirstOrDefault(a => a.Name == "BindlessResources")?.ConstValue is true;
 
         int? bindlessSet = null;
         if (hasBindlessResources)
@@ -375,7 +373,7 @@ public static partial class ShaderSpirvReflection
             {
                 if (program.VariableDescriptions[field.VariableIndex].Name == "g_globalLateBoundBindlessSet")
                 {
-                    bindlessSet = field.Dest;
+                    bindlessSet = field.BindingSlot;
                     break;
                 }
             }
@@ -392,9 +390,9 @@ public static partial class ShaderSpirvReflection
             ? vulkanSource
             : null;
 
-        if (vertexLayout is not null && dynamicComboIndex >= 0 && dynamicComboIndex < staticComboData.VShaderInputs.Length)
+        if (vertexLayout is not null && dynamicComboIndex >= 0 && dynamicComboIndex < staticComboData.VsInputSignatureIndices.Length)
         {
-            vsInputSignature = program.VSInputSignatures[staticComboData.VShaderInputs[dynamicComboIndex]].SymbolsDefinition;
+            vsInputSignature = program.VsInputSignatures[staticComboData.VsInputSignatureIndices[dynamicComboIndex]].Elements;
         }
 
         // Fallback (set, binding) for the synthesized _Globals_ uniform buffer when VCS has no matching Cbuffer variable:
@@ -540,7 +538,7 @@ public static partial class ShaderSpirvReflection
 
             if (variable.RegisterType is VfxRegisterType.SamplerState)
             {
-                Debug.Assert(variable.Flags == VariableFlags.SamplerFlag4);
+                Debug.Assert(variable.Flags == VariableFlags.Sampler);
                 continue;
             }
 
@@ -550,7 +548,7 @@ public static partial class ShaderSpirvReflection
             }
 
             var isBindlessTextureArray = variable.Flags.HasFlag(VariableFlags.Bindless);
-            Debug.Assert(variable.Flags.HasFlag(VariableFlags.TextureFlag3 | VariableFlags.SamplerFlag4));
+            Debug.Assert(variable.Flags.HasFlag(VariableFlags.Texture | VariableFlags.Sampler));
 
             var startingPoint = isBindlessTextureArray ? config.TextureIndexStartingPoint : config.TextureStartingPoint;
 
@@ -568,7 +566,7 @@ public static partial class ShaderSpirvReflection
                     continue;
                 }
 
-                if (field.Dest == imageBinding - startingPoint)
+                if (field.BindingSlot == imageBinding - startingPoint)
                 {
                     return variable.Name;
                 }
@@ -602,7 +600,7 @@ public static partial class ShaderSpirvReflection
 
             var param = program.VariableDescriptions[field.VariableIndex];
 
-            if (param.RegisterType is not VfxRegisterType.SamplerState || field.Dest != samplerBinding - config.SamplerStartingPoint)
+            if (param.RegisterType is not VfxRegisterType.SamplerState || field.BindingSlot != samplerBinding - config.SamplerStartingPoint)
             {
                 continue;
             }
@@ -616,8 +614,9 @@ public static partial class ShaderSpirvReflection
             else
             {
                 var intValue = param.IntDefs[0];
-                value = SamplerStateEnumSource.GetValueOrDefault(param.Name)?.GetEnumName(intValue)
-                    ?? intValue.ToString(CultureInfo.InvariantCulture);
+                value = SamplerStateEnumSource.GetValueOrDefault(param.Name) is { } enumSource
+                    ? ShaderUtilHelpers.GetEnumName(enumSource, intValue)
+                    : intValue.ToString(CultureInfo.InvariantCulture);
                 definition.SetStatic(param.Name, intValue);
             }
 
@@ -665,7 +664,7 @@ public static partial class ShaderSpirvReflection
                 continue;
             }
 
-            if (field.Dest == bufferBinding - config.StorageBufferStartingPoint)
+            if (field.BindingSlot == bufferBinding - config.StorageBufferStartingPoint)
             {
                 return param.Name;
             }
@@ -689,7 +688,7 @@ public static partial class ShaderSpirvReflection
         {
             var param = program.VariableDescriptions[field.VariableIndex];
 
-            if (param.VfxType is VfxVariableType.Cbuffer && field.Dest == binding && field.LayoutSet == set)
+            if (param.VfxType is VfxVariableType.Cbuffer && field.BindingSlot == binding && field.LayoutSet == set)
             {
                 return param.Name;
             }
@@ -708,10 +707,10 @@ public static partial class ShaderSpirvReflection
     public static string GetGlobalBufferMemberName(VfxProgramData program, VfxVariableIndexArray writeSequence,
         int offset)
     {
-        return writeSequence.Globals
+        return writeSequence.Constants
             .Select<VfxVariableIndexData, (VfxVariableIndexData Field, VfxVariableDescription Param)>(f =>
                 (f, program.VariableDescriptions[f.VariableIndex]))
-            .FirstOrDefault(fp => fp.Field.Field2 == offset).Param?.Name ?? string.Empty;
+            .FirstOrDefault(fp => fp.Field.RegisterOffset == offset).Param?.Name ?? string.Empty;
     }
 
     // by offset

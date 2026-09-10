@@ -47,7 +47,7 @@ namespace ValveResourceFormat.ResourceTypes
         /// empty LOD0) is a real LOD.
         /// </summary>
         public bool HasDistinctLevels => Enumerable.Range(1, Math.Max(LevelCount - 1, 0))
-            .Any(level => meshLodMasks.Any(mask => (mask & 1L) != ((mask >> level) & 1L)));
+            .Any(level => meshLodMasks.Any(mask => IsInLevel(mask, 0) != IsInLevel(mask, level)));
 
         /// <summary>
         /// Initializes LOD info from a model's mesh LOD masks (<c>m_refLODGroupMasks</c>) and switch
@@ -88,7 +88,7 @@ namespace ValveResourceFormat.ResourceTypes
         /// <paramref name="level"/>. Meshes without a mask entry are treated as always present.
         /// </summary>
         public bool IsMeshInLevel(int meshIndex, int level)
-            => meshIndex >= meshLodMasks.Length || (meshLodMasks[meshIndex] & 1L << level) != 0;
+            => meshIndex >= meshLodMasks.Length || IsInLevel(meshLodMasks[meshIndex], level);
 
         /// <summary>
         /// Determines whether the mesh at <paramref name="meshIndex"/> shows up in every populated LOD
@@ -144,5 +144,16 @@ namespace ValveResourceFormat.ResourceTypes
         /// <summary>Returns the index of the lowest set bit in <paramref name="combinedMask"/>, or 0 if none.</summary>
         public static int LowestSetLevel(long combinedMask)
             => combinedMask == 0 ? 0 : BitOperations.TrailingZeroCount((ulong)combinedMask);
+
+        /// <summary>Determines whether <paramref name="lodGroupMask"/> contains LOD level <paramref name="level"/>.</summary>
+        public static bool IsInLevel(long lodGroupMask, int level)
+            => (lodGroupMask & 1L << level) != 0;
+
+        /// <summary>
+        /// Determines whether <paramref name="lodGroupMask"/> includes the lowest set level of
+        /// <paramref name="combinedMask"/>. A mask of 0 is not LoD-managed and is always present.
+        /// </summary>
+        public static bool IsInLowestSetLevel(uint lodGroupMask, uint combinedMask)
+            => lodGroupMask == 0 || IsInLevel(lodGroupMask, LowestSetLevel(combinedMask));
     }
 }

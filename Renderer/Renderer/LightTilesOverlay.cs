@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using OpenTK.Graphics.OpenGL;
-using ValveResourceFormat.Renderer.Buffers;
 using ValveResourceFormat.Renderer.Materials;
 
 namespace ValveResourceFormat.Renderer;
@@ -68,29 +67,22 @@ public class LightTilesOverlay(RendererContext rendererContext)
             return;
         }
 
-        shader ??= rendererContext.ShaderLoader.LoadShader("vrf.light_tiles_overlay");
+        shader ??= rendererContext.ShaderLoader.LoadShader("light_tiles_overlay");
 
         Debug.Assert(shader != null);
 
         using var _ = new GLDebugGroup("Cull Tiles Overlay");
 
         shader.Use();
-        shader.SetUniform1("g_flOverlayAlpha", Alpha);
-        shader.SetUniform1("g_nOverlayTileBase", tileBase);
-        shader.SetUniform1("g_nOverlayWords", words);
+        shader.SetUniform("g_flOverlayAlpha", Alpha);
+        shader.SetUniform("g_nOverlayTileBase", tileBase);
+        shader.SetUniform("g_nOverlayWords", words);
 
         cullBits.BindBufferBase();
 
-        GL.Disable(EnableCap.DepthTest);
-        GL.DepthMask(false);
-        GL.Enable(EnableCap.Blend);
-        GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+        using var overlayState = GraphicsContext.RenderState.Scope(depthTest: false, depthWrite: false, blend: true);
 
         GL.BindVertexArray(rendererContext.MeshBufferCache.EmptyVAO);
         GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
-
-        GL.Disable(EnableCap.Blend);
-        GL.DepthMask(true);
-        GL.Enable(EnableCap.DepthTest);
     }
 }

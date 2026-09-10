@@ -11,7 +11,7 @@
 #define renderMode_Diffuse 0
 #define renderMode_Specular 0
 #define renderMode_Irradiance 0
-#define renderMode_IrradianceDebug 0
+#define renderMode_LightmapCharts 0
 #define renderMode_Occlusion 0
 #define renderMode_LightmapShadows 0
 #define renderMode_LightTiles 0
@@ -19,20 +19,20 @@
 
 #if (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1)
     centroid in vec3 vLightmapUVScaled;
-    uniform sampler2DArray g_tIrradiance;
-    uniform sampler2DArray g_tIrradianceDebugChart;
+    uniform sampler2DArray g_tIrradiance; // reserved
+    uniform sampler2DArray g_tLightmapDebugCharts; // reserved
     #if (S_LIGHTMAP_VERSION_MINOR >= 3)
-        uniform sampler2DArray g_tDirectionalIrradianceR;
-        uniform sampler2DArray g_tDirectionalIrradianceG;
-        uniform sampler2DArray g_tDirectionalIrradianceB;
+        uniform sampler2DArray g_tDirectionalIrradianceR; // reserved
+        uniform sampler2DArray g_tDirectionalIrradianceG; // reserved
+        uniform sampler2DArray g_tDirectionalIrradianceB; // reserved
     #else
-        uniform sampler2DArray g_tDirectionalIrradiance;
+        uniform sampler2DArray g_tDirectionalIrradiance; // reserved
     #endif
     #if (S_LIGHTMAP_VERSION_MINOR == 1)
-        uniform sampler2DArray g_tDirectLightIndices;
-        uniform sampler2DArray g_tDirectLightStrengths;
+        uniform sampler2DArray g_tDirectLightIndices; // reserved
+        uniform sampler2DArray g_tDirectLightStrengths; // reserved
     #elif (S_LIGHTMAP_VERSION_MINOR >= 2)
-        uniform sampler2DArray g_tDirectLightShadows;
+        uniform sampler2DArray g_tDirectLightShadows; // reserved
     #endif
 #elif (D_BAKED_LIGHTING_FROM_PROBE == 1)
     #include "lighting.lpv.slang"
@@ -52,68 +52,172 @@
 
 #include "lighting.barn.slang"
 
-// https://lisyarus.github.io/blog/graphics/2022/07/30/point-light-attenuation.html
-float attenuate_cusp(float s, float falloff)
-{
-    if (s >= 1.0)
-        return 0.0;
+const float MIN_LIGHT_ALPHA = 0.0001;
 
-    float s2 = pow2(s);
-    return pow2(1 - s2) / (1 + falloff * s);
+void CalculateShadingGated(inout LightingTerms_t lighting, vec3 lightVector, vec3 lightColor, MaterialProperties_t mat, uint nLightIndex)
+{
+    vec3 previousDiffuse = lighting.DiffuseDirect;
+    vec3 previousSpecular = lighting.SpecularDirect;
+    vec3 previousTransmissive = lighting.TransmissiveDirect;
+
+    CalculateShading(lighting, lightVector, lightColor, mat);
+
+    vec3 vRenderGates = GetLightRenderGates(nLightIndex);
+
+    // (renderdiffuse / renderspecular / rendertransmissive)
+    lighting.DiffuseDirect = mix(previousDiffuse, lighting.DiffuseDirect, vRenderGates.x);
+    lighting.SpecularDirect = mix(previousSpecular, lighting.SpecularDirect, vRenderGates.y);
+    lighting.TransmissiveDirect = mix(previousTransmissive, lighting.TransmissiveDirect, vRenderGates.z);
+}
+
+// The global sun, valid across all lightmap versions. bakedVisibility carries whatever shadowing
+// the lightmap already provides (the V2 shadow channel); the sun shadow map goes on top.
+void CalculateSunLighting(inout LightingTerms_t lighting, MaterialProperties_t mat, float bakedVisibility)
+{
+    vec3 vSunColor = GetSunColor();
+
+    if (vSunColor == vec3(0.0))
+    {
+        return;
+    }
+
+    float visibility = bakedVisibility;
+
+    if (visibility > MIN_LIGHT_ALPHA)
+    {
+        visibility *= CalculateSunShadowMapVisibility(mat.PositionWS);
+    }
+
+    if (visibility > MIN_LIGHT_ALPHA)
+    {
+        vec3 previousSpecular = lighting.SpecularDirect;
+
+        CalculateShading(lighting, GetSunDirection(), vSunColor * visibility, mat);
+
+        if (g_vSunColor.a == 0.0)
+        {
+            lighting.SpecularDirect = previousSpecular;
+        }
+    }
+}
+
+float CalculateStationaryLightRealtimeShadow(uint nLightIndex, vec3 vPositionWs)
+{
+    if (float(nLightIndex) == g_vSunLightBakedShadowMask.x)
+    {
+        return CalculateSunShadowMapVisibility(vPositionWs);
+    }
+
+    // todo
+    return 1.0;
+}
+
+// Per-pixel dynamic light evaluation for legacy lights
+void CalculateDynamicLightV1(inout LightingTerms_t lighting, MaterialProperties_t mat, uint nLightIndex)
+{
+    uint nLightType = GetLightType(nLightIndex);
+
+    vec4 vFalloffParams = g_vLightFallOff[nLightIndex];
+    vec3 vLightVector;
+    float flDistanceSquared;
+
+    if (nLightType == LIGHT_TYPE_DIRECTIONAL)
+    {
+        // light_ortho: parallel rays inside a box. Test in beam space and light along the constant beam direction.
+        vec3 vDelta = mat.PositionWS - GetLightPositionWs(nLightIndex);
+        vec3 vForward = g_vLightDirection_InvRange[nLightIndex].xyz;
+        mat3 mLightAxes = mat3(g_matLightToWorld[nLightIndex]);
+        vec2 vHalfExtents = g_vLightSpotInnerOuterConeCosines[nLightIndex].xy;
+
+        float flDepth = dot(vDelta, vForward);
+        vec2 vSide = vec2(dot(vDelta, mLightAxes[1]), dot(vDelta, mLightAxes[2]));
+
+        if (flDepth < 0.0 || any(greaterThan(abs(vSide), vHalfExtents)))
+        {
+            return;
+        }
+
+        vLightVector = -vForward;
+        flDistanceSquared = flDepth * flDepth;
+    }
+    else
+    {
+        vec3 vToLight = GetLightPositionWs(nLightIndex) - mat.PositionWS;
+        vLightVector = normalize(vToLight);
+        flDistanceSquared = dot(vToLight, vToLight);
+    }
+
+    if (flDistanceSquared > vFalloffParams.z)
+    {
+        return;
+    }
+
+    float flClampedDistanceSquared = max(flDistanceSquared, 1.0);
+    float flAttenuation = saturate(1.0 / dot(vec2(sqrt(flClampedDistanceSquared), flClampedDistanceSquared), vFalloffParams.xy) - vFalloffParams.w);
+
+    if (nLightType == LIGHT_TYPE_SPOT)
+    {
+        // todo: light cookie
+
+        vec2 vConeCosines = g_vLightSpotInnerOuterConeCosines[nLightIndex].xy;
+        vec3 vForward = g_vLightDirection_InvRange[nLightIndex].xyz;
+        float flCosAngle = dot(vForward, -vLightVector);
+        flAttenuation *= saturate((flCosAngle - vConeCosines.y) / max(vConeCosines.x - vConeCosines.y, 0.0001));
+    }
+
+    if (flAttenuation <= MIN_LIGHT_ALPHA)
+    {
+        return;
+    }
+
+    CalculateShadingGated(lighting, vLightVector, GetLightColor(nLightIndex) * flAttenuation, mat, nLightIndex);
 }
 
 void CalculateDirectLighting(inout LightingTerms_t lighting, inout MaterialProperties_t mat)
 {
-    const float MIN_ALPHA = 0.0001;
     vec4 dlsh = vec4(1, 1, 1, 1);
 
     #if (S_LIGHTMAP_VERSION_MINOR == 1)
-        #if (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1)
-            vec4 dls = texture(g_tDirectLightStrengths, mat.LightmapUv);
-            vec4 dli = texture(g_tDirectLightIndices, mat.LightmapUv);
-        #elif (D_BAKED_LIGHTING_FROM_PROBE == 1)
-            vec3 vLightProbeShadowCoords = CalculateProbeShadowCoords(mat.PositionWS);
-            vec4 dls = textureLod(g_tLPV_Scalars, vLightProbeShadowCoords, 0.0);
-            vec4 dli = textureLod(g_tLPV_Indices, vLightProbeShadowCoords, 0.0);
-        #else
-            vec4 dls = vec4(1, 0, 0, 0);
-            vec4 dli = vec4(0, 0, 0, 0);
-        #endif
+        #if (D_BAKED_LIGHTING_FROM_VERTEX_STREAM == 1)
+            // Per-vertex baked geometry carries no direct light info.
+        #elif (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1) || (D_BAKED_LIGHTING_FROM_PROBE == 1)
+            #if (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1)
+                vec4 dls = texture(g_tDirectLightStrengths, mat.LightmapUv);
+                vec4 dli = texture(g_tDirectLightIndices, mat.LightmapUv);
+            #else
+                vec3 vLightProbeShadowCoords = CalculateProbeShadowCoords(mat.PositionWS);
+                vec4 dls = textureLod(g_tLPV_Scalars, vLightProbeShadowCoords, 0.0);
+                vec4 dli = textureLod(g_tLPV_Indices, vLightProbeShadowCoords, 0.0);
+            #endif
 
-        vec4 vLightStrengths = pow2(dls);
-        uvec4 vLightIndices = uvec4(dli * 255.0);
+            vec4 vLightStrengths = pow2(dls);
+            uvec4 vLightIndices = uvec4(dli * 255.0);
 
-        for (int i = 0; i < 4; i++)
-        {
-            float visibility = vLightStrengths[i];
-            if (visibility <= MIN_ALPHA)
+            for (int i = 0; i < 4; i++)
             {
-                continue;
-            }
-
-            uint uLightIndex = vLightIndices[i];
-            bool bLightmapBakedDirectDiffuse = true;
-
-            if (IsDirectionalLight(uLightIndex))
-            {
-                bLightmapBakedDirectDiffuse = false;
-                visibility *= CalculateSunShadowMapVisibility(mat.PositionWS);
-            }
-
-            if (visibility > MIN_ALPHA)
-            {
-                vec3 lightVector = GetLightDirection(mat.PositionWS, uLightIndex);
-                vec3 lightColor = GetLightColor(uLightIndex);
-                vec3 lightColorModulated = lightColor * visibility;
-
-                vec3 previousDiffuse = lighting.DiffuseDirect;
-                CalculateShading(lighting, lightVector, lightColorModulated, mat);
-
-                if (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1 && bLightmapBakedDirectDiffuse)
+                float visibility = vLightStrengths[i];
+                if (visibility <= MIN_LIGHT_ALPHA)
                 {
-                    lighting.DiffuseDirect = previousDiffuse + lightColorModulated;
+                    continue;
+                }
+
+                uint uLightIndex = vLightIndices[i];
+                visibility *= CalculateStationaryLightRealtimeShadow(uLightIndex, mat.PositionWS);
+
+                if (visibility > MIN_LIGHT_ALPHA)
+                {
+                    vec3 lightVector = GetLightDirection(mat.PositionWS, uLightIndex);
+                    CalculateShadingGated(lighting, lightVector, GetLightColor(uLightIndex) * visibility, mat, uLightIndex);
                 }
             }
+        #else
+            CalculateSunLighting(lighting, mat, 1.0);
+        #endif
+
+        // Dynamic (directlight 2) lights, evaluated per pixel.
+        for (uint i = g_nNumLights[0]; i < g_nNumLights[1]; i++)
+        {
+            CalculateDynamicLightV1(lighting, mat, i);
         }
 
     #elif (S_LIGHTMAP_VERSION_MINOR >= 2)
@@ -124,42 +228,19 @@ void CalculateDirectLighting(inout LightingTerms_t lighting, inout MaterialPrope
             dlsh = textureLod(g_tLPV_Shadows, vLightProbeShadowCoords, 0.0);
         #endif
 
-        if (g_nNumLights[0] > 0u)
-        {
-            float visibility = saturate(1.0 - dot(dlsh, g_vSunLightBakedShadowMask));
-            
-            if (visibility > MIN_ALPHA)
-            {
-                visibility *= CalculateSunShadowMapVisibility(mat.PositionWS);
-            }
-
-            if (visibility > MIN_ALPHA)
-            {
-                vec3 lightVector = GetLightDirection(mat.PositionWS, 0u);
-                vec3 lightColor = GetLightColor(0u);
-                CalculateShading(lighting, lightVector, visibility * lightColor, mat);
-            }
-        }
+        CalculateSunLighting(lighting, mat, saturate(1.0 - dot(dlsh, g_vSunLightBakedShadowMask)));
     #else
         // Non lightmapped scene
+        CalculateSunLighting(lighting, mat, 1.0);
+
         for (uint i = g_nNumLights[0]; i < g_nNumLights[1]; i++)
         {
-            if (IsDirectionalLight(i))
-            {
-                float visibility = CalculateSunShadowMapVisibility(mat.PositionWS);
-
-                if (visibility > MIN_ALPHA)
-                {
-                    vec3 lightVector = GetLightDirection(mat.PositionWS, i);
-                    vec3 lightColor = GetLightColor(i);
-                    CalculateShading(lighting, lightVector, visibility * lightColor, mat);
-                }
-            }
+            CalculateDynamicLightV1(lighting, mat, i);
         }
 #endif
 
     // 0 (dynamic scene) or lightmapped 2+ 
-    if (S_LIGHTMAP_VERSION_MINOR != 1 && g_bExperimentalLightsEnabled)
+    if (S_LIGHTMAP_VERSION_MINOR != 1)
     {
         CalculateBarnLighting(lighting, mat, dlsh);
     }
@@ -172,27 +253,31 @@ void CalculateDirectLighting(inout LightingTerms_t lighting, inout MaterialPrope
 uniform float g_flDirectionalLightmapStrength = 1.0;
 uniform float g_flDirectionalLightmapMinZ = 0.05;
 
-const float colorSpaceMul = 254 / 255;
+const float LIGHTMAP_DIRECTION_MIN_Z = 0.0872; // sin(5 degrees)
+const float LIGHTMAP_DIRECTION_MAX_XY = sqrt(1.0 - LIGHTMAP_DIRECTION_MIN_Z * LIGHTMAP_DIRECTION_MIN_Z);
 
 // I don't actually understand much of this, but it's Valve's code.
-vec3 ComputeLightmapShading(vec3 irradianceColor, vec4 irradianceDirection, vec3 normalMap)
+vec3 ComputeLightmapShading(vec3 irradianceColor, vec4 irradianceDirection, MaterialProperties_t mat)
 {
     if (UseLightmapDirectionality)
     {
-        vec3 vTangentSpaceLightVector = vec3(0.0);
+        vec2 vTangentSpaceXY = UnpackFromColor(irradianceDirection.xy);
 
-        vTangentSpaceLightVector.xy = UnpackFromColor(irradianceDirection.xy);
+        vTangentSpaceXY *= (LIGHTMAP_DIRECTION_MAX_XY / max(LIGHTMAP_DIRECTION_MAX_XY, length(vTangentSpaceXY)));
 
-        float sinTheta = dot(vTangentSpaceLightVector.xy, vTangentSpaceLightVector.xy);
+        float sinTheta = dot(vTangentSpaceXY, vTangentSpaceXY);
         float cosTheta = sqrt(1.0 - sinTheta);
 
-        vTangentSpaceLightVector *= (colorSpaceMul / max(colorSpaceMul, length(vTangentSpaceLightVector.xy)));
-        vTangentSpaceLightVector.z = cosTheta;
+        float flCurvature = GetCurvature(mat.GeometricNormal, mat.PositionWS);
+        float flFlatness = smoothstep(0.1, 0.01, flCurvature) * 0.8;
+        float flZScale = mix(1.0, mix(0.1, 2.0, saturate((1.0 - cosTheta) * 1.5)), flFlatness);
 
-        float flDirectionality = mix(0, irradianceDirection.z, g_flDirectionalLightmapStrength);
+        vec3 vTangentSpaceLightVector = normalize(vec3(vTangentSpaceXY, cosTheta * flZScale));
+
+        float flDirectionality = mix(0.0, irradianceDirection.z, g_flDirectionalLightmapStrength);
         vec3 vNonDirectionalLightmap = irradianceColor * saturate(flDirectionality);
 
-        float NoL = ClampToPositive(dot(vTangentSpaceLightVector, normalMap));
+        float NoL = ClampToPositive(dot(vTangentSpaceLightVector, mat.NormalMap));
         float LightmapZ = max(vTangentSpaceLightVector.z, g_flDirectionalLightmapMinZ);
 
         irradianceColor = (NoL * (irradianceColor - vNonDirectionalLightmap) / LightmapZ) + vNonDirectionalLightmap;
@@ -210,8 +295,8 @@ void CalculateIndirectLighting(inout LightingTerms_t lighting, inout MaterialPro
 
     // Indirect Lighting
 #if (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1)
-    if (g_iRenderMode == renderMode_IrradianceDebug) {
-        vec3 irradiance = texture(g_tIrradianceDebugChart, mat.LightmapUv).rgb;
+    if (g_iRenderMode == renderMode_LightmapCharts) {
+        vec3 irradiance = texture(g_tLightmapDebugCharts, mat.LightmapUv).rgb;
         lighting.DiffuseIndirect = irradiance;
     } else {
         vec3 irradiance = texture(g_tIrradiance, mat.LightmapUv).rgb;
@@ -221,20 +306,20 @@ void CalculateIndirectLighting(inout LightingTerms_t lighting, inout MaterialPro
             vec4 vAHDData = texture(g_tDirectionalIrradiance, mat.LightmapUv);
         #endif
 
-        lighting.DiffuseIndirect = ComputeLightmapShading(irradiance, vAHDData, mat.NormalMap);
+        lighting.DiffuseIndirect = ComputeLightmapShading(irradiance, vAHDData, mat);
 
         lighting.SpecularOcclusion = vAHDData.a;
     }
 
 #elif (D_BAKED_LIGHTING_FROM_PROBE == 1)
-    if (g_iRenderMode == renderMode_IrradianceDebug) {
+    if (g_iRenderMode == renderMode_LightmapCharts) {
         lighting.DiffuseIndirect = vec3(0);
     } else {
         lighting.DiffuseIndirect = ComputeLightProbeShading(mat);
     }
 
 #elif (D_BAKED_LIGHTING_FROM_VERTEX_STREAM == 1)
-    if (g_iRenderMode == renderMode_IrradianceDebug) {
+    if (g_iRenderMode == renderMode_LightmapCharts) {
         lighting.DiffuseIndirect = vec3(1);
     } else {
         lighting.DiffuseIndirect = vPerVertexLightingOut.rgb;
@@ -256,10 +341,18 @@ void CalculateIndirectLighting(inout LightingTerms_t lighting, inout MaterialPro
         mat.Roughness = oldRoughness;
     #endif
 
-    EnvBRDF_t envBrdf = EnvBRDF(mat.SpecularColor, mat.IsometricRoughness, mat.AmbientNormal, mat.ViewDir);
+    EnvBRDF_t envBrdf = EnvBRDF(mat.SpecularColor, mat.IsometricRoughness, mat.AmbientNormal, mat.ViewDir, mat.ClothMask);
 
     lighting.SpecularIndirect += envBrdf.MultiScatter * lighting.DiffuseIndirect;
-    lighting.DiffuseIndirect *= ClampToPositive(vec3(1.0) - (envBrdf.SingleScatter + envBrdf.MultiScatter));
+
+    vec3 diffuseEnergy = ClampToPositive(vec3(1.0) - (envBrdf.SingleScatter + envBrdf.MultiScatter));
+
+    if (F_CLOTH_SHADING == 1)
+    {
+        diffuseEnergy = mix(diffuseEnergy, vec3(1.0), mat.ClothMask);
+    }
+
+    lighting.DiffuseIndirect *= diffuseEnergy;
 #endif
 }
 
@@ -303,6 +396,9 @@ LightingTerms_t CalculateLighting(inout MaterialProperties_t mat)
     #endif
 
     CalculateDirectLighting(lighting, mat);
+
+    lighting.SpecularDirect *= GetSpecularEnergyCompensation(mat);
+
     CalculateIndirectLighting(lighting, mat);
 
     return lighting;
@@ -337,7 +433,7 @@ bool _HandleLightingRenderModes(inout vec4 outputColor, MaterialProperties_t mat
             outputColor = vec4(lighting.DiffuseDirect + lighting.SpecularDirect, 1.0);
             return true;
         case renderMode_Irradiance:
-        case renderMode_IrradianceDebug:
+        case renderMode_LightmapCharts:
             outputColor = vec4(lighting.DiffuseIndirect, 1.0);
             return true;
         case renderMode_Diffuse:

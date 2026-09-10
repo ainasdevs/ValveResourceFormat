@@ -23,13 +23,13 @@ layout(std140, binding = 3) uniform LightProbeVolumeArray
     LightProbeVolume g_LPV[MAX_LIGHT_PROBES];
 };
 
-uniform sampler3D g_tLPV_Irradiance; // SrgbRead(true)
+uniform sampler3D g_tLPV_Irradiance; // SrgbRead(true) reserved
 
 #if (S_LIGHTMAP_VERSION_MINOR == 1)
-    uniform sampler3D g_tLPV_Indices;
-    uniform sampler3D g_tLPV_Scalars;
+    uniform sampler3D g_tLPV_Indices; // reserved
+    uniform sampler3D g_tLPV_Scalars; // reserved
 #elif (S_LIGHTMAP_VERSION_MINOR >= 2)
-    uniform sampler3D g_tLPV_Shadows;
+    uniform sampler3D g_tLPV_Shadows; // reserved
 #endif
 
 vec3 CalculateProbeSampleCoords(vec3 fragPosition)
@@ -70,6 +70,15 @@ vec3 CalculateProbeIndirectCoords(vec3 fragPosition)
     return indirectCoords;
 }
 
+vec3 DecodeProbeSample(vec4 value)
+{
+    #if (S_LIGHTMAP_VERSION_MINOR == 0)
+        return DecodeRGBM(value);
+    #endif
+
+    return value.rgb;
+}
+
 vec3 ComputeLightProbeShading(in MaterialProperties_t mat)
 {
     vec3 vIndirectSampleCoords = CalculateProbeIndirectCoords(mat.PositionWS);
@@ -84,14 +93,9 @@ vec3 ComputeLightProbeShading(in MaterialProperties_t mat)
 
     for (int i = 0; i < 3; i++)
     {
-        vAmbient[i] = textureLod(g_tLPV_Irradiance, vIndirectSampleCoords + vec3(0, 0, vDepthSliceOffsets[i]), 0.0).rgb;
+        vAmbient[i] = DecodeProbeSample(textureLod(g_tLPV_Irradiance, vIndirectSampleCoords + vec3(0, 0, vDepthSliceOffsets[i]), 0.0));
         indirectDiffuse += vAmbient[i] * vNormalSquared[i];
     }
-
-    // SteamVR Home lpv irradiance is RGBM Dxt5
-    #if (S_LIGHTMAP_VERSION_MINOR == 0)
-        indirectDiffuse = pow2(indirectDiffuse); // not bothering with RGBM
-    #endif
 
     return indirectDiffuse;
 }

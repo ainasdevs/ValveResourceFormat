@@ -41,7 +41,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             LocalBoundingBox = new AABB(boundsMin, boundsMax);
 
             lineBuffer = new LineBuffer(Scene.RendererContext, nameof(LineSceneNode));
-            lineBuffer.Upload(vertices, BufferUsageHint.StaticDraw);
+            lineBuffer.Upload(vertices, BufferUsage.Static);
         }
 
         /// <inheritdoc/>
@@ -59,11 +59,14 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             }
 
             var renderShader = context.ReplacementShader ?? lineBuffer.Shader;
+
+            using var _ = GraphicsContext.RenderState.Scope();
+
             renderShader.Use();
             renderShader.SetUniform3x4("transform", Transform);
             renderShader.SetBoneAnimationData(false);
 
-            lineBuffer.Draw(Id, context.ReplacementShader);
+            lineBuffer.Draw(Id);
         }
     }
 }

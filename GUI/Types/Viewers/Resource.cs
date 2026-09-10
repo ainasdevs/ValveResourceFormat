@@ -14,7 +14,9 @@ using GUI.Utils;
 using ValveKeyValue;
 using ValveResourceFormat;
 using ValveResourceFormat.Blocks;
+using ValveResourceFormat.Graphs;
 using ValveResourceFormat.IO;
+using ValveResourceFormat.Particles;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.World;
 using ValveResourceFormat.ResourceTypes;
@@ -34,6 +36,7 @@ namespace GUI.Types.Viewers
     {
         private ValveResourceFormat.Resource? resource;
         private RendererContext? rendererContext;
+        private readonly List<(GLGraphViewer Viewer, string TabName)> preparedGraphViewers = [];
         public GLBaseControl? GLViewer { get; private set; }
         private CodeTextBox? GLViewerError;
         private string? GLViewerTabName;
@@ -103,22 +106,30 @@ namespace GUI.Types.Viewers
                     }
                     break;
 
-                case ResourceType.Map:
+                case ResourceType.ParticleSnapshot:
+                    if (resource.GetBlockByType(BlockType.SNAP) is ParticleSnapshot snapshot && SnapshotParticleSystem.CanPreview(snapshot))
                     {
-                        var worldResource = vrfGuiContext.LoadFileCompiled(WorldLoader.GetWorldNameFromMap(resource.FileName!));
-                        var mapExternalReferences = resource.ExternalReferences;
-
-                        if (worldResource != null && worldResource.DataBlock is World mapWorldData)
-                        {
-                            GLViewer = new GLWorldViewer(vrfGuiContext, rendererContext, mapWorldData, mapExternalReferences);
-                            GLViewerTabName = "MAP";
-                        }
-                        else
-                        {
-                            worldResource?.Dispose();
-                        }
-                        break;
+                        GLViewer = new GLParticleViewer(vrfGuiContext, rendererContext, SnapshotParticleSystem.Create(snapshot), snapshot);
+                        GLViewerTabName = "SNAPSHOT";
                     }
+                    break;
+
+                case ResourceType.Map:
+                {
+                    var worldResource = vrfGuiContext.LoadFileCompiled(WorldLoader.GetWorldNameFromMap(resource.FileName!));
+                    var mapExternalReferences = resource.ExternalReferences;
+
+                    if (worldResource != null && worldResource.DataBlock is World mapWorldData)
+                    {
+                        GLViewer = new GLWorldViewer(vrfGuiContext, rendererContext, mapWorldData, mapExternalReferences);
+                        GLViewerTabName = "MAP";
+                    }
+                    else
+                    {
+                        worldResource?.Dispose();
+                    }
+                    break;
+                }
 
                 case ResourceType.World:
                     if (resource.DataBlock is World worldData)
@@ -181,8 +192,8 @@ namespace GUI.Types.Viewers
                 case ResourceType.NmGraph:
                     if (resource.DataBlock is BinaryKV3 binaryKV3)
                     {
-                        GLViewer = new AnimationGraphViewer(vrfGuiContext, rendererContext, binaryKV3.Data);
-                        GLViewerTabName = "ANIMATION GRAPH";
+                        GLViewer = new AG2GraphViewer(vrfGuiContext, rendererContext, binaryKV3.Data);
+                        GLViewerTabName = "AG2 ANIMATION GRAPH";
                     }
                     break;
 
@@ -194,20 +205,28 @@ namespace GUI.Types.Viewers
                     }
                     break;
 
-                case ResourceType.Material:
+                case ResourceType.EntityLump:
+                    if (resource.DataBlock is EntityLump entityLumpData)
                     {
-                        if (resource.DataBlock is Material { ShaderName: "sky.vfx" })
-                        {
-                            GLViewer = new GLSkyboxViewer(vrfGuiContext, rendererContext, resource);
-                            GLViewerTabName = "SKYBOX";
-                        }
-                        else
-                        {
-                            GLViewer = new GLMaterialViewer(vrfGuiContext, rendererContext, resource);
-                            GLViewerTabName = "MATERIAL";
-                        }
-                        break;
+                        GLViewer = new EntityIOGraphViewer(vrfGuiContext, rendererContext, entityLumpData);
+                        GLViewerTabName = "ENTITY I/O GRAPH";
                     }
+                    break;
+
+                case ResourceType.Material:
+                {
+                    if (resource.DataBlock is Material { ShaderName: "sky.vfx" })
+                    {
+                        GLViewer = new GLSkyboxViewer(vrfGuiContext, rendererContext, resource);
+                        GLViewerTabName = "SKYBOX";
+                    }
+                    else
+                    {
+                        GLViewer = new GLMaterialViewer(vrfGuiContext, rendererContext, resource);
+                        GLViewerTabName = "MATERIAL";
+                    }
+                    break;
+                }
 
                 case ResourceType.PhysicsCollisionMesh:
                     if (resource.DataBlock is PhysAggregateData physAggregateData)
@@ -243,6 +262,12 @@ namespace GUI.Types.Viewers
             }
 
             GLViewer?.InitializeLoad();
+
+            // Preview only ever shows the first tab, so the extra graph tabs would be built and thrown away.
+            if (viewMode != ResourceViewMode.ViewerOnly)
+            {
+                PrepareExtraGraphViewers(vrfGuiContext, resource);
+            }
         }
 
         public void NotifyVisible() => GLViewer?.NotifyVisible();
@@ -281,9 +306,19 @@ namespace GUI.Types.Viewers
                 {
                     GLViewer?.Dispose();
                     GLViewer = null;
+                    DisposeExtraGraphViewers();
                     var errorTab = new ThemedTabPage("Viewer Error");
                     errorTab.Controls.Add(GLViewerError);
                     resTabs.TabPages.Add(errorTab);
+                }
+
+                // Entity lumps get the same browsable grid a map's world viewer provides, with or
+                // without the graph tab the GL viewer adds.
+                if (!isPreview && resource.DataBlock is EntityLump standaloneLump)
+                {
+                    var entitiesTabPage = new ThemedTabPage("Entity List");
+                    entitiesTabPage.Controls.Add(new EntityViewer(vrfGuiContext, standaloneLump.GetEntities()));
+                    resTabs.TabPages.Add(entitiesTabPage);
                 }
             }
 
@@ -480,14 +515,168 @@ namespace GUI.Types.Viewers
                     resTabs.TabPages.Add(entitiesTabPage);
                 }
 
-                GLViewer.InitializeRenderLoop();
+                if (!isPreview)
+                {
+                    foreach (var (viewer, tabName) in preparedGraphViewers)
+                    {
+                        AddGraphViewerTab(viewer, tabName, resTabs);
+
+                        if (GLViewer is GLWorldViewer worldViewerWithGraph && viewer is EntityIOGraphViewer entityGraphViewer)
+                        {
+                            worldViewerWithGraph.ShowEntityInGraph = entityGraphViewer.ShowEntity;
+                            worldViewerWithGraph.EntityHasGraphNode = entityGraphViewer.HasEntity;
+                        }
+                    }
+                }
+
                 return true;
             }
 
+            return AddSpecialViewerData(resource, isPreview, resTabs);
+        }
+
+        private static void AddGraphViewerTab(GLGraphViewer viewer, string tabName, TabControl resTabs)
+        {
+            viewer.InitializeLoad();
+            var tabPage = new ThemedTabPage(tabName);
+            tabPage.Controls.Add(viewer.InitializeUiControls(isPreview: false));
+            resTabs.TabPages.Add(tabPage);
+        }
+
+        // Runs on the background load thread: graph construction (entity scans, icon decoding,
+        // layout) is expensive and must not block the UI thread's loading indicator. The UI
+        // thread later only creates the tabs and GL windows in AddSpecialViewer.
+        private void PrepareExtraGraphViewers(VrfGuiContext vrfGuiContext, ValveResourceFormat.Resource resource)
+        {
+            if (rendererContext == null)
+            {
+                return;
+            }
+
+            if (GLViewer is GLWorldViewer { LoadedWorld: { } loadedWorld } glWorldViewer)
+            {
+                var hasConnections = false;
+
+                foreach (var entity in loadedWorld.Entities)
+                {
+                    if (entity.Connections is { Count: > 0 })
+                    {
+                        hasConnections = true;
+                        break;
+                    }
+                }
+
+                if (hasConnections)
+                {
+                    preparedGraphViewers.Add((new EntityIOGraphViewer(vrfGuiContext, rendererContext, loadedWorld.Entities, glWorldViewer.SelectAndFocusEntities), "ENTITY I/O GRAPH"));
+                }
+
+                PrepareMapPulseGraphViewers(vrfGuiContext, loadedWorld.Entities);
+            }
+
+            if (GLViewer is GLModelViewer && resource.DataBlock is Model model)
+            {
+                PrepareModelAnimGraphViewers(vrfGuiContext, model);
+            }
+        }
+
+        // Maps bind pulse scripts through point_pulse entities referencing the graph resource.
+        private void PrepareMapPulseGraphViewers(VrfGuiContext vrfGuiContext, List<EntityLump.Entity> entities)
+        {
+            Debug.Assert(rendererContext != null);
+
+            var scripts = new List<string>();
+
+            foreach (var entity in entities)
+            {
+                if (entity.GetStringProperty("classname") != "point_pulse")
+                {
+                    continue;
+                }
+
+                var graphDef = entity.GetStringProperty("graph_def");
+
+                if (!string.IsNullOrEmpty(graphDef) && !scripts.Contains(graphDef))
+                {
+                    scripts.Add(graphDef);
+                }
+            }
+
+            foreach (var script in scripts)
+            {
+                if (rendererContext.FileLoader.LoadFileCompiled(script)?.DataBlock is BinaryKV3 pulseData)
+                {
+                    var tabName = scripts.Count > 1 ? $"PULSE GRAPH ({Path.GetFileNameWithoutExtension(script)})" : "PULSE GRAPH";
+                    var viewer = new PulseGraphViewer(vrfGuiContext, rendererContext, pulseData.Data);
+                    preparedGraphViewers.Add((viewer, tabName));
+                }
+            }
+        }
+
+        private void PrepareModelAnimGraphViewers(VrfGuiContext vrfGuiContext, Model model)
+        {
+            Debug.Assert(rendererContext != null);
+
+            var graphPaths = new List<string>();
+
+            void AddGraphPath(string? path)
+            {
+                if (!string.IsNullOrEmpty(path) && !graphPaths.Contains(path))
+                {
+                    graphPaths.Add(path);
+                }
+            }
+
+            if (model.Data.GetArray("m_animGraph2Refs") is { } animGraph2Refs)
+            {
+                foreach (var graphRef in animGraph2Refs)
+                {
+                    AddGraphPath(graphRef.GetStringProperty("m_hGraph"));
+                }
+            }
+            else if (model.Data.ContainsKey("m_animGraph2Refs"))
+            {
+                Log.Warn(nameof(Resource), "Model has a non-array m_animGraph2Refs value, skipping its animation graph tabs.");
+            }
+
+            if (model.Data.ContainsKey("m_refAnimGraph"))
+            {
+                AddGraphPath(model.Data.GetStringProperty("m_refAnimGraph"));
+            }
+
+            // HLA/SteamVR-era models and compiled Deadlock AG1 bind their graph through the keyvalues block.
+            AddGraphPath(model.KeyValues.GetStringProperty("anim_graph_resource"));
+
+            foreach (var path in graphPaths)
+            {
+                GLGraphViewer viewer;
+                string baseName;
+
+                switch (rendererContext.FileLoader.LoadFileCompiled(path)?.DataBlock)
+                {
+                    case AnimGraph ag1Data:
+                        viewer = new AG1GraphViewer(vrfGuiContext, rendererContext, ag1Data.Data);
+                        baseName = "AG1 ANIMATION GRAPH";
+                        break;
+                    case BinaryKV3 nmGraphData:
+                        viewer = new AG2GraphViewer(vrfGuiContext, rendererContext, nmGraphData.Data);
+                        baseName = "AG2 ANIMATION GRAPH";
+                        break;
+                    default:
+                        continue;
+                }
+
+                var tabName = graphPaths.Count > 1 ? $"{baseName} ({Path.GetFileNameWithoutExtension(path)})" : baseName;
+                preparedGraphViewers.Add((viewer, tabName));
+            }
+        }
+
+        private bool AddSpecialViewerData(ValveResourceFormat.Resource resource, bool isPreview, TabControl resTabs)
+        {
             switch (resource.ResourceType)
             {
                 case ResourceType.Panorama:
-                    if (resource.DataBlock is Panorama { Names.Count: > 0 })
+                    if (resource.DataBlock is Panorama { Images.Count: > 0 })
                     {
                         var nameControl = new DataGridView
                         {
@@ -498,9 +687,9 @@ namespace GUI.Types.Viewers
                             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                             DataSource =
                                 new BindingSource(
-                                    new BindingList<Panorama.NameEntry>(((Panorama)resource.DataBlock).Names), string.Empty),
+                                    new BindingList<Panorama.ImageEntry>(((Panorama)resource.DataBlock).Images), string.Empty),
                         };
-                        var specialTabPage = new ThemedTabPage("PANORAMA NAMES");
+                        var specialTabPage = new ThemedTabPage("PANORAMA IMAGES");
                         specialTabPage.Controls.Add(nameControl);
                         resTabs.TabPages.Add(specialTabPage);
                     }
@@ -548,40 +737,30 @@ namespace GUI.Types.Viewers
                     }
                     break;
 
-                case ResourceType.EntityLump:
-                    if (resource.DataBlock is EntityLump entityLumpData)
-                    {
-                        var specialTabPage = new ThemedTabPage("Entities");
-                        specialTabPage.Controls.Add(new EntityViewer(vrfGuiContext, entityLumpData.GetEntities()));
-                        resTabs.TabPages.Add(specialTabPage);
-                        return true;
-                    }
-                    break;
-
                 case ResourceType.ChoreoSceneFileData:
-                    {
-                        var specialTabPage = new ThemedTabPage("VCDLIST");
-                        specialTabPage.Controls.Add(new ChoreoViewer(resource));
-                        resTabs.TabPages.Add(specialTabPage);
-                        return true;
-                    }
+                {
+                    var specialTabPage = new ThemedTabPage("VCDLIST");
+                    specialTabPage.Controls.Add(new ChoreoViewer(resource));
+                    resTabs.TabPages.Add(specialTabPage);
+                    return true;
+                }
 
                 case ResourceType.Shader:
+                {
+                    var compiledShaderViewer = new CompiledShader(vrfGuiContext);
+                    try
                     {
-                        var compiledShaderViewer = new CompiledShader(vrfGuiContext);
-                        try
-                        {
-                            var specialTabPage = new ThemedTabPage("SHADER");
-                            resTabs.TabPages.Add(specialTabPage);
-                            compiledShaderViewer.Create(specialTabPage);
-                            compiledShaderViewer = null;
-                        }
-                        finally
-                        {
-                            compiledShaderViewer?.Dispose();
-                        }
-                        return true;
+                        var specialTabPage = new ThemedTabPage("SHADER");
+                        resTabs.TabPages.Add(specialTabPage);
+                        compiledShaderViewer.Create(specialTabPage);
+                        compiledShaderViewer = null;
                     }
+                    finally
+                    {
+                        compiledShaderViewer?.Dispose();
+                    }
+                    return true;
+                }
             }
 
             return false;
@@ -839,7 +1018,7 @@ namespace GUI.Types.Viewers
                     break;
 
                 case ResourceType.Material:
-                    ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed vmat", new ViewerContent.LazyText(new MaterialExtract(resource, vrfGuiContext).ToValveMaterial));
+                    ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed vmat", new ViewerContent.LazyText(new MaterialExtract(resource, vrfGuiContext.FileLoaderNoCache).ToValveMaterial));
                     break;
 
                 case ResourceType.EntityLump:
@@ -860,40 +1039,54 @@ namespace GUI.Types.Viewers
                     break;
 
                 case ResourceType.Texture:
+                {
+                    if (FileExtract.IsChildResource(resource))
                     {
-                        if (FileExtract.IsChildResource(resource))
-                        {
-                            break;
-                        }
-
-                        var textureExtract = new TextureExtract(resource);
-                        ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed vtex", new ViewerContent.Text(textureExtract.ToValveTexture()));
-
-                        if (textureExtract.TryGetMksData(out var _, out var mks))
-                        {
-                            ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed mks", new ViewerContent.Text(mks));
-                        }
-
                         break;
                     }
+
+                    var textureExtract = new TextureExtract(resource);
+                    ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed vtex", new ViewerContent.Text(textureExtract.ToValveTexture()));
+
+                    if (textureExtract.TryGetMksData(out var _, out var mks))
+                    {
+                        ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed mks", new ViewerContent.Text(mks));
+                    }
+
+                    break;
+                }
 
                 case ResourceType.ParticleSnapshot:
+                {
+                    if (!FileExtract.IsChildResource(resource))
                     {
-                        if (!FileExtract.IsChildResource(resource))
-                        {
-                            ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed vsnap", new ViewerContent.Text(new SnapshotExtract(resource).ToValveSnap()));
-                        }
-
-                        break;
+                        ViewerContentPresenter.AddContentTab(resTabs, "Reconstructed vsnap", new ViewerContent.Text(new SnapshotExtract(resource).ToValveSnap()));
                     }
+
+                    break;
+                }
             }
+        }
+
+        private void DisposeExtraGraphViewers()
+        {
+            foreach (var (viewer, _) in preparedGraphViewers)
+            {
+                viewer.Dispose();
+            }
+
+            preparedGraphViewers.Clear();
         }
 
         public void Dispose()
         {
-            resource?.Dispose();
-            rendererContext?.Dispose();
+            // Order matters: nothing may dispose a resource until every thread that could still be
+            // reading it has stopped
             GLViewer?.Dispose();
+            rendererContext?.Dispose();
+            resource?.Dispose();
+
+            DisposeExtraGraphViewers();
             GLViewerError?.Dispose();
         }
     }

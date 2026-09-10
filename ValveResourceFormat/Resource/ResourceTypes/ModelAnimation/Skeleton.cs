@@ -53,7 +53,6 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         /// </summary>
         public Bone? this[string name] => this[StringToken.Get(name)];
 
-
         /// <summary>
         /// Gets the index of a bone by its <see cref="StringToken"/> hash, or -1 if not found.
         /// </summary>
@@ -69,13 +68,11 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         /// </summary>
         public static Skeleton FromModelData(KVObject modelData)
         {
-            // Check if there is any skeleton data present at all
             if (!modelData.ContainsKey("m_modelSkeleton"))
             {
                 Console.WriteLine("No skeleton data found.");
             }
 
-            // Construct the armature from the skeleton KV
             return new Skeleton(modelData.GetSubCollection("m_modelSkeleton"))
             {
                 Name = modelData.GetStringProperty("m_name"),
@@ -83,6 +80,18 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         }
 
         readonly Dictionary<uint, int> boneHashToIndex = [];
+
+        /// <summary>
+        /// Loads a compiled NM skeleton (.vnmskel) resource by name and builds a skeleton from it,
+        /// or returns <see langword="null"/> when the resource cannot be loaded.
+        /// </summary>
+        public static Skeleton? FromSkeletonResource(IO.IFileLoader fileLoader, string skeletonName)
+        {
+            using var resource = fileLoader.LoadFileCompiled(skeletonName);
+            return resource?.DataBlock is BinaryKV3 skeletonData
+                ? FromSkeletonData(skeletonData.Data)
+                : null;
+        }
 
         /// <summary>
         /// Creates a skeleton from skeleton-specific data.
@@ -175,6 +184,43 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                 var name = Bones[i].Name;
                 var hash = StringToken.Store(name);
                 boneHashToIndex[hash] = i;
+            }
+        }
+
+        /// <summary>
+        /// Accumulates each bone's world-space transform from the frame's local bone transforms,
+        /// walking down the hierarchy from the roots. <paramref name="world"/> must be at least as
+        /// long as <see cref="Bones"/> and is indexed by bone index.
+        /// </summary>
+        public void ComputeWorldPose(Frame frame, Span<Matrix4x4> world)
+        {
+            foreach (var root in Roots)
+            {
+                ComputeWorldSubtree(root, Matrix4x4.Identity, frame, world);
+            }
+        }
+
+        /// <summary>
+        /// Accumulates world-space transforms for one bone subtree under the given parent transform.
+        /// A <see langword="null"/> <paramref name="frame"/> yields the bind pose.
+        /// </summary>
+        public static void ComputeWorldSubtree(Bone bone, Matrix4x4 parentWorld, Frame? frame, Span<Matrix4x4> world)
+        {
+            var local = bone.BindPose;
+
+            if (frame != null)
+            {
+                var frameBone = frame.Bones[bone.Index];
+                local = Matrix4x4.CreateScale(frameBone.Scale)
+                    * Matrix4x4.CreateFromQuaternion(frameBone.Angle)
+                    * Matrix4x4.CreateTranslation(frameBone.Position);
+            }
+
+            world[bone.Index] = local * parentWorld;
+
+            foreach (var child in bone.Children)
+            {
+                ComputeWorldSubtree(child, world[bone.Index], frame, world);
             }
         }
     }

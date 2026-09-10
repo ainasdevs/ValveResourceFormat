@@ -2,6 +2,7 @@ using System.Diagnostics;
 using GUI.Utils;
 using OpenTK.Graphics.OpenGL;
 using SkiaSharp;
+using ValveResourceFormat;
 using ValveResourceFormat.Renderer;
 
 namespace GUI.Types.GLViewers
@@ -77,6 +78,8 @@ namespace GUI.Types.GLViewers
 
             var (w, h) = (MainFramebuffer.Width, MainFramebuffer.Height);
 
+            using var _ = GraphicsContext.RenderState.Scope();
+
             MainFramebuffer.Bind(FramebufferTarget.Framebuffer);
             GL.ClearColor(new OpenTK.Mathematics.Color4(0, 0, 0, 0));
             GL.Clear(MainFramebuffer.ClearMask);
@@ -85,7 +88,8 @@ namespace GUI.Types.GLViewers
 
             if (SaveAsFbo is null)
             {
-                SaveAsFbo = Framebuffer.Prepare(nameof(SaveAsFbo), w, h, 0, new(PixelInternalFormat.Rgba8, PixelFormat.Bgra, PixelType.UnsignedByte), null);
+                SaveAsFbo = Framebuffer.Prepare(nameof(SaveAsFbo), w, h, 0, ImageFormat.RGBA8888, null);
+                SaveAsFbo.ClearMask = ClearBufferMask.ColorBufferBit;
                 SaveAsFbo.ClearColor = new OpenTK.Mathematics.Color4(0, 0, 0, 0);
                 SaveAsFbo.Initialize();
             }

@@ -1,12 +1,10 @@
 using System.Diagnostics;
 using System.IO;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using GUI.Forms;
 using GUI.Types.PackageViewer;
 using GUI.Utils;
-using SteamDatabase.ValvePak;
+using ValvePak;
 using ValveResourceFormat.IO;
 using Resource = ValveResourceFormat.Resource;
 
@@ -30,7 +28,7 @@ namespace GUI.Types.Exporter
 
         public static async Task ExtractFileFromStream(string fileName, Stream stream, VrfGuiContext vrfGuiContext, bool decompile)
         {
-            if (!await PreExportDisclaimer(Path.GetExtension(fileName)).ConfigureAwait(true))
+            if (decompile && !await PreExportDisclaimer(Path.GetExtension(fileName)).ConfigureAwait(true))
             {
                 return;
             }
@@ -98,33 +96,18 @@ namespace GUI.Types.Exporter
 
                 var directory = Path.GetDirectoryName(filaNameToSave);
 
-                var extractDialog = new ExtractProgressForm(exportData, directory ?? string.Empty, true)
-                {
-                    ShownCallback = (form, cancellationToken) =>
-                    {
-                        form.SetProgress($"Extracting {fileName} to \"{Path.GetFileName(filaNameToSave)}\"");
-
-                        Task.Run(async () =>
-                        {
-                            await form.ExtractFile(resource, fileName, filaNameToSave, true).ConfigureAwait(false);
-                        }, cancellationToken).ContinueWith(t =>
-                        {
-                            stream.Dispose();
-                            resource.Dispose();
-
-                            form.ExportContinueWith(t);
-                        }, CancellationToken.None);
-                    }
-                };
-
                 try
                 {
-                    await extractDialog.ShowDialogAsync().ConfigureAwait(true);
-                    extractDialog = null;
+                    var exporter = new PackageExporter(exportData, directory ?? string.Empty, true);
+
+                    // Cancelling closes the dialog while the extract is still winding down, so wait for it to
+                    // stop before the finally pulls the resource out from under it
+                    await exporter.ExecuteSingleFileExtractAsync(resource, fileName, filaNameToSave, $"Extracting {fileName} to \"{Path.GetFileName(filaNameToSave)}\"").ConfigureAwait(true);
                 }
                 finally
                 {
-                    extractDialog?.Dispose();
+                    await stream.DisposeAsync().ConfigureAwait(true);
+                    resource.Dispose();
                     exportData.VrfGuiContext.Dispose();
                 }
             }
@@ -169,29 +152,18 @@ namespace GUI.Types.Exporter
             {
                 var file = selectedNode.PackageEntry;
                 Debug.Assert(file != null);
-                // We are a file
                 await ExtractFileFromPackageEntry(file, vrfGuiContext, decompile).ConfigureAwait(true);
             }
             else
             {
-                // We are a folder
                 var exportData = new ExportData
                 {
                     VrfGuiContext = vrfGuiContext,
                 };
 
-                var extractDialog = new ExtractProgressForm(exportData, null, decompile);
-
-                try
-                {
-                    extractDialog.QueueFiles(selectedNode);
-                    extractDialog.ExecuteMultipleFileExtract();
-                    extractDialog = null;
-                }
-                finally
-                {
-                    extractDialog?.Dispose();
-                }
+                var exporter = new PackageExporter(exportData, null, decompile);
+                exporter.QueueFiles(selectedNode);
+                exporter.ExecuteMultipleFileExtract();
             }
         }
 
@@ -202,24 +174,16 @@ namespace GUI.Types.Exporter
                 VrfGuiContext = vrfGuiContext,
             };
 
-            var extractDialog = new ExtractProgressForm(exportData, null, decompile);
+            var exporter = new PackageExporter(exportData, null, decompile);
 
-            try
+            // When queuing files this way, it'll preserve the original tree
+            // which is probably unwanted behaviour? It works tho /shrug
+            foreach (IBetterBaseItem item in items)
             {
-                // When queuing files this way, it'll preserve the original tree
-                // which is probably unwanted behaviour? It works tho /shrug
-                foreach (IBetterBaseItem item in items)
-                {
-                    extractDialog.QueueFiles(item);
-                }
+                exporter.QueueFiles(item);
+            }
 
-                extractDialog.ExecuteMultipleFileExtract();
-                extractDialog = null;
-            }
-            finally
-            {
-                extractDialog?.Dispose();
-            }
+            exporter.ExecuteMultipleFileExtract();
         }
 
         public static async Task<bool> PreExportDisclaimer(string fileExtension)
@@ -256,6 +220,5 @@ namespace GUI.Types.Exporter
 
             return true;
         }
-
     }
 }

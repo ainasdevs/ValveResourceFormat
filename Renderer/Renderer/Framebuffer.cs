@@ -54,26 +54,29 @@ public class Framebuffer
     /// </summary>
     public RenderTexture? Depth { get; protected set; }
 
-    /// <summary>
-    /// Stencil view texture, or <see langword="null"/> if none.
-    /// </summary>
-    public RenderTexture? Stencil { get; protected set; }
+    /// <summary>Number of layers of the depth attachment. More than one allocates it as a texture array; use <see cref="AttachDepthLayer"/> to select the layer rendering writes to.</summary>
+    public int DepthLayers { get; set; } = 1;
 
     // Maybe these can be in texture
     /// <summary>
-    /// Pixel format specification for the color attachment.
+    /// Pixel format of the color attachment.
     /// </summary>
-    public AttachmentFormat? ColorFormat { get; protected set; }
+    public ImageFormat? ColorFormat { get; protected set; }
 
     /// <summary>
-    /// Pixel format specification for the depth attachment.
+    /// Pixel format of the depth attachment.
     /// </summary>
-    public DepthAttachmentFormat? DepthFormat { get; protected set; }
+    public ImageFormat? DepthFormat { get; protected set; }
 
     /// <summary>
     /// Framebuffer completeness status set after <see cref="Initialize"/> is called.
     /// </summary>
     public FramebufferErrorCode InitialStatus { get; private set; } = FramebufferErrorCode.FramebufferUndefined;
+
+    // Sampler state requested by callers, remembered so that it survives attachment recreation.
+    private bool? shadowDepthSamplerLEqualCompare;
+    private (TextureMinFilter Min, TextureMagFilter Mag)? colorFiltering;
+    private RsTextureAddressMode? colorWrapMode;
 
     /// <summary>
     /// The framebuffer target this object was last bound to.
@@ -112,14 +115,20 @@ public class Framebuffer
     }
 
     /// <summary>
+    /// Debug name of the framebuffer, also applied as its object label.
+    /// </summary>
+    public string Name { get; }
+
+    private readonly bool isDefaultFramebuffer;
+
+    /// <summary>
     /// Creates a new named OpenGL framebuffer object.
     /// </summary>
     /// <param name="name">Debug label applied to the framebuffer object.</param>
     public Framebuffer(string name)
     {
-        GL.CreateFramebuffers(1, out int handle);
-        GL.ObjectLabel(ObjectLabelIdentifier.Framebuffer, handle, name.Length, name);
-        FboHandle = handle;
+        FboHandle = GraphicsDevice.CreateFramebuffer(name);
+        Name = name;
     }
 
     #region Default OpenGL Framebuffer instance, and equality checks
@@ -127,6 +136,8 @@ public class Framebuffer
     {
         FboHandle = fboHandle;
         InitialStatus = FramebufferErrorCode.FramebufferComplete;
+        Name = "GLDefaultFramebuffer";
+        isDefaultFramebuffer = true;
     }
     /// <summary>
     /// Creates a <see cref="Framebuffer"/> instance wrapping the default OpenGL framebuffer (handle 0).
@@ -160,45 +171,6 @@ public class Framebuffer
     #endregion
 
     /// <summary>
-    /// Color attachment pixel format and type specification.
-    /// </summary>
-    public record class AttachmentFormat(PixelInternalFormat InternalFormat, PixelFormat PixelFormat, PixelType PixelType);
-
-    /// <summary>
-    /// Depth attachment pixel format and type specification.
-    /// </summary>
-    public record class DepthAttachmentFormat(PixelInternalFormat InternalFormat, PixelType PixelType)
-    {
-        /// <summary>
-        /// 16-bit unsigned integer depth format.
-        /// </summary>
-        public static readonly DepthAttachmentFormat Depth16 = new(PixelInternalFormat.DepthComponent16, PixelType.UnsignedShort);
-
-        /// <summary>
-        /// 32-bit floating-point depth format.
-        /// </summary>
-        public static readonly DepthAttachmentFormat Depth32F = new(PixelInternalFormat.DepthComponent32f, PixelType.Float);
-
-        /// <summary>
-        /// 32-bit floating-point depth with 8-bit stencil format.
-        /// </summary>
-        public static readonly DepthAttachmentFormat Depth32FStencil8 = new(PixelInternalFormat.Depth32fStencil8, PixelType.Float32UnsignedInt248Rev);
-
-        /// <summary>
-        /// Implicitly converts this depth format to a generic <see cref="AttachmentFormat"/>.
-        /// </summary>
-        public static implicit operator AttachmentFormat(DepthAttachmentFormat depthFormat) => depthFormat.ToAttachmentFormat();
-
-        /// <summary>
-        /// Converts this depth format to a generic <see cref="AttachmentFormat"/>.
-        /// </summary>
-        public AttachmentFormat ToAttachmentFormat()
-        {
-            return new(InternalFormat, PixelFormat.DepthComponent, PixelType);
-        }
-    }
-
-    /// <summary>
     /// Creates and configures a framebuffer without allocating GPU attachments; call <see cref="Initialize"/> to allocate.
     /// </summary>
     /// <param name="name">Debug label for the framebuffer.</param>
@@ -207,12 +179,12 @@ public class Framebuffer
     /// <param name="msaa">Number of MSAA samples; 0 disables multisampling.</param>
     /// <param name="colorFormat">Color attachment format, or <see langword="null"/> for depth-only.</param>
     /// <param name="depthFormat">Depth attachment format, or <see langword="null"/> for color-only.</param>
-    public static Framebuffer Prepare(string name, int width, int height, int msaa, AttachmentFormat? colorFormat, DepthAttachmentFormat? depthFormat)
+    public static Framebuffer Prepare(string name, int width, int height, int msaa, ImageFormat? colorFormat, ImageFormat? depthFormat)
     {
         var fbo = new Framebuffer(name)
         {
             NumSamples = msaa,
-            Target = msaa > 0 ? TextureTarget.Texture2DMultisample : TextureTarget.Texture2D,
+            Target = TargetForSampleCount(msaa),
             ColorFormat = colorFormat,
             DepthFormat = depthFormat,
             Width = width,
@@ -223,16 +195,10 @@ public class Framebuffer
     }
 
     /// <summary>
-    /// Allocates GPU textures for all attachments and checks framebuffer completeness.
+    /// Allocates GPU textures for all attachments and throws if the framebuffer is not complete.
     /// </summary>
-    /// <returns>The OpenGL framebuffer completeness status code.</returns>
-    public FramebufferErrorCode Initialize()
+    public void Initialize()
     {
-        if (Target == 0)
-        {
-            throw new InvalidOperationException("Framebuffer target is not set");
-        }
-
         if (ColorFormat == null && DepthFormat == null)
         {
             throw new InvalidOperationException("Framebuffer has no attachments");
@@ -254,21 +220,32 @@ public class Framebuffer
         Bind(fboTarget);
 
         InitialStatus = GL.CheckFramebufferStatus(fboTarget);
-        return InitialStatus;
+
+        if (InitialStatus != FramebufferErrorCode.FramebufferComplete)
+        {
+            throw new InvalidOperationException($"Fbo '{Name}' failed to initialize with error: {InitialStatus}");
+        }
     }
 
     /// <summary>
-    /// Updates the MSAA sample count and resizes the framebuffer; attachments are recreated only when the width or height changes.
+    /// Updates the MSAA sample count and resizes the framebuffer, recreating attachments if the dimensions or the sample count changed.
     /// </summary>
     public void Resize(int width, int height, int msaa)
     {
-        if (width == Width && height == Height && msaa == NumSamples)
+        var samplesChanged = msaa != NumSamples;
+
+        if (width == Width && height == Height && !samplesChanged)
         {
             return;
         }
 
         NumSamples = msaa;
-        Resize(width, height);
+
+        // Resize only recreates attachments when the dimensions change, a sample count change has to do it here.
+        if (!Resize(width, height) && samplesChanged)
+        {
+            CreateAttachments();
+        }
     }
 
     /// <summary>
@@ -288,44 +265,64 @@ public class Framebuffer
         return true;
     }
 
+    private static TextureTarget TargetForSampleCount(int numSamples)
+        => numSamples > 0 ? TextureTarget.Texture2DMultisample : TextureTarget.Texture2D;
+
     private void CreateAttachments()
     {
+        Target = TargetForSampleCount(NumSamples);
+
+        if (isDefaultFramebuffer)
+        {
+            // implicitly created by window
+            return;
+        }
+
         Color?.Delete();
         Depth?.Delete();
-        Stencil?.Delete();
 
         var (width, height) = (Width, Height);
 
-        if (ColorFormat != null)
+        if (ColorFormat is { } colorFormat)
         {
-            Color = CreateAttachment(ColorFormat, width, height, NumMips);
-            Color.SetLabel("FramebufferColor");
+            Color = CreateAttachment(colorFormat, width, height, $"{Name}Color", NumMips);
             Color.AttachToFramebuffer(this, FramebufferAttachment.ColorAttachment0, 0);
+
+            ApplyColorSamplerState();
         }
 
-        if (DepthFormat != null)
+        if (DepthFormat is { } depthFormat)
         {
-            Depth = CreateAttachment(DepthFormat, width, height);
-            Depth.SetLabel("FramebufferDepth");
-            Depth.AttachToFramebuffer(this, FramebufferAttachment.DepthAttachment, 0);
-
-            if (DepthFormat == DepthAttachmentFormat.Depth32FStencil8)
+            if (DepthLayers > 1)
             {
-                Depth.AttachToFramebuffer(this, FramebufferAttachment.DepthStencilAttachment, 0);
+                if (Target != TextureTarget.Texture2D)
+                {
+                    throw new InvalidOperationException("Layered depth attachments do not support multisampling");
+                }
 
-                // Create stencil view
-                Stencil = Depth.CreateView(DepthFormat.InternalFormat);
+                Depth = RenderTexture.Create3D(TextureTarget.Texture2DArray, width, height, DepthLayers, depthFormat, 1, $"{Name}Depth");
+                AttachDepthLayer(0);
+            }
+            else
+            {
+                Depth = CreateAttachment(depthFormat, width, height, $"{Name}Depth");
+                Depth.AttachToFramebuffer(this, FramebufferAttachment.DepthAttachment, 0);
+            }
 
-                Stencil.SetLabel("FramebufferStencil");
-                Stencil.SetBaseMaxLevel(0, 0);
-                GL.TextureParameter(Stencil.Handle, TextureParameterName.DepthStencilTextureMode, (int)DepthStencilTextureMode.StencilIndex);
+            ApplyShadowDepthSamplerState();
+
+            if (ColorFormat == null)
+            {
+                // A depth only framebuffer is incomplete unless its color buffers are explicitly disabled.
+                GL.NamedFramebufferDrawBuffer(FboHandle, DrawBufferMode.None);
+                GL.NamedFramebufferReadBuffer(FboHandle, ReadBufferMode.None);
             }
         }
     }
 
-    private RenderTexture CreateAttachment(AttachmentFormat format, int width, int height, int numMips = 1)
+    private RenderTexture CreateAttachment(ImageFormat format, int width, int height, string label, int numMips = 1)
     {
-        var attachment = new RenderTexture(Target, width, height, 1, numMips);
+        var attachment = new RenderTexture(Target, width, height, 1, numMips, label);
         var mipCount = Math.Min(RenderTexture.MaxMipCount(width, height), attachment.NumMipLevels);
 
         if (Target == TextureTarget.Texture2DMultisample)
@@ -335,21 +332,39 @@ public class Framebuffer
                 throw new InvalidOperationException("Multisample textures do not support mipmaps");
             }
 
-            GL.TextureStorage2DMultisample(attachment.Handle, NumSamples, (SizedInternalFormat)format.InternalFormat, width, height, fixedsamplelocations: true);
+            GL.TextureStorage2DMultisample(attachment.Handle, NumSamples, format.ToGLSizedInternalFormat(), width, height, fixedsamplelocations: true);
         }
         else
         {
-            GL.TextureStorage2D(attachment.Handle, mipCount, (SizedInternalFormat)format.InternalFormat, width, height);
+            GL.TextureStorage2D(attachment.Handle, mipCount, format.ToGLSizedInternalFormat(), width, height);
         }
 
         attachment.SetBaseMaxLevel(0, mipCount - 1);
+
+        if (Target != TextureTarget.Texture2DMultisample && !format.IsBlockCompressed() && IsIntegerFormat(format.ToGLPixelFormat()))
+        {
+            // Sampling an integer texture with the default linear filtering is undefined.
+            attachment.SetFiltering(TextureMinFilter.Nearest, TextureMagFilter.Nearest);
+        }
+
         return attachment;
     }
+
+    private static bool IsIntegerFormat(PixelFormat pixelFormat) => pixelFormat
+        is PixelFormat.RedInteger
+        or PixelFormat.GreenInteger
+        or PixelFormat.BlueInteger
+        or PixelFormat.AlphaInteger
+        or PixelFormat.RgInteger
+        or PixelFormat.RgbInteger
+        or PixelFormat.RgbaInteger
+        or PixelFormat.BgrInteger
+        or PixelFormat.BgraInteger;
 
     /// <summary>
     /// Changes the attachment formats and recreates the GPU attachments at the current dimensions.
     /// </summary>
-    public void ChangeFormat(AttachmentFormat? colorFormat, DepthAttachmentFormat? depthFormat, FramebufferAttachment? framebufferAttachment = null)
+    public void ChangeFormat(ImageFormat? colorFormat, ImageFormat? depthFormat)
     {
         ColorFormat = colorFormat;
         DepthFormat = depthFormat;
@@ -357,15 +372,14 @@ public class Framebuffer
         CreateAttachments();
     }
 
-    /// <summary>
-    /// Throws an <see cref="InvalidOperationException"/> if the framebuffer is not complete.
-    /// </summary>
-    public void CheckStatus_ThrowIfIncomplete(string name = "")
+    /// <summary>Attaches a specific layer of the layered depth texture to the depth attachment point.</summary>
+    /// <param name="layer">Zero-based layer to attach.</param>
+    public void AttachDepthLayer(int layer)
     {
-        if (InitialStatus != FramebufferErrorCode.FramebufferComplete)
-        {
-            throw new InvalidOperationException($"Fbo '{name}' failed to initialize with error: {InitialStatus}");
-        }
+        Debug.Assert(Depth != null, "Depth attachment is null");
+        Debug.Assert(layer >= 0 && layer < DepthLayers, "Depth layer out of range");
+
+        GL.NamedFramebufferTextureLayer(FboHandle, FramebufferAttachment.DepthAttachment, Depth.Handle, 0, layer);
     }
 
     /// <summary>
@@ -407,30 +421,59 @@ public class Framebuffer
         {
             GL.DeleteTexture(Depth.Handle);
         }
-
-        if (Stencil != null)
-        {
-            GL.DeleteTexture(Stencil.Handle);
-        }
     }
 
     /// <summary>
     /// Configures depth comparison sampling on the depth attachment for shadow map reads.
     /// </summary>
-    /// <param name="lEqualCompare">When <see langword="true"/>, sets a less-or-equal compare function; otherwise keeps the default.</param>
+    /// <param name="lEqualCompare">Set when the shadow map is rendered with conventional z. The default
+    /// matches a reversed-z shadow map: the comparison passes where the reference is at least as close
+    /// to the light as the stored depth.</param>
     public void SetShadowDepthSamplerState(bool lEqualCompare = false)
     {
-        if (Depth != null)
+        shadowDepthSamplerLEqualCompare = lEqualCompare;
+        ApplyShadowDepthSamplerState();
+    }
+
+    private void ApplyShadowDepthSamplerState()
+    {
+        if (Depth == null || shadowDepthSamplerLEqualCompare is not bool lEqualCompare)
         {
-            Depth.SetParameter(TextureParameterName.TextureCompareMode, (int)TextureCompareMode.CompareRToTexture);
+            return;
+        }
 
-            if (lEqualCompare)
-            {
-                Depth.SetParameter(TextureParameterName.TextureCompareFunc, (int)DepthFunction.Lequal);
-            }
+        Depth.SetParameter(TextureParameterName.TextureCompareMode, (int)TextureCompareMode.CompareRToTexture);
+        Depth.SetParameter(TextureParameterName.TextureCompareFunc, (int)(lEqualCompare ? DepthFunction.Lequal : DepthFunction.Gequal));
+        Depth.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
+        Depth.SetWrapMode(RsTextureAddressMode.Clamp);
+    }
 
-            Depth.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
-            Depth.SetWrapMode(TextureWrapMode.ClampToEdge);
+    /// <summary>
+    /// Sets the filtering and wrap mode of the color attachment. The state is remembered and re-applied
+    /// whenever the attachment is recreated by a resize or a format change.
+    /// </summary>
+    public void SetColorSamplerState(TextureMinFilter minFilter, TextureMagFilter magFilter, RsTextureAddressMode wrapMode)
+    {
+        colorFiltering = (minFilter, magFilter);
+        colorWrapMode = wrapMode;
+        ApplyColorSamplerState();
+    }
+
+    private void ApplyColorSamplerState()
+    {
+        if (Color == null || Target == TextureTarget.Texture2DMultisample)
+        {
+            return;
+        }
+
+        if (colorFiltering.HasValue)
+        {
+            Color.SetFiltering(colorFiltering.Value.Min, colorFiltering.Value.Mag);
+        }
+
+        if (colorWrapMode is RsTextureAddressMode wrapMode)
+        {
+            Color.SetWrapMode(wrapMode);
         }
     }
 }

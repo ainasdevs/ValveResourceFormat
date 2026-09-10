@@ -30,6 +30,16 @@ public struct MeshletCullInfo
     public uint ParentDrawBoundsIndex;
 }
 
+/// <summary>Per-object LOD state the aggregate cull shader tests before anything else.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct ObjectLodInfo
+{
+    /// <summary>LOD levels this object belongs to, one bit per level. Zero means it always draws.</summary>
+    public uint LodGroupMask;
+    /// <summary>Index into the scene's active LOD level bits.</summary>
+    public uint LodSetupIndex;
+}
+
 /// <summary>Axis-aligned bounding box for a draw call, used in GPU culling.</summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct DrawBounds
@@ -77,7 +87,6 @@ public struct ObjectDataStandard
     /// <summary>Bitmask of which environment maps are visible to this object.</summary>
     public SceneEnvMap.EnvMapVisibility128 EnvMapVisibility;
 };
-
 
 /// <summary>Arguments for a <c>glDrawElementsIndirect</c> GPU draw call.</summary>
 [StructLayout(LayoutKind.Sequential)]

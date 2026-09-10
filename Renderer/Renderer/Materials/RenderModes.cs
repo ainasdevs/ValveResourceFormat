@@ -22,10 +22,10 @@ namespace ValveResourceFormat.Renderer.Materials
             new("Diffuse"),
             new("Specular"),
             new("Irradiance"),
-            new("IrradianceDebug"),
+            new("Cubemaps"),
             new("Illumination"),
             new("LightmapShadows"),
-            new("Cubemaps"),
+            new("LightmapCharts"),
             new("RimLight"),
 
             new("Material", IsHeader: true),
@@ -65,7 +65,8 @@ namespace ValveResourceFormat.Renderer.Materials
             new("Debug", IsHeader: true),
             new("LightTiles"),
             new("EnvmapTiles"),
-            new("Subgroups")
+            new("Subgroups"),
+            new("QuadOverdraw")
         ];
 
         private readonly static Dictionary<string, byte> ShaderIds = new(Items.Count);

@@ -10,7 +10,7 @@ namespace GUI.Utils
     /// </summary>
     static class Settings
     {
-        private const int SettingsFileCurrentVersion = 16;
+        private const int SettingsFileCurrentVersion = 17;
         private const int RecentFilesLimit = 20;
 
         /// <summary>
@@ -26,16 +26,29 @@ namespace GUI.Utils
         }
 
         /// <summary>
+        /// The channel that application updates are offered from.
+        /// </summary>
+        public enum UpdateChannel : int
+        {
+            /// <summary>Tagged stable releases.</summary>
+            Stable = 0,
+            /// <summary>Automated builds of the master branch.</summary>
+            Dev = 1,
+        }
+
+        /// <summary>
         /// Holds state related to automatic application update checks.
         /// </summary>
         public class AppUpdateState
         {
             /// <summary>Gets or sets whether to automatically check for updates on startup.</summary>
             public bool CheckAutomatically { get; set; }
+            /// <summary>Gets or sets the channel that updates are offered from.</summary>
+            public UpdateChannel Channel { get; set; }
             /// <summary>Gets or sets whether a newer version of the application is available.</summary>
             public bool UpdateAvailable { get; set; }
-            /// <summary>Gets or sets the timestamp of the last update check.</summary>
-            public string LastCheck { get; set; } = string.Empty;
+            /// <summary>Gets or sets when the next automatic update check is due.</summary>
+            public string NextCheck { get; set; } = string.Empty;
             /// <summary>Gets or sets the application version recorded the last time settings were loaded, used to detect version changes and reset update state.</summary>
             public string Version { get; set; } = string.Empty;
         }
@@ -219,6 +232,11 @@ namespace GUI.Utils
                 Config.FieldOfView = float.RadiansToDegrees(horizontalAt4By3Radians);
             }
 
+            if (Config.FieldOfView <= 0)
+            {
+                Config.FieldOfView = 90;
+            }
+
             Config.FieldOfView = Math.Clamp(Config.FieldOfView, 1, 170);
             Config.ViewmodelFieldOfView = Math.Clamp(Config.ViewmodelFieldOfView, 40, 80);
 
@@ -226,6 +244,11 @@ namespace GUI.Utils
             Config.Volume = MathUtils.Saturate(Config.Volume);
             Config.TextViewerFontSize = Math.Clamp(Config.TextViewerFontSize, 8, 24);
             Config.PackageGridSize = Math.Clamp(Config.PackageGridSize, 0, Enum.GetValues<Types.PackageViewer.ThumbnailRenderers.ThumbnailSizes>().Length - 1);
+
+            if (!Enum.IsDefined(Config.Update.Channel))
+            {
+                Config.Update.Channel = UpdateChannel.Stable;
+            }
 
             if (currentVersion < 2) // version 2: added anti aliasing samples
             {
@@ -298,7 +321,10 @@ namespace GUI.Utils
             {
                 Config.Update.Version = Program.ProductVersion;
                 Config.Update.UpdateAvailable = false;
-                Config.Update.LastCheck = string.Empty;
+                Config.Update.NextCheck = string.Empty;
+
+                // Installing a build, whether through the updater or by hand, is choosing its channel
+                Config.Update.Channel = Program.BuildChannel;
             }
 
             Config._VERSION_DO_NOT_MODIFY = SettingsFileCurrentVersion;

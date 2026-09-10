@@ -23,6 +23,11 @@ public class Rubikon
     public const float Epsilon = 1e-6f;
 
     /// <summary>
+    /// The keep-away gap collision code maintains between a hull and a surface, 1/32 unit.
+    /// </summary>
+    public const float SurfaceEpsilon = 1f / 32f;
+
+    /// <summary>
     /// Triangle mesh collision data for ray tracing.
     /// </summary>
     public record PhysicsMeshData(
@@ -168,6 +173,13 @@ public class Rubikon
         /// while <see cref="HitPosition"/> is the center of the swept shape itself.
         /// </summary>
         public Vector3 ContactPoint { get; set; }
+
+        /// <summary>
+        /// Gets or sets the entity this hit belongs to, for sweeps that fold brush entities in: the
+        /// entity whose collider was struck, or the worldspawn for static world geometry, as the engine
+        /// reports it. Null when the sweep did not carry entity identity at all.
+        /// </summary>
+        public Entities.BaseEntity? HitEntity { get; set; }
 
         /// <summary>
         /// Updates this <see cref="TraceResult"/> if the <paramref name="other"/> is closer. Returns true if updated.
@@ -360,7 +372,6 @@ public class Rubikon
             | (computeContactPoint ? TraceOptions.ComputeContactPoint : TraceOptions.None);
         var trace = new AABBTraceContext(from, to, halfExtents, options);
 
-        // Check against all meshes
         foreach (var mesh in Meshes)
         {
             if (SkipsCollision(collisionName, mesh.InteractAs, mesh.InteractExclude))
@@ -390,7 +401,57 @@ public class Rubikon
     /// <param name="halfExtents">Half-extents of the box.</param>
     /// <param name="collisionName">Collision interaction name used to filter shapes.</param>
     /// <returns><see langword="true"/> if any physics triangle overlaps the box.</returns>
-    public bool CheckOverlap(Vector3 center, Vector3 halfExtents, string collisionName)
+    public bool IntersectsAABB(Vector3 center, Vector3 halfExtents, string collisionName)
+    {
+        if (CheckMeshOverlap(center, halfExtents, collisionName))
+        {
+            return true;
+        }
+
+        if (HullTree.Length > 0)
+        {
+            var hullQuery = new OverlapHullsQuery(center, halfExtents, collisionName, Hulls, HullIndices);
+            TraverseBvh(HullTree, ref hullQuery);
+
+            if (hullQuery.Overlaps)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Tests a box at rest against the solid volume of this shape, rather than against its surface.
+    /// </summary>
+    /// <remarks>
+    /// What a trigger volume asks, and the difference from <see cref="IntersectsAABB"/> is a box that has
+    /// gone all the way inside a hull: no surface is in contact there, so the surface test calls it a
+    /// miss and a trigger driven by it would let go of anything that walked far enough in.
+    /// </remarks>
+    /// <param name="center">Center of the box.</param>
+    /// <param name="halfExtents">Half-extents of the box.</param>
+    /// <param name="collisionName">Collision interaction name used to filter shapes.</param>
+    /// <returns><see langword="true"/> if the box is inside or touching one of the hulls.</returns>
+    public bool IntersectsOrContainsAABB(Vector3 center, Vector3 halfExtents, string collisionName)
+    {
+        if (HullTree.Length > 0)
+        {
+            var hullQuery = new VolumeOverlapHullsQuery(center, halfExtents, collisionName, Hulls, HullIndices);
+            TraverseBvh(HullTree, ref hullQuery);
+
+            if (hullQuery.Overlaps)
+            {
+                return true;
+            }
+        }
+
+        // A triangle mesh is a surface and encloses nothing, so contact is the only overlap it can report
+        return CheckMeshOverlap(center, halfExtents, collisionName);
+    }
+
+    private bool CheckMeshOverlap(Vector3 center, Vector3 halfExtents, string collisionName)
     {
         foreach (var mesh in Meshes)
         {
@@ -408,12 +469,47 @@ public class Rubikon
             }
         }
 
-        if (HullTree.Length > 0)
-        {
-            var hullQuery = new OverlapHullsQuery(center, halfExtents, collisionName, Hulls, HullIndices);
-            TraverseBvh(HullTree, ref hullQuery);
+        return false;
+    }
 
-            if (hullQuery.Overlaps)
+    /// <summary>
+    /// Whether one of a hull's face planes has the whole box on its outside, which is what makes the box
+    /// and the hull disjoint. Passing every plane is taken as an overlap, which is exact except just
+    /// outside a hull's edges and corners, where a box can clear every face and still miss the hull.
+    /// </summary>
+    private static bool HullSeparatesBox(in PhysicsHullData hull, Vector3 center, Vector3 halfExtents)
+    {
+        foreach (var plane in hull.Planes)
+        {
+            // The nearest point of the box to the hull's inside, so the whole box is out when it is out
+            var nearest = Vector3.Dot(plane.Normal, center) - Vector3.Dot(Vector3.Abs(plane.Normal), halfExtents);
+
+            if (nearest - plane.Offset > 0f)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Tests whether a point lies inside any convex hull of this shape.
+    /// </summary>
+    /// <param name="point">The point to test, in this shape's local space.</param>
+    /// <returns><see langword="true"/> when the point is inside a hull.</returns>
+    public bool ContainsPoint(Vector3 point)
+    {
+        foreach (var hull in Hulls)
+        {
+            if (point.X < hull.Min.X || point.Y < hull.Min.Y || point.Z < hull.Min.Z
+                || point.X > hull.Max.X || point.Y > hull.Max.Y || point.Z > hull.Max.Z)
+            {
+                continue;
+            }
+
+            // A point is a box with no extents, so the plane test is the same one
+            if (!HullSeparatesBox(hull, point, Vector3.Zero))
             {
                 return true;
             }
@@ -492,6 +588,42 @@ public class Rubikon
                 var v2 = mesh.VertexPositions[triangle.Z];
 
                 if (TriangleOverlaps(center, halfExtents, v0, v1, v2))
+                {
+                    Overlaps = true;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>The <see cref="OverlapHullsQuery"/> for solid volumes: a box inside a hull counts.</summary>
+    private struct VolumeOverlapHullsQuery(Vector3 center, Vector3 halfExtents, string collisionName, PhysicsHullData[] hulls, int[] hullIndices) : IBvhQuery
+    {
+        public bool Overlaps;
+
+        public readonly bool IntersectsNode(in Node node) => BoxIntersectsAABB(center, halfExtents, node.Min, node.Max);
+
+        public readonly bool DescendLeftFirst(int splitAxis) => true;
+
+        public bool VisitLeaf(int start, int count)
+        {
+            for (var i = start; i < start + count; i++)
+            {
+                var hull = hulls[hullIndices[i]];
+
+                if (SkipsCollision(collisionName, hull.InteractAs, hull.InteractExclude))
+                {
+                    continue;
+                }
+
+                if (!BoxIntersectsAABB(center, halfExtents, hull.Min, hull.Max))
+                {
+                    continue;
+                }
+
+                if (!HullSeparatesBox(hull, center, halfExtents))
                 {
                     Overlaps = true;
                     return true;
@@ -681,25 +813,46 @@ public class Rubikon
     }
 
     /// <summary>
-    /// Player collision rules: player traces never collide with shapes that exclude the player,
-    /// and only collide with default geometry, player clips, and passbullets shapes.
+    /// Solid untagged geometry that closely resembles the render mesh.
     /// </summary>
+    public const string DefaultGeometry = "default";
+
+    /// <summary>Collision name for thrown grenades.</summary>
+    public const string GrenadeCollisionName = "grenade";
+
+    /// <summary>Collision name for the player.</summary>
+    public const string PlayerCollisionName = "player";
+
     private static bool SkipsCollision(string collisionName, string[] interactAs, string[] interactExclude)
     {
-        if (collisionName != "player")
+        if (collisionName == DefaultGeometry)
         {
-            return false;
+            return interactAs.Length > 0;
         }
 
-        if (ContainsString(interactExclude, "player"))
+        if (ContainsString(interactExclude, collisionName))
         {
             return true;
         }
 
-        return interactAs.Length > 0
-            && !ContainsString(interactAs, "playerclip")
-            && !ContainsString(interactAs, "passbullets")
-            && !ContainsString(interactAs, "window");
+        // Untagged geometry stops everything; a tagged shape only stops what its tags name.
+        if (interactAs.Length == 0)
+        {
+            return false;
+        }
+
+        return collisionName switch
+        {
+            PlayerCollisionName => !ContainsString(interactAs, "playerclip")
+                && !ContainsString(interactAs, "passbullets")
+                && !ContainsString(interactAs, "window"),
+
+            GrenadeCollisionName => !ContainsString(interactAs, "csgo_grenadeclip")
+                && !ContainsString(interactAs, "passbullets")
+                && !ContainsString(interactAs, "window"),
+
+            _ => false,
+        };
     }
 
     private static bool ContainsString(string[] values, string value)
@@ -727,7 +880,6 @@ public class Rubikon
 
         while (triangles.MoveNext(out var v0, out var v1, out var v2))
         {
-            // Update if this is the closest hit
             if (RayIntersectsTriangle(ray, v0, v1, v2, out var intersection) && intersection.Distance < closestHit.Distance)
             {
                 closestHit = new(true, ray.Origin + ray.Direction * intersection.Distance, intersection.Normal, intersection.Distance, -1);
@@ -831,7 +983,6 @@ public class Rubikon
                     continue;
                 }
 
-                // Update if this is the closest hit
                 if (intersection.Distance < ClosestHit.Distance)
                 {
                     ClosestHit = new(true, ray.Origin + ray.Direction * intersection.Distance, intersection.Normal, intersection.Distance, i);
@@ -948,7 +1099,6 @@ public class Rubikon
         }
     }
 
-
     private static void AABBTraceTriangle13AxisSat(AABBTraceContext trace, Vector3 v0, Vector3 v1, Vector3 v2, ref TraceResult closestHit)
     {
         //Needs to exist from the start, as it gets updated while running through the axis.
@@ -973,7 +1123,6 @@ public class Rubikon
 
             var tracedDistanceAlongAxis = cosTheta * trace.Length;
             var boxExtent = Vector3.Dot(Vector3.Abs(axisVector), trace.HalfExtents);
-
 
             //project the triangle onto the axis
             float min = float.PositiveInfinity, max = float.NegativeInfinity;

@@ -13,6 +13,7 @@ public partial class MainFormBottomPanel : Panel
         if (!DesignMode)
         {
             newVersionAvailableToolStripMenuItem.Visible = false;
+            newVersionAvailableToolStripMenuItem.Highlighted = true;
         }
 
         ResizeRedraw = true;
@@ -50,15 +51,53 @@ public partial class MainFormBottomPanel : Panel
         versionLabel.Text = text;
     }
 
-    public void SetNewVersionAvailable()
+    public void RefreshUpdateState()
     {
+        if (IsDisposed)
+        {
+            return; // The About dialog restarted the application
+        }
+
+        if (UpdateInstaller.InstalledVersionText != null)
+        {
+            newVersionAvailableToolStripMenuItem.Text = "Restart to update";
+            newVersionAvailableToolStripMenuItem.Visible = true;
+            return;
+        }
+
+        newVersionAvailableToolStripMenuItem.Text = "Update Available";
+        newVersionAvailableToolStripMenuItem.Visible = Settings.Config.Update.CheckAutomatically && Settings.Config.Update.UpdateAvailable;
+    }
+
+    /// <summary>
+    /// Points at a build that may already contain a fix for an error that was just shown.
+    /// Uses only the update state already in memory, and reverts to the regular state once the About dialog is opened.
+    /// </summary>
+    public void ShowUpdateAfterError()
+    {
+        RefreshUpdateState();
+
+        if (IsDisposed || newVersionAvailableToolStripMenuItem.Visible || UpdateChecker.NewerDevBuild == null)
+        {
+            return;
+        }
+
+        // A stable channel user is not offered dev builds, but the fix is most likely there
+        newVersionAvailableToolStripMenuItem.Text = "Newer dev build available";
         newVersionAvailableToolStripMenuItem.Visible = true;
+    }
+
+    public void ShowAboutDialog()
+    {
+        using var form = new AboutForm();
+        form.ShowDialog(this);
+
+        RefreshUpdateState();
     }
 
     private void OnAboutItemClick(object sender, EventArgs e)
     {
-        using var form = new AboutForm();
-        form.ShowDialog(this);
+        ShowAboutDialog();
     }
 
     public void UpdateKeybindings(List<KeybindingInfo> keybindings)

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Windows.Forms;
 using GUI.Controls;
@@ -8,8 +9,11 @@ using GUI.Utils;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
+using ValveResourceFormat.Renderer.Entities;
+using ValveResourceFormat.Renderer.Input;
 using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.Renderer.SceneNodes;
+using ValveResourceFormat.Renderer.Utils;
 using ValveResourceFormat.Renderer.World;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
@@ -35,6 +39,13 @@ namespace GUI.Types.GLViewers
         private List<Matrix4x4> CameraMatrices = [];
         private WorldNodeLoader? LoadedWorldNode;
         public WorldLoader? LoadedWorld;
+        private EntityLump.Entity? entityInfoEntity;
+
+        /// <summary>Jump from the entity info popup to the entity's node in the I/O graph tab, when the map has one.</summary>
+        public Func<EntityLump.Entity, bool>? ShowEntityInGraph { get; set; }
+
+        /// <summary>Whether the I/O graph tab has a node for an entity. Set together with <see cref="ShowEntityInGraph"/>.</summary>
+        public Func<EntityLump.Entity, bool>? EntityHasGraphNode { get; set; }
 
         public GLWorldViewer(VrfGuiContext vrfGuiContext, RendererContext rendererContext, World world, ResourceExtRefList? externalReferences = null)
             : base(vrfGuiContext, rendererContext)
@@ -90,16 +101,12 @@ namespace GUI.Types.GLViewers
 
         private void OnGetOrSetPositionFromClipboardRequest(object? sender, bool isSetRequest)
         {
-            var pitch = 0.0f;
-            var yaw = 0.0f;
-
             if (!isSetRequest)
             {
                 var loc = Renderer.Camera.Location;
-                pitch = -1.0f * float.RadiansToDegrees(Renderer.Camera.Pitch);
-                yaw = float.RadiansToDegrees(Renderer.Camera.Yaw);
+                var cameraAngles = Renderer.Camera.GetQAngle();
 
-                AppClipboard.SetText($"setpos {loc.X:F6} {loc.Y:F6} {loc.Z:F6}; setang {pitch:F6} {yaw:F6} 0.0");
+                AppClipboard.SetText($"setpos {loc.X:F6} {loc.Y:F6} {loc.Z:F6}; setang {cameraAngles.X:F6} {cameraAngles.Y:F6} {cameraAngles.Z:F6}");
 
                 return;
             }
@@ -118,14 +125,16 @@ namespace GUI.Types.GLViewers
             var y = float.Parse(pos.Groups["y"].Value, CultureInfo.InvariantCulture);
             var z = float.Parse(pos.Groups["z"].Value, CultureInfo.InvariantCulture);
 
-            if (ang.Success)
-            {
-                pitch = -1f * float.DegreesToRadians(float.Parse(ang.Groups["pitch"].Value, CultureInfo.InvariantCulture));
-                yaw = float.DegreesToRadians(float.Parse(ang.Groups["yaw"].Value, CultureInfo.InvariantCulture));
-            }
+            var viewAngles = ang.Success
+                ? new Vector3(
+                    float.Parse(ang.Groups["pitch"].Value, CultureInfo.InvariantCulture),
+                    float.Parse(ang.Groups["yaw"].Value, CultureInfo.InvariantCulture),
+                    0f)
+                : Vector3.Zero;
 
             Input.SaveCameraForTransition(exitWalkMode: false);
-            Input.Camera.SetLocationPitchYaw(new Vector3(x, y, z), pitch, yaw);
+            Input.Camera.SetLocation(new Vector3(x, y, z));
+            Input.Camera.SetFromQAngle(viewAngles);
         }
 
         private void OnRestoreCameraRequest(object? sender, RestoreCameraRequestEvent e)
@@ -135,9 +144,12 @@ namespace GUI.Types.GLViewers
                 if (savedFloats.Length == 5)
                 {
                     Input.SaveCameraForTransition();
+
+                    // Saved cameras predate the camera holding pitch the engine's way round, and are
+                    // stored positive upwards, so already saved ones keep pointing where they did.
                     Input.Camera.SetLocationPitchYaw(
                         new Vector3(savedFloats[0], savedFloats[1], savedFloats[2]),
-                        savedFloats[3],
+                        -savedFloats[3],
                         savedFloats[4]);
                 }
             }
@@ -155,7 +167,7 @@ namespace GUI.Types.GLViewers
                 saveName = $"{originalName} (#{duplicateCameraIndex++})";
             }
 
-            Settings.Config.SavedCameras.Add(saveName, [cam.Location.X, cam.Location.Y, cam.Location.Z, cam.Pitch, cam.Yaw]);
+            Settings.Config.SavedCameras.Add(saveName, [cam.Location.X, cam.Location.Y, cam.Location.Z, -cam.Pitch, cam.Yaw]);
             Settings.InvokeRefreshCamerasOnSave();
         }
 
@@ -186,11 +198,16 @@ namespace GUI.Types.GLViewers
             var cameraSet = false;
 
             // Bring up the sound player before any models load, so their animation clips can pre-cache sound events
+            ReportLoadingStatus("Loading sound events…");
             InitializeSoundPlayer();
 
             if (world != null)
             {
-                LoadedWorld = new WorldLoader(world, Scene);
+                LoadedWorld = new WorldLoader(world, Scene)
+                {
+                    LoadingProgress = GuiContext.LoadingProgress,
+                };
+
                 LoadedWorld.Load(mapExternalReferences);
 
                 if (LoadedWorld.SkyboxScene != null)
@@ -209,12 +226,31 @@ namespace GUI.Types.GLViewers
                 if (LoadedWorld.CameraMatrices.Count > 0)
                 {
                     CameraMatrices = LoadedWorld.CameraMatrices;
+                }
 
-                    Input.Camera.SetFromTransformMatrix(CameraMatrices[0]);
+                if (LoadedWorld.SpawnCameraMatrix is { } spawn)
+                {
+                    Input.Camera.SetFromTransformMatrix(spawn);
                     cameraSet = true;
                 }
 
+                ReportLoadingStatus("Loading player model…");
+
                 Input.TryLoadViewmodel(Scene);
+
+                var kzMapPrefixes = new[] { "bhop", "surf", "kz", "dr" };
+                var mapName = Path.GetFileName(LoadedWorld.MapName);
+                var isKzMap = kzMapPrefixes.Any(prefix => mapName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+                ShowSpeed = isKzMap;
+                Input.PlayerMovement.PrestrafeEnabled = isKzMap;
+                Input.PlayerMovement.AutoBunnyHop = isKzMap;
+                Input.PlayerMovement.AirAccelerate = isKzMap
+                    ? PlayerMovement.AirAccelerateMovementMaps
+                    : PlayerMovement.AirAccelerateCompetitive;
+
+                Input.EntitySystem = Scene.EntitySystem;
+                Scene.EntitySystem.SpawnPlayer(Input.PlayerMovement);
             }
 
             if (!cameraSet)
@@ -225,129 +261,22 @@ namespace GUI.Types.GLViewers
 
             if (worldNode != null)
             {
+                ReportLoadingStatus("Loading world geometry…");
+
                 LoadedWorldNode = new WorldNodeLoader(Scene.RendererContext, worldNode, mapExternalReferences);
                 LoadedWorldNode.Load(Scene);
             }
         }
 
+        protected override bool PrewarmsRenderer => true;
+
         protected override void OnFirstPaint()
         {
+            Input.MoveCamera(new Vector3(0, -150f, 0));
+
             base.OnFirstPaint();
 
-            StartMapSoundEvents();
-
-            Input.MoveCamera(new Vector3(0, -150f, 0));
             Input.MoveCamera(new Vector3(0, 150f, 0), transition: true);
-        }
-
-        /// <summary>
-        /// Starts point_soundevent entities with "Start On Spawn" set. The rest require entity I/O, which the viewer does not simulate.
-        /// </summary>
-        private void StartMapSoundEvents()
-        {
-            if (soundPlayer == null)
-            {
-                return;
-            }
-
-            // Collect named entities first, to resolve "Source Entity Name" emitters
-            var namedEntities = new Dictionary<string, SceneNode>(StringComparer.OrdinalIgnoreCase);
-            var pointSoundEvents = new List<EntityLump.Entity>();
-
-            foreach (var node in Scene.AllNodes)
-            {
-                var entityData = node.EntityData;
-                if (entityData == null)
-                {
-                    continue;
-                }
-
-                var targetname = entityData.GetStringProperty("targetname");
-                if (!string.IsNullOrEmpty(targetname))
-                {
-                    namedEntities.TryAdd(targetname, node);
-                }
-
-                switch (entityData.GetStringProperty("classname"))
-                {
-                    case "point_soundevent" or "snd_event_point":
-                        pointSoundEvents.Add(entityData);
-                        break;
-
-                    case "env_soundscape" or "snd_soundscape":
-                        if (entityData.GetBooleanProperty("startdisabled"))
-                        {
-                            break;
-                        }
-
-                        if (entityData.GetBooleanProperty("enablesoundevent"))
-                        {
-                            soundPlayer.AddSoundscape(
-                                entityData.GetVector3Property("origin"),
-                                entityData.GetFloatProperty("radius"),
-                                entityData.GetStringProperty("soundevent"));
-                        }
-                        else
-                        {
-                            // Classic script-based soundscape (see SoundscapeBank), e.g. "amb.park"
-                            soundPlayer.AddScriptedSoundscape(
-                                entityData.GetVector3Property("origin"),
-                                entityData.GetFloatProperty("radius"),
-                                entityData.GetStringProperty("soundscape"));
-                        }
-                        break;
-
-                    default:
-                        break;
-                }
-            }
-
-            foreach (var entityData in pointSoundEvents)
-            {
-                var soundName = entityData.GetStringProperty("soundname");
-
-                if (string.IsNullOrEmpty(soundName) || !entityData.GetBooleanProperty("startonspawn"))
-                {
-                    continue;
-                }
-
-                soundPlayer.Play(soundName, GetSoundEventPosition(entityData, namedEntities));
-            }
-        }
-
-        /// <summary>
-        /// Resolves where a point_soundevent emits from: null for "To Local Player" events, otherwise the source entity's position.
-        /// </summary>
-        private static Vector3? GetSoundEventPosition(EntityLump.Entity entityData, Dictionary<string, SceneNode> namedEntities)
-        {
-            if (entityData.GetBooleanProperty("tolocalplayer"))
-            {
-                return null;
-            }
-
-            var sourceEntityName = entityData.GetStringProperty("sourceentityname");
-
-            if (string.IsNullOrEmpty(sourceEntityName) || !namedEntities.TryGetValue(sourceEntityName, out var sourceNode))
-            {
-                return entityData.GetVector3Property("origin");
-            }
-
-            var attachmentName = entityData.GetStringProperty("sourceentityattachment");
-
-            if (!string.IsNullOrEmpty(attachmentName)
-                && sourceNode is ModelSceneNode sourceModel
-                && sourceModel.Attachments.ContainsKey(attachmentName))
-            {
-                return sourceModel.GetAttachmentTransform(attachmentName).Translation;
-            }
-
-            if (entityData.GetBooleanProperty("uselocaloffset"))
-            {
-                // Entities do not move in the viewer, so the source entity plus local offset is just this entity's origin
-                return entityData.GetVector3Property("origin");
-            }
-
-            return sourceNode.Transform.Translation;
         }
 
         protected override void AddUiControls()
@@ -465,6 +394,9 @@ namespace GUI.Types.GLViewers
                     }
 
                     UiControl.AddCheckBox("Show Fog", Scene.FogEnabled, v => Scene.FogEnabled = v);
+
+                    UiControl.AddCheckBox("Entity System", Scene.EntitySystem.Enabled, v => Scene.EntitySystem.Enabled = v);
+
                     UiControl.AddCheckBox("Color Correction", Renderer.Postprocess.ColorCorrectionEnabled, v => Renderer.Postprocess.ColorCorrectionEnabled = v);
 
                     // TODO: PVS culling is not implemented yet
@@ -478,11 +410,14 @@ namespace GUI.Types.GLViewers
                     if (GLEnvironment.SlowMultiDrawIndirect)
                     {
                         Scene.EnableIndirectDraws = false;
+                        SkyboxScene?.EnableIndirectDraws = false;
                     }
 
                     UiControl.AddCheckBox("GPU Culling", Scene.EnableIndirectDraws, v =>
                     {
                         Scene.EnableIndirectDraws = v;
+                        SkyboxScene?.EnableIndirectDraws = v;
+
                         if (occlusionCullingCheckBox != null)
                         {
                             occlusionCullingCheckBox.Enabled = v;
@@ -492,13 +427,9 @@ namespace GUI.Types.GLViewers
                     occlusionCullingCheckBox = UiControl.AddCheckBox("GPU Occlusion Culling", Scene.EnableOcclusionCulling, (v) => Scene.EnableOcclusionCulling = v);
                     occlusionCullingCheckBox.Enabled = Scene.EnableIndirectDraws;
 
-
                     UiControl.AddCheckBox("Depth Prepass", Scene.EnableDepthPrepass, (v) => Scene.EnableDepthPrepass = v);
 
-                    var enableLights = Scene.LightingInfo.BarnLights.Count < 40;
-                    Renderer.ViewBuffer!.Data!.ExperimentalLightsEnabled = enableLights;
-
-                    UiControl.AddCheckBox("Barn Lights", enableLights, v => Renderer.ViewBuffer!.Data!.ExperimentalLightsEnabled = v);
+                    UiControl.AddCheckBox("Barn Lights", Renderer.EnableBarnLights, v => Renderer.EnableBarnLights = v);
                     UiControl.AddCheckBox("Tiled Light Culling", Scene.EnableTiledLightCulling, v => Scene.EnableTiledLightCulling = v);
 
                     AddSceneExposureSlider();
@@ -635,10 +566,70 @@ namespace GUI.Types.GLViewers
 
             if (node == null)
             {
+                // Tool entities (logic, sounds, finished particles) have no renderable
+                // scene node; fly to the entity origin instead.
+                var origin = entity.GetVector3Property("origin");
+                FocusCameraOnBounds(new AABB(origin - new Vector3(32f), origin + new Vector3(32f)));
                 return;
             }
 
             SelectAndFocusNode(node);
+        }
+
+        public void SelectAndFocusEntities(IReadOnlyList<EntityLump.Entity> entities)
+        {
+            if (entities.Count == 1)
+            {
+                SelectAndFocusEntity(entities[0]);
+                return;
+            }
+
+            if (UiControl != null && UiControl.Parent is TabPage tabPage && tabPage.Parent is TabControl tabControl)
+            {
+                tabControl.SelectTab(tabPage);
+            }
+
+            Debug.Assert(SelectedNodeRenderer != null);
+
+            var hasBounds = false;
+            var bounds = default(AABB);
+            var selectedAny = false;
+
+            foreach (var entity in entities)
+            {
+                var node = Scene.Find(entity) ?? SkyboxScene?.Find(entity);
+
+                AABB entityBounds;
+
+                if (node != null)
+                {
+                    if (selectedAny)
+                    {
+                        SelectedNodeRenderer.ToggleNode(node);
+                    }
+                    else
+                    {
+                        SelectedNodeRenderer.SelectNode(node, forceDisableDepth: true);
+                        selectedAny = true;
+                    }
+
+                    EnsureNodeVisible(node);
+                    entityBounds = SelectionBounds(node);
+                }
+                else
+                {
+                    var origin = entity.GetVector3Property("origin");
+                    entityBounds = new AABB(origin - new Vector3(32f), origin + new Vector3(32f));
+                }
+
+                bounds = hasBounds ? bounds.Union(entityBounds) : entityBounds;
+                hasBounds = true;
+            }
+
+            if (hasBounds)
+            {
+                FocusCameraOnBounds(bounds);
+            }
         }
 
         private void SelectAndFocusNode(SceneNode node)
@@ -648,19 +639,48 @@ namespace GUI.Types.GLViewers
             Debug.Assert(SelectedNodeRenderer != null);
 
             SelectedNodeRenderer.SelectNode(node, forceDisableDepth: true);
+            FocusCameraOnBounds(SelectionBounds(node));
+            EnsureNodeVisible(node);
+        }
 
+        private static AABB SelectionBounds(SceneNode node)
+        {
             var bbox = node.BoundingBox;
+            var maxSpan = Math.Max(Math.Max(bbox.Size.X, bbox.Size.Y), bbox.Size.Z);
+
+            // Empty or degenerate bounds (e.g. a particle system that finished playing)
+            // would put the camera inside the node or at a garbage position.
+            if (!float.IsFinite(maxSpan) || maxSpan < 1f)
+            {
+                bbox = new AABB(node.Transform.Translation - new Vector3(32f), node.Transform.Translation + new Vector3(32f));
+            }
+
+            return bbox;
+        }
+
+        private void FocusCameraOnBounds(in AABB bbox)
+        {
+            var center = bbox.Center;
             var size = bbox.Size;
             var maxDimension = Math.Max(Math.Max(size.X, size.Y), size.Z);
-            var distance = maxDimension * 1.2f;
-            var cameraHeight = bbox.Center.Y + size.Y * 2f;
 
-            var location = new Vector3(bbox.Center.X + distance, cameraHeight, bbox.Center.Z + distance);
+            if (!float.IsFinite(maxDimension) || maxDimension < 1f)
+            {
+                maxDimension = 64f;
+            }
+
+            // Orbit far enough out to frame the bounds, then let the physics probe move the camera
+            // off any wall or ceiling it would otherwise be spawned inside of.
+            var distance = Math.Max(maxDimension * 2.5f, 64f);
+            var location = CameraPlacement.FindOrbitPosition(Scene.PhysicsWorld, center, distance, maxDimension * 0.5f);
+
             Input.SaveCameraForTransition();
             Input.Camera.SetLocation(location);
-            Input.Camera.LookAt(bbox.Center);
+            Input.Camera.LookAt(center);
+        }
 
-            // Ensure the node is visible
+        private void EnsureNodeVisible(SceneNode node)
+        {
             if (!node.LayerEnabled && worldLayersComboBox != null && node.LayerName != null)
             {
                 var layerId = worldLayersComboBox.Items.IndexOf(node.LayerName);
@@ -685,15 +705,31 @@ namespace GUI.Types.GLViewers
         private void ShowSceneNodeDetails(SceneNode sceneNode)
         {
             var isEntity = sceneNode.EntityData != null;
+            entityInfoEntity = sceneNode.EntityData;
+
             if (entityInfoForm == null)
             {
                 entityInfoForm = new EntityInfoForm(GuiContext);
+
+                if (ShowEntityInGraph != null)
+                {
+                    entityInfoForm.AddShowInGraphButton(OnShowInGraphButtonClick);
+                }
+
                 entityInfoForm.Show();
                 entityInfoForm.EntityInfoControl.OutputsGrid.CellDoubleClick += OnEntityInfoOutputsCellDoubleClick;
+                entityInfoForm.EntityInfoControl.InputsGrid.CellDoubleClick += OnEntityInfoInputsCellDoubleClick;
                 entityInfoForm.EntityInfoControl.Disposed += OnEntityInfoFormDisposed;
             }
 
             Debug.Assert(entityInfoForm != null);
+
+            if (entityInfoForm.ShowInGraphButton != null)
+            {
+                entityInfoForm.ShowInGraphButton.Visible = isEntity
+                    && entityInfoEntity != null
+                    && (EntityHasGraphNode?.Invoke(entityInfoEntity) ?? false);
+            }
 
             entityInfoForm.EntityInfoControl.Clear();
 
@@ -775,7 +811,7 @@ namespace GUI.Types.GLViewers
                 entityInfoForm.Text += " (in 3D skybox)";
             }
 
-            entityInfoForm.EntityInfoControl.ShowOutputsTabIfAnyData();
+            entityInfoForm.EntityInfoControl.ShowPopulatedTabs();
             entityInfoForm.EntityInfoControl.Show();
         }
 
@@ -798,11 +834,11 @@ namespace GUI.Types.GLViewers
                 return;
             }
 
-            var node = Scene.FindNodeByKeyValue("targetname", entityName);
+            var node = Scene.FindNodeByTargetName(entityName);
 
             if (node == null && SkyboxScene != null)
             {
-                node = SkyboxScene.FindNodeByKeyValue("targetname", entityName);
+                node = SkyboxScene.FindNodeByTargetName(entityName);
             }
 
             if (node == null)
@@ -814,6 +850,47 @@ namespace GUI.Types.GLViewers
             ShowSceneNodeDetails(node);
         }
 
+        private void OnEntityInfoInputsCellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+        {
+            if (entityInfoForm == null)
+            {
+                return;
+            }
+
+            if (e.ColumnIndex != 0 || e.RowIndex < 0)
+            {
+                return;
+            }
+
+            if (entityInfoForm.EntityInfoControl.InputsGrid.Rows[e.RowIndex].Tag is not EntityLump.Entity sourceEntity)
+            {
+                return;
+            }
+
+            var node = Scene.Find(sourceEntity);
+
+            if (node == null && SkyboxScene != null)
+            {
+                node = SkyboxScene.Find(sourceEntity);
+            }
+
+            if (node == null)
+            {
+                return;
+            }
+
+            SelectAndFocusNode(node);
+            ShowSceneNodeDetails(node);
+        }
+
+        private void OnShowInGraphButtonClick(object? sender, EventArgs e)
+        {
+            if (entityInfoEntity != null)
+            {
+                ShowEntityInGraph?.Invoke(entityInfoEntity);
+            }
+        }
+
         private void OnEntityInfoFormDisposed(object? sender, EventArgs e)
         {
             if (entityInfoForm == null)
@@ -822,6 +899,7 @@ namespace GUI.Types.GLViewers
             }
 
             entityInfoForm.EntityInfoControl.OutputsGrid.CellDoubleClick -= OnEntityInfoOutputsCellDoubleClick;
+            entityInfoForm.EntityInfoControl.InputsGrid.CellDoubleClick -= OnEntityInfoInputsCellDoubleClick;
             entityInfoForm.EntityInfoControl.Disposed -= OnEntityInfoFormDisposed;
             entityInfoForm = null;
         }
@@ -910,15 +988,14 @@ namespace GUI.Types.GLViewers
 
             foundFile.Context.GLPostLoadAction = (viewerControl) =>
             {
-                var yaw = MathF.Atan2(-transform.M32, -transform.M31);
-                var scaleZ = MathF.Sqrt(transform.M31 * transform.M31 + transform.M32 * transform.M32 + transform.M33 * transform.M33);
-                var unscaledZ = transform.M33 / scaleZ;
-                var pitch = MathF.Asin(-unscaledZ);
+                // The inverse of a view matrix, so its third row is the camera's backward direction
+                var forward = -new Vector3(transform.M31, transform.M32, transform.M33);
 
                 if (viewerControl is GLSceneViewer sceneViewer)
                 {
                     sceneViewer.Input.Camera.CopyFrom(Renderer.Camera);
-                    sceneViewer.Input.Camera.SetLocationPitchYaw(transform.Translation, pitch, yaw);
+                    sceneViewer.Input.Camera.SetLocation(transform.Translation);
+                    sceneViewer.Input.Camera.SetFromQAngle(EntityTransformHelper.ForwardDirectionToEulerAngles(forward));
                 }
 
                 if (viewerControl is not GLModelViewer glModelViewer || sceneNode is not ModelSceneNode worldModel)
@@ -979,10 +1056,20 @@ namespace GUI.Types.GLViewers
             Debug.Assert(entityInfoForm != null);
             Debug.Assert(sceneNode.EntityData != null);
 
-            entityInfoForm.EntityInfoControl.PopulateFromEntity(sceneNode.EntityData);
+            if (LoadedWorld is null)
+            {
+                entityInfoForm.EntityInfoControl.PopulateFromEntity(sceneNode.EntityData);
+            }
+            else
+            {
+                entityInfoForm.EntityInfoControl.PopulateFromEntity(LoadedWorld.Entities, sceneNode.EntityData);
+            }
 
             var classname = sceneNode.EntityData.GetStringProperty("classname");
-            entityInfoForm.Text = $"Entity: {classname}";
+            var targetName = sceneNode.EntityData.FriendlyTargetName;
+            entityInfoForm.Text = string.IsNullOrEmpty(targetName)
+                ? $"Entity: {classname}"
+                : $"Entity: {classname} ({targetName})";
         }
 
         private void SetAvailableLayers(IEnumerable<string> worldLayers)

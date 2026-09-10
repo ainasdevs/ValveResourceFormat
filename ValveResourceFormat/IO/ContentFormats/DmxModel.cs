@@ -3,21 +3,46 @@ using DMElement = Datamodel.Element;
 
 namespace ValveResourceFormat.IO.ContentFormats.DmxModel;
 
-#pragma warning disable CA2227 // Collection properties should be read only
+/// <summary>
+/// Root element of a model content file, holding the scene graph and the bind pose.
+/// </summary>
 [CamelCaseProperties]
-internal class DmeModel : DMElement
+public class DmeModel : DMElement
 {
-    public DmeTransform Transform { get; set; } = [];
-    public DMElement? Shape { get; set; }
+    /// <summary>
+    /// Transform of the model root.
+    /// </summary>
+    public DmeTransform Transform { get; init; } = [];
+
+    /// <summary>
+    /// Shape attached to the model root, usually null.
+    /// </summary>
+    public DMElement? Shape { get; init; }
+
+    /// <summary>
+    /// Whether the model is visible.
+    /// </summary>
     public bool Visible { get; set; } = true;
+
+    /// <summary>
+    /// List of <see cref="DmeDag"/> elements forming the scene graph.
+    /// </summary>
     public Datamodel.ElementArray Children { get; } = [];
-    public Datamodel.ElementArray JointList { get; set; } = [];
+
+    /// <summary>
+    /// List of <see cref="DmeTransform"/> elements, one per bone, in skinning order.
+    /// </summary>
+    public Datamodel.ElementArray JointList { get; init; } = [];
 
     /// <summary>
     /// List of <see cref="DmeTransformsList"/> elements.
     /// </summary>
-    public Datamodel.ElementArray BaseStates { get; set; } = [];
-    public DmeAxisSystem AxisSystem { get; set; } = [];
+    public Datamodel.ElementArray BaseStates { get; init; } = [];
+
+    /// <summary>
+    /// Axis convention the model was authored in.
+    /// </summary>
+    public DmeAxisSystem AxisSystem { get; init; } = [];
 }
 
 /// <summary>
@@ -98,7 +123,7 @@ public class DmeDag : DMElement
     /// Gets or sets the mesh shape of this DAG node. Null for joints, which carry no geometry;
     /// emitting an empty shape makes Blender Source Tools reject the DMX on import.
     /// </summary>
-    public DmeShape? Shape { get; set; }
+    public DmeShape? Shape { get; init; }
 
     /// <summary>
     /// Gets or sets a value indicating whether this node is visible.
@@ -125,12 +150,12 @@ public class DmeMesh : DmeShape
     /// <summary>
     /// Gets or sets the bind state of the mesh.
     /// </summary>
-    public DMElement? BindState { get; set; }
+    public DMElement? BindState { get; init; }
 
     /// <summary>
     /// Gets or sets the current state of the mesh.
     /// </summary>
-    public DMElement? CurrentState { get; set; }
+    public DMElement? CurrentState { get; init; }
 
     /// <summary>
     /// Gets the base states of the mesh.
@@ -229,6 +254,136 @@ public class DmeVertexData : DMElement
 }
 
 /// <summary>
+/// Per-vertex deltas of one morph target, stored sparsely against the mesh's bind state.
+/// </summary>
+[CamelCaseProperties]
+public class DmeVertexDeltaData : DmeVertexData
+{
+    /// <summary>
+    /// Gets or sets a value indicating whether the deltas are already relative to the bind state.
+    /// </summary>
+    public bool Corrected { get; set; } = true;
+}
+
+/// <summary>
+/// One flex controller, naming the morph targets it drives.
+/// </summary>
+[CamelCaseProperties]
+public class DmeCombinationInputControl : DMElement
+{
+    /// <summary>
+    /// Gets the morph target names this control drives. A control with two entries is a split
+    /// control, negative side first.
+    /// </summary>
+    public Datamodel.StringArray RawControlNames { get; } = [];
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the control is split left and right by the balance map.
+    /// </summary>
+    public bool Stereo { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the control drives eyelid tracking.
+    /// </summary>
+    public bool Eyelid { get; set; }
+
+    /// <summary>
+    /// Gets or sets the lowest value the control takes.
+    /// </summary>
+    public float FlexMin { get; set; }
+
+    /// <summary>
+    /// Gets or sets the highest value the control takes.
+    /// </summary>
+    public float FlexMax { get; set; } = 1f;
+
+    /// <summary>
+    /// Gets the wrinkle scale of each raw control.
+    /// </summary>
+    public Datamodel.FloatArray WrinkleScales { get; } = [];
+}
+
+/// <summary>
+/// One rule of a <see cref="DmeFlexRules"/> set, giving a morph target its weight as an expression
+/// over the flex controllers.
+/// </summary>
+[CamelCaseProperties]
+public class DmeFlexRuleExpression : DMElement
+{
+    /// <summary>
+    /// Gets or sets the last evaluated weight.
+    /// </summary>
+    public float Result { get; set; }
+
+    /// <summary>
+    /// Gets or sets the expression that drives the morph target this rule is named after.
+    /// </summary>
+    [DMProperty("expr")]
+    public string Expression { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// The rules driving one mesh's morph targets. A combination operator that targets these instead of
+/// the meshes themselves gets its flex rules from them rather than one per morph target.
+/// </summary>
+[CamelCaseProperties]
+public class DmeFlexRules : DMElement
+{
+    /// <summary>
+    /// Gets or sets the mesh whose morph targets these rules drive.
+    /// </summary>
+    public DMElement? Target { get; init; }
+
+    /// <summary>
+    /// Gets the rules, one per morph target.
+    /// </summary>
+    public Datamodel.ElementArray DeltaStates { get; } = [];
+
+    /// <summary>
+    /// Gets the weight of each rule.
+    /// </summary>
+    public Datamodel.Vector2Array DeltaStateWeights { get; } = [];
+}
+
+/// <summary>
+/// Maps flex controller values onto the delta states of the meshes it targets.
+/// </summary>
+[CamelCaseProperties]
+public class DmeCombinationOperator : DMElement
+{
+    /// <summary>
+    /// Gets the list of <see cref="DmeCombinationInputControl"/> elements.
+    /// </summary>
+    public Datamodel.ElementArray Controls { get; } = [];
+
+    /// <summary>
+    /// Gets the current value of each control, as default, minimum and balance.
+    /// </summary>
+    public Datamodel.Vector3Array ControlValues { get; } = [];
+
+    /// <summary>
+    /// Gets the lagged counterpart of <see cref="ControlValues"/>.
+    /// </summary>
+    public Datamodel.Vector3Array ControlValuesLagged { get; } = [];
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the lagged values are used.
+    /// </summary>
+    public bool UsesLaggedValues { get; set; }
+
+    /// <summary>
+    /// Gets the domination rules. The compiler rebuilds suppression from the flex rule expressions,
+    /// so this is written empty.
+    /// </summary>
+    public Datamodel.ElementArray Dominators { get; } = [];
+
+    /// <summary>
+    /// Gets the meshes this operator drives.
+    /// </summary>
+    public Datamodel.ElementArray Targets { get; } = [];
+}
+
+/// <summary>
 /// Represents a list of animations.
 /// </summary>
 [CamelCaseProperties]
@@ -323,7 +478,7 @@ public class DmeChannel : DMElement
     /// <summary>
     /// Gets or sets the source element.
     /// </summary>
-    public DMElement? FromElement { get; set; }
+    public DMElement? FromElement { get; init; }
 
     /// <summary>
     /// Gets or sets the source attribute name.
@@ -338,7 +493,7 @@ public class DmeChannel : DMElement
     /// <summary>
     /// Gets or sets the target element.
     /// </summary>
-    public DMElement? ToElement { get; set; }
+    public DMElement? ToElement { get; init; }
 
     /// <summary>
     /// Gets or sets the target attribute name.
@@ -366,7 +521,7 @@ public class DmeChannel : DMElement
         {
             return _log;
         }
-        set
+        init
         {
             if (value is null)
             {
@@ -430,13 +585,13 @@ public class DmeLog<T> : DmeTypedLog<T>
     /// Gets or sets the log layers containing keyframe data.
     /// </summary>
     [DMProperty("layers")]
-    public Datamodel.ElementArray Layers { get; set; } = [];
+    public Datamodel.ElementArray Layers { get; init; } = [];
 
     /// <summary>
     /// Gets or sets the curve interpolation information.
     /// </summary>
     [DMProperty("curveinfo")]
-    public DMElement? CurveInfo { get; set; }
+    public DMElement? CurveInfo { get; init; }
 
     /// <summary>
     /// Gets or sets a value indicating whether to use the default value.
@@ -501,7 +656,7 @@ public class DmeLogLayer<T> : DmeTypedLog<T>
     /// <summary>
     /// Gets or sets the keyframe times.
     /// </summary>
-    public Datamodel.TimeSpanArray Times { get; set; } = [];
+    public Datamodel.TimeSpanArray Times { get; } = [];
 
     /// <summary>
     /// Gets the curve interpolation types for each keyframe.
@@ -514,7 +669,6 @@ public class DmeLogLayer<T> : DmeTypedLog<T>
     /// </summary>
     [DMProperty("values")]
     public T[] LayerValues { get; set; } = [];
-
 
     /// <summary>
     /// Checks if this layer only contains default/zero values.
@@ -553,4 +707,3 @@ public class DmeLogLayer<T> : DmeTypedLog<T>
         return true;
     }
 }
-#pragma warning restore CA2227 // Collection properties should be read only

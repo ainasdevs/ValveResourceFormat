@@ -33,11 +33,9 @@ internal class MainTabs : ThemedTabControl
     {
         SetCloseButtonSize();
 
-        // Enable tooltip on the control
         tabToolTip.ShowAlways = true;
         tabToolTip.Active = true;
 
-        // Set up tooltip delay timer
         tooltipTimer.Interval = 1000; // 1 second delay
         tooltipTimer.Tick += TooltipTimer_Tick;
     }
@@ -103,13 +101,11 @@ internal class MainTabs : ThemedTabControl
         // Update tooltip when hovering over a different tab
         if (hoveredTabIndex != lastHoveredTabIndex)
         {
-            // Stop any pending tooltip
             tooltipTimer.Stop();
             tabToolTip.Hide(this);
 
             if (hoveredTabIndex >= 0 && hoveredTabIndex < TabPages.Count)
             {
-                // Start timer to show tooltip after delay
                 pendingTooltipTabIndex = hoveredTabIndex;
                 tooltipTimer.Start();
             }
@@ -138,7 +134,6 @@ internal class MainTabs : ThemedTabControl
 
     public int GetTabIndex(TabPage tab)
     {
-        //Work out the index of the requested tab
         for (var i = 0; i < TabPages.Count; i++)
         {
             if (TabPages[i] == tab)
@@ -161,7 +156,6 @@ internal class MainTabs : ThemedTabControl
             return;
         }
 
-        //Close the requested tab
         Log.Info(nameof(MainForm), $"Closing {tab.Text}");
 
         RenderLoopThread.UnsetIfClosingParentOfCurrentGLControl(tab);
@@ -173,7 +167,7 @@ internal class MainTabs : ThemedTabControl
 
         if (Program.MainForm?.explorerControl is { } explorerControl && tab.Contains(explorerControl))
         {
-            tab.Controls.Remove(explorerControl);
+            explorerControl.Parent?.Controls.Remove(explorerControl);
         }
 
         TabPages.Remove(tab);
@@ -236,9 +230,9 @@ internal class MainTabs : ThemedTabControl
                     closeButtonCircleColor = HoverColor;
                 }
 
-                closeButtonCircleColor = Themer.CurrentThemeColors.ColorMode == SystemColorMode.Dark ?
-                    ControlPaint.Light(closeButtonCircleColor, 0.4f) :
-                    ControlPaint.Dark(closeButtonCircleColor, 0.01f);
+                closeButtonCircleColor = Themer.CurrentThemeColors.ColorMode == SystemColorMode.Dark
+                    ? ControlPaint.Light(closeButtonCircleColor, 0.4f)
+                    : ControlPaint.Dark(closeButtonCircleColor, 0.01f);
 
                 using Brush closeButtonCircleBrush = new SolidBrush(closeButtonCircleColor);
                 e.Graphics.FillEllipse(closeButtonCircleBrush, closeButtonRectCircle);

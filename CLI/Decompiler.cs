@@ -11,7 +11,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using ConsoleAppFramework;
-using SteamDatabase.ValvePak;
+using ValvePak;
 using ValveResourceFormat;
 using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.IO;
@@ -53,6 +53,7 @@ namespace CLI
         private TextureCodec TextureDecodeFlags;
         private string[] FileFilter = [];
         private bool ListResources;
+        private string? GamePath;
         private string? GltfExportFormat;
         private bool GltfExportAnimations;
         private string[] GltfAnimationFilter = [];
@@ -60,6 +61,7 @@ namespace CLI
         private bool GltfExportMaterials;
         private bool GltfExportAdaptTextures;
         private bool GltfExportExtras;
+        private bool GltfComposeAdditive;
         private bool ToolsAssetInfoShort;
 
         // The options below are for collecting stats and testing exporting, this is mostly intended for VRF developers, not end users.
@@ -94,7 +96,7 @@ namespace CLI
         /// A test bed command line interface for the VRF library.
         /// </summary>
         /// <param name="input">-i, Input file to be processed. With no additional arguments, a summary of the input(s) will be displayed.</param>
-        /// <param name="output">-o, Output path to write to. If input is a folder (or a VPK), this should be a folder.</param>
+        /// <param name="output">-o, Output path to write to. Treated as a folder when it is an existing folder, ends with a path separator, or has no file extension, otherwise it names the file to write.</param>
         /// <param name="decompile">-d|--vpk_decompile, Decompile supported resource files.</param>
         /// <param name="texture_decode_flags">Decompile textures with the specified decode flags, example: "none", "auto", "ForceLDR".</param>
         /// <param name="recursive">If specified and given input is a folder, all sub directories will be scanned too.</param>
@@ -108,6 +110,7 @@ namespace CLI
         /// <param name="vpk_extensions">-e, File extension(s) filter, example: "vcss_c,vjs_c,vxml_c".</param>
         /// <param name="vpk_filepath">-f, File path filter, example: "panorama/,sounds/" or "scripts/items/items_game.txt".</param>
         /// <param name="vpk_list">-l, Lists all resources in given VPK. File extension and path filters apply.</param>
+        /// <param name="game">Path to a gameinfo.gi file to load search paths from.</param>
         /// <param name="gltf_export_format">Exports meshes/models in given glTF format. Must be either "gltf" or "glb".</param>
         /// <param name="gltf_export_animations">Whether to export model animations during glTF exports.</param>
         /// <param name="gltf_animation_list">Animations to include in the glTF, example "idle,dropped". By default will include all animations.</param>
@@ -115,6 +118,7 @@ namespace CLI
         /// <param name="gltf_export_materials">Whether to export materials during glTF exports.</param>
         /// <param name="gltf_textures_adapt">Whether to perform any glTF spec adaptations on textures (e.g. split metallic map).</param>
         /// <param name="gltf_export_extras">Export additional Mesh properties into glTF extras</param>
+        /// <param name="gltf_compose_additive">Compose additive animations over the bind pose instead of exporting their delta tracks.</param>
         /// <param name="tools_asset_info_short">Whether to print only file paths for tools_asset_info files.</param>
         /// <param name="stats">Collect stats on all input files and then print them. Use "-i steam" to scan all Steam libraries.</param>
         /// <param name="stats_with_loader">When using --stats, use GameFileLoader to load dependencies.</param>
@@ -140,6 +144,7 @@ namespace CLI
             string? vpk_extensions = default,
             string? vpk_filepath = default,
             bool vpk_list = false,
+            string? game = default,
 
             string? gltf_export_format = default,
             bool gltf_export_animations = false,
@@ -148,6 +153,7 @@ namespace CLI
             bool gltf_export_materials = false,
             bool gltf_textures_adapt = false,
             bool gltf_export_extras = false,
+            bool gltf_compose_additive = false,
             bool tools_asset_info_short = false,
 
             bool stats = false,
@@ -183,6 +189,7 @@ namespace CLI
             GltfMeshFilter = gltf_mesh_list?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) ?? [];
             GltfExportAdaptTextures = gltf_textures_adapt;
             GltfExportExtras = gltf_export_extras;
+            GltfComposeAdditive = gltf_compose_additive;
             ToolsAssetInfoShort = tools_asset_info_short;
 
             CollectStats = stats;
@@ -198,6 +205,17 @@ namespace CLI
             {
                 OutputFile = Path.GetFullPath(OutputFile);
                 OutputFile = FixPathSlashes(OutputFile);
+            }
+
+            if (game != null)
+            {
+                if (!File.Exists(game))
+                {
+                    Console.Error.WriteLine($"Gameinfo file \"{game}\" does not exist.");
+                    return 1;
+                }
+
+                GamePath = Path.GetFullPath(game);
             }
 
             for (var i = 0; i < FileFilter.Length; i++)
@@ -228,6 +246,12 @@ namespace CLI
                 return 1;
             }
 
+            if (ListResources && OutputFile != null)
+            {
+                Console.Error.WriteLine("Do not use --vpk_list with --output.");
+                return 1;
+            }
+
             if (StatsWithLoader)
             {
                 if (!CollectStats)
@@ -243,7 +267,7 @@ namespace CLI
                 }
             }
 
-            if (!Decompile && (GltfExportFormat != null || GltfExportAnimations || GltfExportMaterials || GltfExportAdaptTextures || GltfExportExtras))
+            if (!Decompile && (GltfExportFormat != null || GltfExportAnimations || GltfExportMaterials || GltfExportAdaptTextures || GltfExportExtras || GltfComposeAdditive))
             {
                 Console.Error.WriteLine("Exporting to glTF requires specifying -d argument.");
                 return 1;
@@ -603,7 +627,7 @@ namespace CLI
                     path = Path.ChangeExtension(path, extension);
 
                     var outFilePath = GetOutputPath(path);
-                    DumpContentFile(outFilePath, content);
+                    DumpContentFile(outFilePath, content, singleFileOutput: IsSingleFileOutput());
                 }
                 else
                 {
@@ -650,7 +674,7 @@ namespace CLI
 
                 if (OutputFile != null)
                 {
-                    using var outputFileLoader = new GameFileLoader(null, resource.FileName);
+                    using var outputFileLoader = CreateGameFileLoader(null, resource.FileName);
 
                     path = Path.ChangeExtension(path, extension);
                     var outFilePath = GetOutputPath(path);
@@ -677,7 +701,7 @@ namespace CLI
                         }
                     }
 
-                    DumpContentFile(outFilePath, contentFile);
+                    DumpContentFile(outFilePath, contentFile, singleFileOutput: IsSingleFileOutput());
                     return;
                 }
             }
@@ -690,10 +714,6 @@ namespace CLI
             {
                 return;
             }
-
-            //Console.WriteLine("\tInput Path: \"{0}\"", args[fi]);
-            //Console.WriteLine("\tResource Name: \"{0}\"", "???");
-            //Console.WriteLine("\tID: {0:x16}", 0);
 
             lock (ConsoleWriterLock)
             {
@@ -791,9 +811,9 @@ namespace CLI
                 {
                     shader.PrintSummary(output);
 
-                    foreach (var zframe in shader.StaticComboEntries)
+                    foreach (var staticComboEntry in shader.StaticComboEntries)
                     {
-                        zframe.Value.Unserialize();
+                        staticComboEntry.Value.Unserialize();
                     }
 
                     // Shader resources already store stats
@@ -828,7 +848,7 @@ namespace CLI
                     var outFilePath = Path.ChangeExtension(GetOutputPath(path), GltfExportFormat);
                     Directory.CreateDirectory(Path.GetDirectoryName(outFilePath)!);
 
-                    using var fileLoader = new GameFileLoader(null, path);
+                    using var fileLoader = CreateGameFileLoader(null, path);
                     CreateGltfExporter(fileLoader).Export(navMeshFile, path, outFilePath);
                     return;
                 }
@@ -1012,7 +1032,7 @@ namespace CLI
                             return RecursiveSearchArchives;
                         }
 
-                        return SupportedFileNamesRegex().IsMatch(x.Key);
+                        return SupportedFileNamesRegex().IsMatch($".{x.Key}");
                     }).ToList();
                 }
 
@@ -1070,7 +1090,7 @@ namespace CLI
                     }
                     else
                     {
-                        using var fileLoader = StatsWithLoader ? new GameFileLoader(package, package.FileName) : null;
+                        using var fileLoader = StatsWithLoader ? CreateGameFileLoader(package, package.FileName) : null;
 
                         while (queue.TryDequeue(out var file))
                         {
@@ -1104,7 +1124,6 @@ namespace CLI
                     var firstLine = true;
                     var goodCachedVersion = false;
 
-                    // add version
                     while ((line = file.ReadLine()) != null)
                     {
                         var lineSpan = line.AsSpan();
@@ -1142,13 +1161,15 @@ namespace CLI
                     }
                 }
 
-                using var fileLoader = new GameFileLoader(package, package.FileName);
+                using var fileLoader = CreateGameFileLoader(package, package.FileName);
 
                 Debug.Assert(package.Entries != null);
 
+                var useOutputAsDirectory = ShouldUseOutputAsDirectory(package);
+
                 foreach (var type in package.Entries)
                 {
-                    ProcessVPKEntries(path, package, fileLoader, type.Key, manifestData);
+                    ProcessVPKEntries(path, package, fileLoader, type.Key, manifestData, useOutputAsDirectory);
                 }
 
                 if (CachedManifest)
@@ -1226,7 +1247,7 @@ namespace CLI
         }
 
         private void ProcessVPKEntries(string parentPath, Package package,
-            IFileLoader fileLoader, string type, Dictionary<string, uint> manifestData)
+            IFileLoader fileLoader, string type, Dictionary<string, uint> manifestData, bool useOutputAsDirectory)
         {
             if (ExtFilterList != null)
             {
@@ -1272,6 +1293,9 @@ namespace CLI
                 var rawFileData = ArrayPool<byte>.Shared.Rent(totalLength);
                 ContentFile? contentFile = null;
 
+                // Must outlive DumpContentFile because content subfiles can be generated lazily from the resource.
+                Resource? resource = null;
+
                 try
                 {
                     package.ReadEntry(file, rawFileData);
@@ -1290,7 +1314,7 @@ namespace CLI
                                 outputFile = Path.Combine(parentPath, outputFile);
                             }
 
-                            outputFile = GetOutputPath(outputFile, useOutputAsDirectory: true);
+                            outputFile = GetOutputPath(outputFile, useOutputAsDirectory);
 
                             DumpFile(outputFile, rawFileData.AsSpan()[..totalLength]);
                         }
@@ -1325,16 +1349,25 @@ namespace CLI
                         }
                         else
                         {
-                            using var resource = new Resource
+#pragma warning disable CA2000 // False positive, resource is disposed in the finally block
+                            resource = new Resource
                             {
                                 FileName = filePath,
                             };
+#pragma warning restore CA2000
                             resource.Read(memory);
 
                             if (GltfExportFormat != null && GltfModelExporter.CanExport(resource))
                             {
-                                var outputExtension = GltfExportFormat;
-                                outputFile = Path.Combine(OutputFile, Path.ChangeExtension(filePath, outputExtension));
+                                outputFile = filePath;
+
+                                if (RecursiveSearchArchives)
+                                {
+                                    outputFile = Path.Combine(parentPath, outputFile);
+                                }
+
+                                outputFile = GetOutputPath(outputFile, useOutputAsDirectory);
+                                outputFile = Path.ChangeExtension(outputFile, GltfExportFormat);
 
                                 Directory.CreateDirectory(Path.GetDirectoryName(outputFile)!);
 
@@ -1360,9 +1393,9 @@ namespace CLI
                             outputFile = Path.Combine(parentPath, outputFile);
                         }
 
-                        outputFile = GetOutputPath(outputFile, useOutputAsDirectory: true);
+                        outputFile = GetOutputPath(outputFile, useOutputAsDirectory);
 
-                        DumpContentFile(outputFile, contentFile);
+                        DumpContentFile(outputFile, contentFile, singleFileOutput: !useOutputAsDirectory);
                     }
                 }
                 catch (Exception e)
@@ -1372,9 +1405,22 @@ namespace CLI
                 finally
                 {
                     contentFile?.Dispose();
+                    resource?.Dispose();
                     ArrayPool<byte>.Shared.Return(rawFileData);
                 }
             }
+        }
+
+        private GameFileLoader CreateGameFileLoader(Package? package, string? path)
+        {
+            var fileLoader = new GameFileLoader(package, path);
+
+            if (GamePath != null)
+            {
+                fileLoader.FindAndLoadSearchPaths(GamePath);
+            }
+
+            return fileLoader;
         }
 
         private GltfModelExporter CreateGltfExporter(IFileLoader fileLoader)
@@ -1387,6 +1433,7 @@ namespace CLI
                 ExportMaterials = GltfExportMaterials,
                 AdaptTextures = GltfExportAdaptTextures,
                 ExportExtras = GltfExportExtras,
+                ComposeAdditiveAnimations = GltfComposeAdditive,
                 ProgressReporter = ProgressReporter,
             };
 
@@ -1422,7 +1469,7 @@ namespace CLI
             return highestByShader.Values.Select(x => x.FilePath).ToHashSet();
         }
 
-        private void DumpContentFile(string path, ContentFile contentFile, bool dumpSubFiles = true)
+        private void DumpContentFile(string path, ContentFile contentFile, bool dumpSubFiles = true, bool singleFileOutput = false)
         {
             if (contentFile.Data != null)
             {
@@ -1434,8 +1481,8 @@ namespace CLI
                 // Additional files (animation-graph clips) carry their full resource path. With a real output
                 // directory we keep it; otherwise we flatten to the leaf name next to the parent file, which can
                 // collide on shared names. Resolving these relative to the parent's output path properly needs a
-                // bigger rework of the extract path handling (also in the GUI's ExtractProgressForm).
-                var additionalPath = additionalFile.KeepFullPath && OutputFile != null && (IsInputFolder || Directory.Exists(OutputFile))
+                // bigger rework of the extract path handling (also in the GUI's PackageExporter).
+                var additionalPath = additionalFile.KeepFullPath && OutputFile != null && (IsInputFolder || IsOutputDirectory())
                     ? Path.Combine(OutputFile, additionalFile.FileName)
                     : Path.Combine(Path.GetDirectoryName(path)!, Path.GetFileName(additionalFile.FileName));
                 DumpContentFile(additionalPath, additionalFile);
@@ -1443,6 +1490,17 @@ namespace CLI
 
             if (dumpSubFiles)
             {
+                if (singleFileOutput && contentFile.Data == null && contentFile.SubFiles.Count == 1)
+                {
+                    var data = contentFile.SubFiles[0].Extract?.Invoke();
+                    if (data != null)
+                    {
+                        DumpFile(path, data);
+                    }
+
+                    return;
+                }
+
                 foreach (var contentSubFile in contentFile.SubFiles)
                 {
                     var data = contentSubFile.Extract?.Invoke();
@@ -1483,6 +1541,40 @@ namespace CLI
             return FileFilter.Length > 0 && FileFilter.All(filter => !filePath.StartsWith(filter, StringComparison.Ordinal));
         }
 
+        private bool ShouldUseOutputAsDirectory(Package package)
+        {
+            if (OutputFile == null || FileFilter.Length != 1 || IsOutputDirectory())
+            {
+                return true;
+            }
+
+            Debug.Assert(package.Entries != null);
+
+            var filteredEntries = package.Entries
+                .Where(entry => ExtFilterList == null || ExtFilterList.Contains(entry.Key))
+                .SelectMany(entry => FilteredEntries(entry.Value))
+                .Take(2)
+                .ToArray();
+
+            return filteredEntries.Length != 1
+                || !filteredEntries[0].FilePath.Equals(FileFilter[0], StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// Whether the output path names a folder to write into, rather than the file to write.
+        /// A path that does not exist is a folder unless it has a file extension.
+        /// </summary>
+        private bool IsOutputDirectory()
+        {
+            Debug.Assert(OutputFile != null);
+
+            return OutputFile.EndsWith(Path.DirectorySeparatorChar)
+                || Directory.Exists(OutputFile)
+                || !Path.HasExtension(OutputFile);
+        }
+
+        private bool IsSingleFileOutput() => !IsInputFolder && !IsOutputDirectory();
+
         private string GetOutputPath(string inputPath, bool useOutputAsDirectory = false)
         {
             Debug.Assert(OutputFile != null);
@@ -1498,8 +1590,13 @@ namespace CLI
 
                 return Path.Combine(OutputFile, inputPath);
             }
-            else if (useOutputAsDirectory || Directory.Exists(OutputFile))
+            else if (useOutputAsDirectory || IsOutputDirectory())
             {
+                if (Path.IsPathRooted(inputPath))
+                {
+                    inputPath = Path.GetFileName(inputPath);
+                }
+
                 return Path.Combine(OutputFile, inputPath);
             }
 
@@ -1548,6 +1645,7 @@ namespace CLI
                     break;
 
                 case ResourceType.EntityLump:
+                    // TODO: Also collect unknown attribute/material param hashes from compiled shader dynamic expressions
                     if (DumpUnknownEntityKeys)
                     {
                         var entityLump = (EntityLump?)resource.DataBlock;
@@ -1634,12 +1732,12 @@ namespace CLI
                     }
                     break;
                 case ResourceType.Shader:
-                    {
-                        var stream = resource.Reader!.BaseStream;
-                        stream.Seek(0, SeekOrigin.Begin);
-                        ParseVCS(path, stream, originalPath);
-                        break;
-                    }
+                {
+                    var stream = resource.Reader!.BaseStream;
+                    stream.Seek(0, SeekOrigin.Begin);
+                    ParseVCS(path, stream, originalPath);
+                    break;
+                }
             }
 
             AddStatLocal(info);
@@ -1725,7 +1823,7 @@ namespace CLI
             info.Append(" (");
             info.Append(RuntimeInformation.OSArchitecture.ToString());
             info.AppendLine(")");
-            info.AppendLine("Website: https://valveresourceformat.github.io");
+            info.AppendLine("Website: https://s2v.app");
             info.Append("GitHub: https://github.com/ValveResourceFormat/ValveResourceFormat");
             return info.ToString();
         }

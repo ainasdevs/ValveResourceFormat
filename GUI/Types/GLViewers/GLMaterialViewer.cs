@@ -7,7 +7,6 @@ using GUI.Controls;
 using GUI.Forms;
 using GUI.Types.Viewers;
 using GUI.Utils;
-using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Materials;
@@ -37,7 +36,6 @@ namespace GUI.Types.GLViewers
             ShaderOnly,
             Both
         }
-
 
         private readonly Resource Resource;
         private TabControl? Tabs;
@@ -144,8 +142,8 @@ namespace GUI.Types.GLViewers
             // Collect all parameters with their types and sort them together
             var allParams = new List<(string name, object value, ParamType type, VfxVariableDescription? vfx)>();
 
-            var materialParams = drawCall.Material.Material;
-            var shaderParams = drawCall.Material.Shader.Default.Material;
+            var materialParams = drawCall.Material;
+            var shaderParams = drawCall.Material.Shader.Default;
 
             var allParameterNames = new HashSet<string>(materialParams.FloatParams.Keys);
             allParameterNames.UnionWith(materialParams.IntParams.Keys);
@@ -163,7 +161,6 @@ namespace GUI.Types.GLViewers
                 }
             }
 
-            // Process all parameters
             foreach (var paramName in allParameterNames)
             {
                 var inMaterial = materialParams.FloatParams.ContainsKey(paramName) ||
@@ -288,7 +285,7 @@ namespace GUI.Types.GLViewers
                             floatVal,
                             range,
                             ParamType.Float,
-                            v => drawCall.Material.Material.FloatParams[paramName] = (float)v,
+                            v => drawCall.Material.FloatParams[paramName] = (float)v,
                             floatPresence != ParameterPresence.MaterialOnly);
                         break;
                     case ParamType.Int:
@@ -303,7 +300,7 @@ namespace GUI.Types.GLViewers
                             ParamType.Int,
                             v =>
                             {
-                                drawCall.Material.Material.IntParams[paramName] = (int)v;
+                                drawCall.Material.IntParams[paramName] = (int)v;
                                 drawCall.Material.LoadRenderState();
                             },
                             intPresence != ParameterPresence.MaterialOnly);
@@ -315,7 +312,7 @@ namespace GUI.Types.GLViewers
                             boolVal,
                             v =>
                             {
-                                drawCall.Material.Material.IntParams[paramName] = v ? 1 : 0;
+                                drawCall.Material.IntParams[paramName] = v ? 1 : 0;
                                 drawCall.Material.LoadRenderState();
                             },
                             boolPresence != ParameterPresence.MaterialOnly);
@@ -326,7 +323,7 @@ namespace GUI.Types.GLViewers
                             paramName,
                             count,
                             vector,
-                            v => drawCall.Material.Material.VectorParams[paramName] = v,
+                            v => drawCall.Material.VectorParams[paramName] = v,
                             vectorPresence != ParameterPresence.MaterialOnly);
                         break;
 
@@ -335,7 +332,7 @@ namespace GUI.Types.GLViewers
                         AddColorParameter(
                             paramName,
                             Vector4ToColor(colorVec),
-                            c => drawCall.Material.Material.VectorParams[paramName] = ColorToVector4(c),
+                            c => drawCall.Material.VectorParams[paramName] = ColorToVector4(c),
                             colorPresence != ParameterPresence.MaterialOnly);
                         break;
                 }
@@ -453,15 +450,6 @@ namespace GUI.Types.GLViewers
             ParamsTable.Controls.Add(inputRow, 1, row);
         }
 
-        static readonly string[] GlobalShaderPrefixes =
-        [
-            "g_fl",
-            "g_f",
-            "g_v",
-            "g_b",
-            "g_n",
-        ];
-
         private static string NormalizeParameterName(string paramNameString)
         {
             // Handle feature flags (F_ prefix) - all uppercase, split by underscores
@@ -472,7 +460,7 @@ namespace GUI.Types.GLViewers
 
             var paramName = paramNameString.AsSpan();
 
-            foreach (var prefix in GlobalShaderPrefixes)
+            foreach (var prefix in VfxVariableDescription.TypePrefixes)
             {
                 if (paramName.StartsWith(prefix))
                 {
@@ -481,7 +469,6 @@ namespace GUI.Types.GLViewers
                 }
             }
 
-            // Start with empty result
             var result = new System.Text.StringBuilder();
 
             for (var i = 0; i < paramName.Length; i++)
@@ -704,13 +691,12 @@ namespace GUI.Types.GLViewers
             Scene.UpdateBuffers();
         }
 
-
         protected override void OnFirstPaint()
         {
             Input.Camera.FrameObjectFromAngle(Vector3.Zero, 0, 32, 32, float.DegreesToRadians(180f), 0);
             if (renderMat != null && renderMat.IsCs2Water)
             {
-                Input.Camera.FrameObjectFromAngle(Vector3.Zero, 32, 32, 0, 0, float.DegreesToRadians(-90f));
+                Input.Camera.FrameObjectFromAngle(Vector3.Zero, 32, 32, 0, 0, float.DegreesToRadians(90f));
             }
 
             if (previewNode != null)

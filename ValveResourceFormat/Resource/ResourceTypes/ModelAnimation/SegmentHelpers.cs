@@ -9,7 +9,6 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         public Half Y { get; set; } = y;
         public Half Z { get; set; } = z;
 
-
         public static implicit operator Half3(Vector3 v) => new((Half)v.X, (Half)v.Y, (Half)v.Z);
         public static implicit operator Vector3(Half3 v) => new((float)v.X, (float)v.Y, (float)v.Z);
 
@@ -46,7 +45,8 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             var y = (bytes[3] & 64) == 0 ? c * (i2 - 16384) : c * i2;
             var z = (bytes[5] & 64) == 0 ? c * (i3 - 16384) : c * i3;
 
-            var w = MathF.Sqrt(1 - (x * x) - (y * y) - (z * z));
+            // The omitted component is the largest, so valid data never goes negative here; truncated data can
+            var w = MathF.Sqrt(MathF.Max(0f, 1 - (x * x) - (y * y) - (z * z)));
 
             // Apply sign 3
             if (s3 == 128)

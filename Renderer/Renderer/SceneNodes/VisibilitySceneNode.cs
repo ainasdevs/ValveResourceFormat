@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.ThirdParty;
@@ -12,7 +13,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         private readonly record struct ClusterDrawRange(int Start, int Count, ushort ClusterId);
 
         private readonly Shader shader;
-        private readonly RenderVao vao;
+        private readonly int vao;
         private readonly int totalVertexCount;
         private readonly ClusterDrawRange[] clusterDrawRanges;
 
@@ -21,7 +22,7 @@ namespace ValveResourceFormat.Renderer.SceneNodes
         /// </summary>
         public VisibilitySceneNode(Scene scene, VoxelVisibility voxelVisibility) : base(scene)
         {
-            shader = Scene.RendererContext.ShaderLoader.LoadShader("vrf.default");
+            shader = Scene.RendererContext.ShaderLoader.LoadShader("default");
 
             var vertices = new List<SimpleVertex>();
             var ranges = new List<ClusterDrawRange>();
@@ -45,17 +46,9 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             clusterDrawRanges = [.. ranges];
             totalVertexCount = vertices.Count;
 
-            GL.CreateBuffers(1, out int vboHandle);
+            var vboHandle = GraphicsDevice.CreateBuffer<SimpleVertex>(nameof(VisibilitySceneNode), CollectionsMarshal.AsSpan(vertices), BufferUsage.Static);
 
-            GL.NamedBufferData(vboHandle, totalVertexCount * SimpleVertex.SizeInBytes,
-                ListAccessors<SimpleVertex>.GetBackingArray(vertices), BufferUsageHint.StaticDraw);
-
-            vao = new RenderVao(Scene.RendererContext.MeshBufferCache, nameof(VisibilitySceneNode), vboHandle, SimpleVertex.SizeInBytes, SimpleVertex.InputLayout);
-
-#if DEBUG
-            var label = nameof(VisibilitySceneNode);
-            GL.ObjectLabel(ObjectLabelIdentifier.Buffer, vboHandle, label.Length, label);
-#endif
+            vao = SimpleVertex.InputLayout.CreateVertexArray(nameof(VisibilitySceneNode), vboHandle);
 
             LocalBoundingBox = new AABB(voxelVisibility.MinBounds, voxelVisibility.MaxBounds);
         }
@@ -73,9 +66,9 @@ namespace ValveResourceFormat.Renderer.SceneNodes
             renderShader.SetUniform3x4("transform", Transform);
             renderShader.SetBoneAnimationData(false);
 
-            GL.DepthMask(false);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-            GL.BindVertexArray(vao.Get(renderShader));
+            using var _ = GraphicsContext.RenderState.Scope(depthWrite: false);
+
+            VertexArray.Bind(vao, renderShader);
 
             if (Scene.CurrentFramePvs == null)
             {
@@ -91,8 +84,6 @@ namespace ValveResourceFormat.Renderer.SceneNodes
                     }
                 }
             }
-
-            GL.DepthMask(true);
         }
 
         private static Color32 GetClusterColor(ushort clusterId)

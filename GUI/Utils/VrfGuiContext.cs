@@ -1,12 +1,13 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using GUI.Types.GLViewers;
 using Microsoft.Extensions.Logging;
-using SteamDatabase.ValvePak;
+using ValvePak;
 using ValveResourceFormat;
-using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.ToolsAssetInfo;
@@ -39,9 +40,13 @@ namespace GUI.Utils
         // This is a hack to set camera and properties when clicking a mesh from a model or map
         internal Action<GLBaseControl>? GLPostLoadAction { get; set; }
 
+        // Loading panel listening for the phase this file is being loaded through, if one is up
+        internal IProgress<string>? LoadingProgress { get; set; }
+
         private int Children;
         private bool WantsToBeDisposed;
         private readonly ConcurrentDictionary<string, Resource> CachedResources = [];
+        private readonly ConcurrentBag<RendererContext> rendererContexts = [];
 
 #if DEBUG
         private int TotalChildren;
@@ -148,18 +153,28 @@ namespace GUI.Utils
             return ToolsAssetInfo;
         }
 
-        public void ClearCache()
-        {
-            foreach (var resource in CachedResources.Values)
-            {
-                resource.Dispose();
-            }
+        public void ClearCache() => ClearCache(disposeStreamingResources: false);
 
-            CachedResources.Clear();
+        /// <param name="disposeStreamingResources">Only safe once every renderer context on this loader has been
+        /// disposed, since that is what waits for the streaming reads still holding these resources.</param>
+        private void ClearCache(bool disposeStreamingResources)
+        {
+            foreach (var (path, resource) in CachedResources)
+            {
+
+                if (!disposeStreamingResources && resource is { ResourceType: ResourceType.Texture })
+                {
+                    continue;
+                }
+
+                resource.Dispose();
+                CachedResources.TryRemove(path, out _);
+            }
 
             //ShaderLoader.ClearCache();
         }
 
+        [SuppressMessage("Usage", "CA2215:Dispose methods should call base class dispose", Justification = "Deferred to StopLoadingAndDispose, which waits for the loaders first")]
         protected override void Dispose(bool disposing)
         {
             if (!disposing)
@@ -182,25 +197,50 @@ namespace GUI.Utils
 #endif
             ParentGuiContext?.RemoveChildren();
 
-            if (base.CurrentPackage != null)
-            {
-                base.CurrentPackage.Dispose();
-                base.CurrentPackage = null;
-            }
-
-            ClearCache();
-
-            base.Dispose(disposing);
+            StopLoadingAndDispose(disposing);
         }
 
         public RendererContext CreateRendererContext()
         {
-            return new RendererContext(this, Logger)
+            var context = new RendererContext(this, Logger)
             {
                 FieldOfView = Settings.Config.FieldOfView,
                 ViewmodelFieldOfView = Settings.Config.ViewmodelFieldOfView,
                 MaxTextureSize = Settings.Config.MaxTextureSize,
             };
+
+            rendererContexts.Add(context);
+
+            return context;
+        }
+
+        // Whoever disposes the resources has to be the one that guarantees nobody is still reading them.
+        // Leaving that to callers means every disposal path has to get the order right, and they do not.
+        private void StopLoadingAndDispose(bool disposing)
+        {
+            foreach (var context in rendererContexts)
+            {
+                context.CancelLoading();
+            }
+
+            // The wait cannot happen on the thread that closed the tab, so the teardown follows it here
+            Task.Run(() =>
+            {
+                foreach (var context in rendererContexts)
+                {
+                    context.WaitForLoadingToStop();
+                }
+
+                if (base.CurrentPackage != null)
+                {
+                    base.CurrentPackage.Dispose();
+                    base.CurrentPackage = null;
+                }
+
+                ClearCache(disposeStreamingResources: true);
+
+                base.Dispose(disposing);
+            });
         }
 
         public (VrfGuiContext? Context, PackageEntry? PackageEntry) FindFileWithContext(string file)
@@ -278,6 +318,21 @@ namespace GUI.Utils
             return base.LoadShaderFromDisk(shaderName);
         }
 
+        /// <summary>Loader that skips resource cache.</summary>
+        public IFileLoader FileLoaderNoCache => fileLoaderNoCache ??= new UncachedFileLoader(this);
+
+        private UncachedFileLoader? fileLoaderNoCache;
+
+        private sealed class UncachedFileLoader(VrfGuiContext context) : IFileLoader
+        {
+            public Resource? LoadFile(string file) => context.LoadFileUncached(file);
+            public Resource? LoadFileCompiled(string file) => LoadFile(string.Concat(file, CompiledFileSuffix));
+            public ShaderCollection? LoadShader(string shaderName) => context.LoadShader(shaderName);
+            public Stream? GetFileStream(string file) => context.GetFileStream(file);
+        }
+
+        private Resource? LoadFileUncached(string file) => base.LoadFile(file);
+
         // Override to add support for caching resources
         public override Resource? LoadFile(string file)
         {
@@ -310,6 +365,7 @@ namespace GUI.Utils
             {
                 loggerFactory = LoggerFactory.Create(static builder =>
                 {
+                    builder.SetMinimumLevel(LogLevel.Debug);
                     builder.AddProvider(new GuiLoggerProvider());
                 });
                 var logger = loggerFactory.CreateLogger(nameof(RendererContext));

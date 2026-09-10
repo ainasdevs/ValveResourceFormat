@@ -33,6 +33,18 @@ public class ThemedToolStripMenuItem : ToolStripMenuItem
         }
     }
 
+    /// <summary>Renders the item on the theme's attention background.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool Highlighted
+    {
+        get => field;
+        set
+        {
+            field = value;
+            Invalidate();
+        }
+    }
+
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public override Image? Image
     {
@@ -83,8 +95,6 @@ public class ThemedToolStripMenuItem : ToolStripMenuItem
         Stream? svgResource = null;
 
         // Skip svg icons in design mode, program.assembly and themer don't exist
-
-        // Try loading light variant if in light mode
         if (!DesignMode)
         {
             // Try loading light variant if in light mode

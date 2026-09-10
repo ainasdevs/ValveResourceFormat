@@ -6,7 +6,6 @@ using OpenTK.Graphics.OpenGL;
 using OpenTK.Windowing.Desktop;
 using SkiaSharp;
 using ValveResourceFormat;
-using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Materials;
@@ -21,8 +20,10 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
     private readonly BlockingCollection<DecodeRequest> decodeQueue = [];
     private readonly Lock threadStartupLock = new();
     private readonly Thread GLThread;
+    private bool threadStarted;
 
     private NativeWindow? GLWindowContext;
+    private GraphicsContext? GraphicsContext;
     private Framebuffer? Framebuffer;
 
     public GLTextureDecoder(ILogger logger)
@@ -42,8 +43,6 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
     {
         public ManualResetEvent DoneEvent { get; } = new(false);
         public bool Success { get; set; }
-        public TimeSpan DecodeTime { get; set; }
-        public TimeSpan ResponseTime { get; set; }
 
         public bool Wait(int timeout = Timeout.Infinite) => DoneEvent.WaitOne(timeout);
 
@@ -74,8 +73,9 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
     {
         lock (threadStartupLock)
         {
-            if (!GLThread.IsAlive)
+            if (!threadStarted)
             {
+                threadStarted = true;
                 GLThread.Start();
             }
         }
@@ -85,22 +85,24 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
     {
         StartThread();
 
-        if (!GLThread.IsAlive)
+        if (!GLThread.IsAlive || decodeQueue.IsAddingCompleted)
         {
-            RendererContext.Logger.LogWarning("Decoder thread is no longer available");
             return false;
         }
 
         using var request = new DecodeRequest(bitmap, resource, (int)mipLevel, (int)depth, face, ChannelMapping.RGBA, decodeFlags);
 
-        var sw = Stopwatch.StartNew();
-        decodeQueue.Add(request);
+        try
+        {
+            decodeQueue.Add(request);
+        }
+        catch (InvalidOperationException)
+        {
+            // The thread exited between the liveness check and the add
+            return false;
+        }
 
         request.Wait();
-        request.ResponseTime = sw.Elapsed - request.DecodeTime;
-
-        var status = request.Success ? "succeeded" : "failed";
-        RendererContext.Logger.LogDebug("Decode {Status} in {DecodeTime}ms (response time: {ResponseTime}ms)", status, request.DecodeTime.Milliseconds, request.ResponseTime.Milliseconds);
 
         return request.Success;
     }
@@ -117,9 +119,16 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
         }
         finally
         {
+            decodeQueue.CompleteAdding();
             CleanupRequests();
             Dispose_ThreadResources();
-            RendererContext.Logger.LogWarning("Decoder thread has exited. It is no longer available");
+
+            if (HardwareAcceleratedTextureDecoder.Decoder == this)
+            {
+                HardwareAcceleratedTextureDecoder.Decoder = null;
+            }
+
+            RendererContext.Logger.LogWarning("Decoder thread has exited, textures will be decoded in software");
         }
     }
 
@@ -139,12 +148,12 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
             Title = "Source 2 Viewer Texture Decoder",
         });
 
-        GLWindowContext.MakeCurrent();
+        GraphicsContext = RendererContext.Device.CreateContext(new GLFWSurface(GLWindowContext.Context));
+        GraphicsContext.Begin();
 
         GLEnvironment.Initialize(RendererContext.Logger);
-        Framebuffer = Framebuffer.Prepare(nameof(GLTextureDecoder), 4, 4, 0, LDRFormat.Value, null);
+        Framebuffer = Framebuffer.Prepare(nameof(GLTextureDecoder), 4, 4, 0, LDRFormat, null);
         Framebuffer.Initialize();
-        Framebuffer.CheckStatus_ThrowIfIncomplete(nameof(GLTextureDecoder));
         Framebuffer.ClearMask = ClearBufferMask.ColorBufferBit;
         Framebuffer.ClearColor = new OpenTK.Mathematics.Color4(0, 0, 255, 255);
 
@@ -165,24 +174,14 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
 
     private bool DecodeTexture(DecodeRequest request)
     {
-        var sw = Stopwatch.StartNew();
-        var inputTexture = RendererContext.MaterialLoader.LoadTexture(request.Resource, isViewerRequest: true);
+        var inputTexture = RendererContext.MaterialLoader.LoadTexture(request.Resource);
 
         inputTexture.SetFiltering(TextureMinFilter.NearestMipmapNearest, TextureMagFilter.Nearest);
 
-        /*
-        if (request.Channels == ChannelMapping.RGBA && request.DecodeFlags == TextureCodec.None)
-        {
-            var texturePixels = request.Bitmap.GetPixels(out var texturePixelLength);
-            GL.GetTextureImage(inputTexture.Handle, 0, PixelFormat.Bgra, PixelType.UnsignedByte, (int)texturePixelLength, texturePixels);
-            request.DecodeTime = sw.Elapsed;
-            return true;
-        }
-        */
         var framebufferFormat = request.Bitmap.ColorType switch
         {
-            HdrBitmapColorType => HDRFormat.Value,
-            DefaultBitmapColorType => LDRFormat.Value,
+            HdrBitmapColorType => (ImageFormat?)HDRFormat,
+            DefaultBitmapColorType => LDRFormat,
             _ => null,
         };
 
@@ -217,20 +216,20 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
         GL.Disable(EnableCap.DepthTest);
 
         var textureType = GetTextureTypeDefine(inputTexture.Target);
-        var shader = RendererContext.ShaderLoader.LoadShader("vrf.texture_decode", (textureType, 1));
+        var shader = RendererContext.ShaderLoader.LoadShader("texture_decode", (textureType, 1));
 
         shader.Use();
 
         shader.SetTexture(0, "g_tInputTexture", inputTexture);
-        shader.SetUniform2("g_vViewportSize", new Vector2(blockWidth, blockHeight));
-        shader.SetUniform4("g_vInputTextureSize", new Vector4(
+        shader.SetUniform("g_vViewportSize", new Vector2(blockWidth, blockHeight));
+        shader.SetUniform("g_vInputTextureSize", new Vector4(
             blockWidth, blockHeight, inputTexture.Depth, inputTexture.NumMipLevels
         ));
-        shader.SetUniform1("g_nSelectedMip", request.Mip);
-        shader.SetUniform1("g_nSelectedDepth", request.Depth);
-        shader.SetUniform1("g_nSelectedCubeFace", (int)request.Face);
-        shader.SetUniform1("g_nSelectedChannels", request.Channels.PackedValue);
-        shader.SetUniform1("g_nDecodeFlags", (int)request.DecodeFlags);
+        shader.SetUniform("g_nSelectedMip", request.Mip);
+        shader.SetUniform("g_nSelectedDepth", request.Depth);
+        shader.SetUniform("g_nSelectedCubeFace", (int)request.Face);
+        shader.SetUniform("g_nSelectedChannels", request.Channels.PackedValue);
+        shader.SetUniform("g_nDecodeFlags", (int)request.DecodeFlags);
 
         // full screen triangle
         GL.BindVertexArray(RendererContext.MeshBufferCache.EmptyVAO);
@@ -239,7 +238,9 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
         inputTexture.Delete();
 
         var pixels = request.Bitmap.GetPixels(out var outputLength);
-        var fbBytesPerPixel = Framebuffer.ColorFormat.PixelType == PixelType.Float ? 16 : 4;
+        var isHdr = Framebuffer.ColorFormat == ImageFormat.RGBA32323232F;
+        var readFormat = MaterialLoader.GetImageExportFormat(isHdr);
+        var fbBytesPerPixel = isHdr ? 16 : 4;
         var fbRegionLength = request.Bitmap.Width * request.Bitmap.Height * fbBytesPerPixel;
 
         if (fbRegionLength > outputLength)
@@ -251,19 +252,19 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
         Framebuffer.Bind(FramebufferTarget.ReadFramebuffer);
         GL.ReadBuffer(ReadBufferMode.ColorAttachment0);
 
-        GL.ReadnPixels(
+        GL.ReadPixels(
             0, 0,
             request.Bitmap.Width, request.Bitmap.Height,
-            Framebuffer.ColorFormat.PixelFormat, Framebuffer.ColorFormat.PixelType,
-            (int)outputLength, pixels
+            readFormat.ToGLPixelFormat(), readFormat.ToGLPixelType(),
+            pixels
         );
 
-        request.DecodeTime = sw.Elapsed;
         return true;
     }
 
     private void Dispose_ThreadResources()
     {
+        GraphicsContext?.End();
         NativeWindowFactory.Destroy(GLWindowContext);
     }
 
@@ -300,16 +301,11 @@ public class GLTextureDecoder : IHardwareTextureDecoder, IDisposable
         }
     }
 
-    public Lazy<Framebuffer.AttachmentFormat> LDRFormat { get; } = new(() => GetPreferredFramebufferFormat(hdr: false));
-    public Lazy<Framebuffer.AttachmentFormat> HDRFormat { get; } = new(() => GetPreferredFramebufferFormat(hdr: true));
+    public static ImageFormat LDRFormat => GetPreferredFramebufferFormat(hdr: false);
+    public static ImageFormat HDRFormat => GetPreferredFramebufferFormat(hdr: true);
 
-    public static Framebuffer.AttachmentFormat GetPreferredFramebufferFormat(bool hdr)
-    {
-        var (internalFormat, pixelFormat, pixelType) = MaterialLoader.GetImageExportFormat(hdr);
-
-        GL.GetInternalformat(ImageTarget.Texture2D, internalFormat, InternalFormatParameter.InternalformatPreferred, 1, out int internalFormatPreferred);
-        return new((PixelInternalFormat)internalFormatPreferred, pixelFormat, pixelType);
-    }
+    public static ImageFormat GetPreferredFramebufferFormat(bool hdr)
+        => hdr ? ImageFormat.RGBA32323232F : ImageFormat.RGBA8888;
 
     public static string GetTextureTypeDefine(TextureTarget target) => target switch
     {

@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using OpenTK.Graphics.OpenGL;
-using ValveResourceFormat.Renderer.Buffers;
 
 namespace ValveResourceFormat.Renderer
 {
@@ -33,8 +32,8 @@ namespace ValveResourceFormat.Renderer
             this.scene = scene;
             renderContext = rendererContext;
 
-            shader = rendererContext.ShaderLoader.LoadShader("vrf.occlusion_debug");
-            finalizeShader = rendererContext.ShaderLoader.LoadShader("vrf.occlusion_debug_finalize");
+            shader = rendererContext.ShaderLoader.LoadShader("occlusion_debug");
+            finalizeShader = rendererContext.ShaderLoader.LoadShader("occlusion_debug_finalize");
         }
 
         /// <summary>Allocates (if needed) and clears the GPU buffer that receives occluded bounds from the culling shader.</summary>
@@ -43,8 +42,7 @@ namespace ValveResourceFormat.Renderer
             if (OccludedBoundsDebugGpu == null)
             {
                 var totalSize = HeaderSizeBytes + (scene.SceneMeshletCount * Marshal.SizeOf<OccludedBoundDebug>());
-                OccludedBoundsDebugGpu = new StorageBuffer(ReservedBufferSlots.OccludedBoundsDebug);
-                GL.NamedBufferData(OccludedBoundsDebugGpu.Handle, totalSize, IntPtr.Zero, BufferUsageHint.StreamRead);
+                OccludedBoundsDebugGpu = StorageBuffer.Allocate<byte>(ReservedBufferSlots.OccludedBoundsDebug, nameof(ReservedBufferSlots.OccludedBoundsDebug), totalSize, BufferUsage.GpuOnly);
             }
 
             // Clear the atomic counter before dispatching
@@ -74,14 +72,16 @@ namespace ValveResourceFormat.Renderer
                 return;
             }
 
-            GL.Enable(EnableCap.Blend);
-            GL.Enable(EnableCap.DepthTest);
-            GL.DepthMask(false);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
+            var renderState = GraphicsContext.RenderState;
+            var state = renderState.CurrentPass;
+            state.BlendEnable = true;
+            state.SetBlend(RsBlendMode.SrcAlpha, RsBlendMode.InvSrcAlpha);
+            state.DepthStencil.DepthTestEnable = true;
+            state.DepthStencil.DepthWriteEnable = false;
+            using var _ = renderState.Scope(in state);
 
             shader.Use();
 
-            // Bind the occluded bounds buffer to shader
             OccludedBoundsDebugGpu.BindBufferBase();
 
             GL.BindVertexArray(renderContext.MeshBufferCache.EmptyVAO);
@@ -90,20 +90,18 @@ namespace ValveResourceFormat.Renderer
             var indirectArgs = (IntPtr)IndirectArgsByteOffset;
 
             // First pass: behind depth buffer (correctly occluded) - GREEN
-            GL.DepthFunc(DepthFunction.Less);
-            shader.SetUniform4("g_vColor", new Vector4(0.0f, 1.0f, 0.0f, 0.9f));
+            state.DepthStencil.DepthFunc = RsComparison.Farther;
+            renderState.Apply(in state);
+            shader.SetUniform("g_vColor", new Vector4(0.0f, 1.0f, 0.0f, 0.9f));
             GL.DrawArraysIndirect(PrimitiveType.Lines, indirectArgs);
 
             // Second pass: in front/at depth buffer (incorrectly visible) - RED
-            GL.DepthFunc(DepthFunction.Gequal);
-            shader.SetUniform4("g_vColor", new Vector4(1.0f, 0.0f, 0.0f, 0.9f));
+            state.DepthStencil.DepthFunc = RsComparison.CloserEqual;
+            renderState.Apply(in state);
+            shader.SetUniform("g_vColor", new Vector4(1.0f, 0.0f, 0.0f, 0.9f));
             GL.DrawArraysIndirect(PrimitiveType.Lines, indirectArgs);
 
-            // Restore defaults
             GL.BindBuffer(BufferTarget.DrawIndirectBuffer, 0);
-            GL.DepthFunc(DepthFunction.Greater);
-            GL.DepthMask(true);
-            GL.Disable(EnableCap.Blend);
         }
     }
 }

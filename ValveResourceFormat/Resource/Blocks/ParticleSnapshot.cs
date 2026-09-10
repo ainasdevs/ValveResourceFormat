@@ -3,6 +3,7 @@ using System.Collections;
 using System.IO;
 using System.Linq;
 using ValveResourceFormat.Compression;
+using ValveResourceFormat.Particles;
 using ValveResourceFormat.Serialization.KeyValues;
 
 namespace ValveResourceFormat.Blocks
@@ -105,7 +106,7 @@ namespace ValveResourceFormat.Blocks
             try
             {
                 BlockCompress.FastDecompress(info, reader, decompressed.AsSpan(0, info.Size));
-                using var decompressedStream = new MemoryStream(decompressed);
+                using var decompressedStream = new MemoryStream(decompressed, 0, info.Size);
                 using var innerReader = new BinaryReader(decompressedStream);
 
                 // Get DATA block to know how to read SNAP data

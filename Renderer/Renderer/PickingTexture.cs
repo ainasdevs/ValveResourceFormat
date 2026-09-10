@@ -87,12 +87,12 @@ public class PickingTexture : Framebuffer
     public PickingTexture(RendererContext rendererContext, EventHandler<PickingResponse> onPicked) : base(nameof(PickingTexture))
     {
         RendererContext = rendererContext;
-        Shader = rendererContext.ShaderLoader.LoadShader("vrf.picking");
-        DebugShader = rendererContext.ShaderLoader.LoadShader("vrf.picking", ("F_DEBUG_PICKER", 1));
+        Shader = rendererContext.ShaderLoader.LoadShader("picking");
+        DebugShader = rendererContext.ShaderLoader.LoadShader("picking", ("F_DEBUG_PICKER", 1));
         OnPicked += onPicked;
 
-        ColorFormat = new(PixelInternalFormat.Rgba32ui, PixelFormat.RgbaInteger, PixelType.UnsignedInt);
-        DepthFormat = DepthAttachmentFormat.Depth32F;
+        ColorFormat = ImageFormat.RGBA32323232_UINT;
+        DepthFormat = ImageFormat.D32;
         Target = TextureTarget.Texture2D;
         ClearColor = Color4.Black;
 
@@ -150,7 +150,7 @@ public class PickingTexture : Framebuffer
         Debug.Assert(ColorFormat is not null);
 
         GL.NamedFramebufferReadBuffer(FboHandle, ReadBufferMode.ColorAttachment0);
-        GL.ReadPixels(width, height, 1, 1, ColorFormat.PixelFormat, ColorFormat.PixelType, ref pixelInfo);
+        GL.ReadPixels(width, height, 1, 1, ColorFormat!.Value.ToGLPixelFormat(), ColorFormat.Value.ToGLPixelType(), ref pixelInfo);
         GL.NamedFramebufferReadBuffer(FboHandle, ReadBufferMode.None);
 
         return pixelInfo;

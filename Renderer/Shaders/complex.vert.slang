@@ -21,8 +21,8 @@
 #include "common/animation.slang"
 #include "common/morph.slang"
 
-layout (location = 0) in vec3 vPOSITION;
-layout (location = 3) in vec2 vTEXCOORD;
+in vec3 vPOSITION;
+in vec2 vTEXCOORD;
 #include "common/compression.slang"
 
 //Parameter defines - These are default values and can be overwritten based on material/model parameters
@@ -31,7 +31,13 @@ layout (location = 3) in vec2 vTEXCOORD;
 #define F_TEXTURE_ANIMATION 0 // csgo_complex, csgo_static_overlay, csgo_unlitgeneric, vr_complex, vr_monitor, vr_panorama_hint_ui, vr_simple, vr_standard
 uniform int F_TEXTURE_ANIMATION_MODE; // csgo_complex, csgo_static_overlay, csgo_unlitgeneric, vr_complex, vr_monitor
 #define F_SPHERICAL_PROJECTED_ANISOTROPIC_TANGENTS 0 // csgo_character
+#define F_USE_PER_VERTEX_CURVATURE 0 // vr_skin, vr_skin_blended
 //End of parameter defines
+
+#if (F_USE_PER_VERTEX_CURVATURE == 1)
+    in float flSSSCurvature;
+    out float vCurvatureOut;
+#endif
 
 #if (GameVfx_vr_simple_2way_blend != 0) || (GameVfx_vr_simple_2way_parallax != 0) || (GameVfx_vr_simple_3way_parallax != 0) || (GameVfx_vr_simple_blend_to_triplanar != 0) || (GameVfx_vr_simple_blend_to_xen_membrane != 0)
     #define vr_blend_vfx_common
@@ -46,23 +52,27 @@ uniform int F_TEXTURE_ANIMATION_MODE; // csgo_complex, csgo_static_overlay, csgo
 #endif
 
 #if (F_LAYERS > 0) || (GameVfx_csgo_simple_2way_blend != 0) || defined(vr_blend_vfx_common)
+    // Declarations name the attribute, the defines are only readable aliases for the code below
     #define vBLEND_COLOR vTEXCOORD4
     #if defined(vr_blend_vfx_common)
         #define vBLEND_ALPHA vTEXCOORD5
-        in vec4 vBLEND_ALPHA;
+        in vec4 vTEXCOORD5;
     #endif
 
-    in vec4 vBLEND_COLOR;
+    in vec4 vTEXCOORD4;
     out vec4 vColorBlendValues;
 #endif
 
 #if defined(foliage_vfx_common)
     #if (GameVfx_csgo_foliage != 0)
+        in vec4 vCOLOR;
         #define vFoliageParams vCOLOR
     #elif (GameVfx_vr_complex != 0)
+        in vec4 vTEXCOORD3;
         #define vFoliageParams vTEXCOORD3
+    #else
+        in vec4 vFoliageParams;
     #endif
-    in vec4 vFoliageParams;
     out vec4 vFoliageParamsOut;
 
     // Vertex Animation
@@ -101,7 +111,6 @@ uniform int F_TEXTURE_ANIMATION_MODE; // csgo_complex, csgo_static_overlay, csgo
         vec3 heightOffset;
     };
 
-    // Function to calculate animated position
     vec3 vertexAnimation(vec3 pos, FoliageAnimParams params)
     {
         // Sample and calculate sway noise
@@ -279,6 +288,7 @@ void main()
     vec3 normal;
     vec4 tangent;
     GetOptionallyCompressedNormalTangent(normal, tangent);
+    normal = applyMorphNormal(normal);
 
     vNormalOut = TransformDirectionToWorld(skinTransform, normal);
     vTangentOut = TransformDirectionToWorld(skinTransform, tangent.xyz);
@@ -288,10 +298,8 @@ void main()
         // Interpolate out for debug visualization
         vFoliageParamsOut = vFoliageParams;
 
-        // Clamp foliage parameters
         vec4 foliageParams = clamp(vFoliageParams, vec4(0.001), vec4(1.0));
 
-        // Initialize animation parameters
         FoliageAnimParams animParams;
 
         // Calculate strengths
@@ -332,6 +340,10 @@ void main()
 #endif
 
     vTexCoordOut = GetAnimatedUVs(vTEXCOORD.xy);
+
+#if (F_USE_PER_VERTEX_CURVATURE == 1)
+    vCurvatureOut = flSSSCurvature;
+#endif
 
 #if (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1)
     vLightmapUVScaled = vec3(vLightmapUV * g_vLightmapUvScale.xy, 0);

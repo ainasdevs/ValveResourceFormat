@@ -4,6 +4,18 @@ using ValveResourceFormat.ResourceTypes;
 namespace ValveResourceFormat.Renderer
 {
     /// <summary>
+    /// Which passes of the frame beyond <see cref="Scene.UpdatePhase.Place"/> a node takes part in.
+    /// </summary>
+    public enum NodeSimulation
+    {
+        /// <summary>The node has nothing to advance once the scene has been updated.</summary>
+        None,
+
+        /// <summary> The node update can be parallelized. Affects only inner state.</summary>
+        Parallel,
+    }
+
+    /// <summary>
     /// Base class for all objects in the scene graph.
     /// </summary>
 #if DEBUG
@@ -30,7 +42,7 @@ namespace ValveResourceFormat.Renderer
         public string? LayerName { get; set; }
 
         /// <summary>
-        /// Gets or sets whether this node's layer is enabled. Marks the parent octree dirty on change.
+        /// Gets or sets whether this node's layer is enabled. Queues a rebuild on the parent spatial structure.
         /// </summary>
         public virtual bool LayerEnabled
         {
@@ -45,6 +57,12 @@ namespace ValveResourceFormat.Renderer
                 }
             }
         } = true;
+
+        /// <summary>
+        /// Gets or sets whether the node itself wants to be drawn, independently of its layer.
+        /// The node remains in the scene graph and is checked each frame.
+        /// </summary>
+        public bool Visible { get; set; } = true;
 
         /// <summary>
         /// Gets the world-space axis-aligned bounding box. Recomputed from <see cref="LocalBoundingBox"/> and
@@ -86,10 +104,15 @@ namespace ValveResourceFormat.Renderer
         public ObjectTypeFlags Flags { get; set; }
 
         /// <summary>
-        /// Gets or sets whether this node's draw calls render in the dedicated first-person viewmodel
-        /// pass (own camera, own reserved near depth range).
+        /// Flags for when should this node be drawn and where.
         /// </summary>
-        public bool RenderAsViewmodel { get; set; }
+        public CustomRenderPasses RenderPasses { get; set; } = CustomRenderPasses.Default;
+
+        /// <summary>Uploads this node's buffers. Called on visible nodes only, before any pass draws.</summary>
+        /// <param name="camera">The camera the frame is drawn with.</param>
+        public virtual void UpdateBuffers(Camera camera)
+        {
+        }
 
 #if DEBUG
         /// <summary>
@@ -148,8 +171,20 @@ namespace ValveResourceFormat.Renderer
         /// </summary>
         public EntityLump.Entity? EntityData { get; set; }
 
+        /// <summary>
+        /// Gets the entity that owns this node and drives its transform, or <see langword="null"/> when
+        /// nothing simulates it. Where <see cref="EntityData"/> is what the map authored, this is the live
+        /// entity built from it.
+        /// </summary>
+        public Entities.BaseEntity? EntityInstance { get; internal set; }
+
         private AABB localBoundingBox;
         private Matrix4x4 transform = Matrix4x4.Identity;
+
+        /// <summary>
+        /// This node's slot in the scene's <see cref="Scene.DynamicOctree"/>, or -1 when it is not in one.
+        /// </summary>
+        internal int DynamicSetIndex { get; set; } = -1;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SceneNode"/> class.
@@ -167,6 +202,13 @@ namespace ValveResourceFormat.Renderer
         public virtual void Update(Scene.UpdateContext context)
         {
         }
+
+        /// <summary>
+        /// Gets or sets which passes after <see cref="Scene.UpdatePhase.Place"/> this node takes part
+        /// in. Simulating nodes get <see cref="Scene.UpdatePhase.Act"/> too, and belong in the dynamic
+        /// partition even if they never move.
+        /// </summary>
+        public NodeSimulation Simulation { get; protected set; }
 
         /// <summary>
         /// Called each frame to render this node.

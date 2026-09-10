@@ -3,7 +3,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelFlex.FlexOps
     /// <summary>
     /// Flex operation that performs N-way blending between values.
     /// </summary>
-    public class FlexOpNWay : FlexOp
+    internal class FlexOpNWay : FlexOp
     {
         /// <summary>
         /// Initializes a new instance of the <see cref="FlexOpNWay"/> class.
@@ -16,16 +16,16 @@ namespace ValveResourceFormat.ResourceTypes.ModelFlex.FlexOps
         /// </remarks>
         public override void Run(in FlexRuleContext context)
         {
-            var tController = BitConverter.SingleToInt32Bits(context.Stack.Pop());
+            var tController = context.PopIndex();
             var valueController = (int)MathF.Round(Data);
 
-            var tCurrent = context.ControllerValues[tController];
-            var value = context.ControllerValues[valueController];
+            var tCurrent = context.GetControllerValue(tController);
+            var value = context.GetControllerValue(valueController);
 
-            var t4 = context.Stack.Pop();
-            var t3 = context.Stack.Pop();
-            var t2 = context.Stack.Pop();
-            var t1 = context.Stack.Pop();
+            var t4 = context.Pop();
+            var t3 = context.Pop();
+            var t2 = context.Pop();
+            var t1 = context.Pop();
 
             float outValue;
             if (tCurrent < t1)

@@ -15,18 +15,57 @@ public class Timings
     private readonly Dictionary<QueryId, TimingQuery> activeQueries = [];
     private readonly Dictionary<QueryId, int> gpuStartQueries = [];
     private readonly Dictionary<QueryId, int> gpuEndQueries = [];
+
+    private readonly HashSet<QueryId> staleResults = [];
     private readonly Dictionary<QueryId, double> gpuTimingsCache = [];
     private readonly Dictionary<QueryId, double> previousMax = [];
     private readonly Dictionary<QueryId, double> currentMax = [];
     private long lastRollingUpdate;
+    private double swapMs;
+    private double frameCpuMs;
+    private double swapMaxCurrent;
+    private double swapMaxPrevious;
+    private double unaccountedMs;
+    private double unaccountedMaxCurrent;
+    private double unaccountedMaxPrevious;
     private readonly SortedDictionary<QueryId, TimingResult> results = [];
     private int currentIndex;
     private int currentDepth;
 
     private const int NameColumnWidth = 40;
 
+    private static Color32 ColorForPeak(double peakMs) => peakMs switch
+    {
+        > 16.0 => new Color32(255, 0, 0),   // Red for >16ms (60fps threshold)
+        > 8.0 => new Color32(255, 150, 0),  // Orange for >8ms
+        > 2.0 => new Color32(255, 255, 0),  // Yellow for >2ms
+        _ => new Color32(150, 255, 150)     // Light green for <2ms
+    };
+
     /// <summary>Gets or sets whether timing data is actively collected this frame.</summary>
     public bool Capture { get; set; }
+
+    /// <summary>
+    /// Records the swap wait and the frame period it belongs to, and folds them into the unaccounted
+    /// remainder. Uses the total <see cref="MarkFrameEnd"/> snapshotted rather than the live results,
+    /// which are cleared by then, and which the display only ever sees part of anyway.
+    /// </summary>
+    /// <param name="milliseconds">Wall time the swap call blocked for.</param>
+    /// <param name="framePeriodMilliseconds">Wall time between this swap and the last, or 0 for a frame
+    /// that should not be sampled at all, such as a paused one.</param>
+    public void SetBufferSwapTime(double milliseconds, double framePeriodMilliseconds)
+    {
+        if (!Capture || framePeriodMilliseconds <= 0.0)
+        {
+            return;
+        }
+
+        swapMs = milliseconds;
+        swapMaxCurrent = Math.Max(swapMaxCurrent, milliseconds);
+
+        unaccountedMs = framePeriodMilliseconds - (frameCpuMs + milliseconds);
+        unaccountedMaxCurrent = Math.Max(unaccountedMaxCurrent, unaccountedMs);
+    }
 
     private readonly record struct AsyncRow(double? CpuMs, string Detail);
     private readonly SortedDictionary<string, AsyncRow> asyncRows = [];
@@ -71,10 +110,10 @@ public class Timings
         var endQueryId = 0;
         if (!gpuStartQueries.TryGetValue(currentIndex, out var startQueryId))
         {
-            startQueryId = GL.GenQuery();
+            startQueryId = GraphicsDevice.CreateQuery(QueryTarget.Timestamp, "GpuTimingStart");
             gpuStartQueries[currentIndex] = startQueryId;
 
-            endQueryId = GL.GenQuery();
+            endQueryId = GraphicsDevice.CreateQuery(QueryTarget.Timestamp, "GpuTimingEnd");
             gpuEndQueries[currentIndex] = endQueryId;
 
             Debug.Assert(startQueryId != 0 && endQueryId != 0, "Failed to generate GPU query objects.");
@@ -90,6 +129,7 @@ public class Timings
                     gpuTimingsCache.Remove(i);
                     previousMax.Remove(i);
                     currentMax.Remove(i);
+                    staleResults.Add(i);
                 }
             }
 
@@ -153,9 +193,16 @@ public class Timings
                 {
                     if (endTimestampGpu != 0)
                     {
-                        elapsedGpuMs = (endTimestampGpu - startTimestampGpu) / 1_000_000.0; // convert nanoseconds to milliseconds
-                        gpuTimingsCache[query.Id] = elapsedGpuMs;
-                        resubmitQueries = true;
+                        if (staleResults.Remove(query.Id))
+                        {
+                            resubmitQueries = true;
+                        }
+                        else
+                        {
+                            elapsedGpuMs = (endTimestampGpu - startTimestampGpu) / 1_000_000.0; // convert nanoseconds to milliseconds
+                            gpuTimingsCache[query.Id] = elapsedGpuMs;
+                            resubmitQueries = true;
+                        }
                     }
                 }
             }
@@ -198,7 +245,6 @@ public class Timings
 
         yOffset += lineHeight;
 
-        // Header
         textRenderer.AddTextRelative(new TextRenderer.TextRenderRequest
         {
             X = x,
@@ -224,6 +270,11 @@ public class Timings
                 currentMax[result.Id] = 0;
             }
 
+            swapMaxPrevious = swapMaxCurrent;
+            swapMaxCurrent = 0;
+            unaccountedMaxPrevious = unaccountedMaxCurrent;
+            unaccountedMaxCurrent = 0;
+
             lastRollingUpdate = Stopwatch.GetTimestamp();
         }
 
@@ -240,13 +291,7 @@ public class Timings
                 total += maxTime;
             }
 
-            var color = maxTime switch
-            {
-                > 16.0 => new Color32(255, 0, 0),   // Red for >16ms (60fps threshold)
-                > 8.0 => new Color32(255, 150, 0),  // Orange for >8ms
-                > 2.0 => new Color32(255, 255, 0),  // Yellow for >2ms
-                _ => new Color32(150, 255, 150)     // Light green for <2ms
-            };
+            var color = ColorForPeak(maxTime);
 
             var indent = new string(' ', result.Depth * 2);
             var displayName = $"{indent}{result.Name}";
@@ -266,7 +311,20 @@ public class Timings
             yOffset += lineHeight;
         }
 
-        // Add total line
+        textRenderer.AddTextRelative(new TextRenderer.TextRenderRequest
+        {
+            X = x,
+            Y = yOffset,
+            Scale = scale,
+            Color = ColorForPeak(swapMaxPrevious),
+            Text = $"  {"Swapchain",-NameColumnWidth} {"-",6} {swapMs,6:0.00} {swapMaxPrevious,6:0.00}"
+        }, camera);
+
+        yOffset += lineHeight;
+
+        totalCpu += swapMs;
+        total += swapMaxPrevious;
+
         textRenderer.AddTextRelative(new TextRenderer.TextRenderRequest
         {
             X = x,
@@ -274,6 +332,17 @@ public class Timings
             Scale = scale,
             Color = Color32.White,
             Text = $"  {"Total",-NameColumnWidth} {totalGpu,6:0.00} {totalCpu,6:0.00} {total,6:0.00}"
+        }, camera);
+
+        yOffset += lineHeight;
+
+        textRenderer.AddTextRelative(new TextRenderer.TextRenderRequest
+        {
+            X = x,
+            Y = yOffset,
+            Scale = scale,
+            Color = Color32.White,
+            Text = $"  {"Unaccounted",-NameColumnWidth} {"-",6} {unaccountedMs,6:0.00} {unaccountedMaxPrevious,6:0.00}"
         }, camera);
 
         if (asyncRows.Count == 0)
@@ -327,6 +396,16 @@ public class Timings
     {
         if (Capture)
         {
+            frameCpuMs = 0.0;
+
+            foreach (var result in results.Values)
+            {
+                if (result.Depth == 0)
+                {
+                    frameCpuMs += result.TimeMs;
+                }
+            }
+
             results.Clear();
         }
     }

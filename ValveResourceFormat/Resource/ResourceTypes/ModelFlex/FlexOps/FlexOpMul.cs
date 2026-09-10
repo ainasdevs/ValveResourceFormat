@@ -3,7 +3,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelFlex.FlexOps
     /// <summary>
     /// Flex operation that multiplies two values.
     /// </summary>
-    public class FlexOpMul : FlexOp
+    internal class FlexOpMul : FlexOp
     {
         /// <summary>
         /// Initializes a new instance of the <see cref="FlexOpMul"/> class.
@@ -16,8 +16,8 @@ namespace ValveResourceFormat.ResourceTypes.ModelFlex.FlexOps
         /// </remarks>
         public override void Run(in FlexRuleContext context)
         {
-            var v1 = context.Stack.Pop();
-            var v2 = context.Stack.Pop();
+            var v1 = context.Pop();
+            var v2 = context.Pop();
 
             context.Stack.Push(v2 * v1);
         }

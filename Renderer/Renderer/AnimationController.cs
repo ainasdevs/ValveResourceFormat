@@ -39,8 +39,9 @@ namespace ValveResourceFormat.Renderer
         // The player producing the current pose; playback members forward to it.
         private AnimationPlayer player;
 
-        // Model bone index -> current player's bone index, or null while the model player is active.
-        private int[]? remapTable;
+        // Retargets the current external player's pose onto the model skeleton, or null while the
+        // model player is active.
+        private SkeletonRetargeter? externalRetargeter;
 
         /// <summary>Gets or sets the playback speed multiplier applied to the animation timestep.</summary>
         public float FrametimeMultiplier { get; set; } = 1.0f;
@@ -80,11 +81,24 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets the decoded animation frame data for the current tick, or <see langword="null"/> when no animation is active.</summary>
         public Frame? AnimationFrame { get; private set; }
 
+        /// <summary>
+        /// Takes the root motion the last <see cref="Update"/> advanced through, as a rigid transform to
+        /// compose onto whatever the animation drives, and clears it. Identity when playback did not advance.
+        /// </summary>
+        public Matrix4x4 ConsumeRootMotionDelta() => player.ConsumeRootMotionDelta();
+
         /// <summary>Gets or sets whether animation playback is paused. Changing the value forces a pose update.</summary>
         public bool IsPaused
         {
             get => player.IsPaused;
             set => player.IsPaused = value;
+        }
+
+        /// <summary>Gets or sets whether the active animation is composed over the bind pose.</summary>
+        public bool ApplyAdditive
+        {
+            get => player.ApplyAdditive;
+            set => player.ApplyAdditive = value;
         }
 
         /// <summary>Gets or sets the current frame index of the active animation.</summary>
@@ -139,7 +153,7 @@ namespace ValveResourceFormat.Renderer
 
             foreach (var root in skeleton.Roots)
             {
-                FramePose.ComputeWorldSubtree(root, Matrix4x4.Identity, null, bindPose);
+                Skeleton.ComputeWorldSubtree(root, Matrix4x4.Identity, null, bindPose);
             }
 
             return bindPose;
@@ -155,7 +169,7 @@ namespace ValveResourceFormat.Renderer
             timeStep *= FrametimeMultiplier;
 
             // External skeletons are posed in their own space; Transform is applied during remapping below.
-            if (!player.Update(timeStep, remapTable == null ? Transform : Matrix4x4.Identity))
+            if (!player.Update(timeStep, externalRetargeter == null ? Transform : Matrix4x4.Identity))
             {
                 return false;
             }
@@ -163,7 +177,7 @@ namespace ValveResourceFormat.Renderer
             AnimationFrame = player.AnimationFrame;
             updateHandler(ActiveAnimation, Frame);
 
-            if (remapTable is { } remap)
+            if (externalRetargeter is { } retargeter)
             {
                 Debug.Assert(player != modelPlayer, "Remapping from the model player would alias the pose buffer.");
 
@@ -174,7 +188,7 @@ namespace ValveResourceFormat.Renderer
                         continue;
                     }
 
-                    RemapPoseRecursive(root, Transform, remap, player.Pose, Pose);
+                    retargeter.RetargetSubtree(root, Transform, player.Pose, Pose);
                 }
             }
             else if (AnimationFrame == null)
@@ -183,25 +197,31 @@ namespace ValveResourceFormat.Renderer
                 return true;
             }
 
+            ApplyClothRootPose();
             ApplyInverseKinematics();
             return true;
         }
 
         /// <summary>
-        /// Copies a source skeleton's world pose onto a model bone subtree: a mapped model bone takes
-        /// its source bone's pose, an unmapped one follows its parent at bind pose.
+        /// Poses procedural cloth roots rigidly from the cloth simulation root, matching the pin
+        /// <see cref="GetSkinningMatrices"/> applies to their skinning matrices.
         /// </summary>
-        private static void RemapPoseRecursive(Bone bone, Matrix4x4 parentTransform, int[] remapTable, ReadOnlySpan<Matrix4x4> sourcePose, Span<Matrix4x4> pose)
+        private void ApplyClothRootPose()
         {
-            var remapIndex = remapTable[bone.Index];
-
-            pose[bone.Index] = remapIndex != -1
-                ? sourcePose[remapIndex]
-                : bone.BindPose * parentTransform;
-
-            foreach (var child in bone.Children)
+            var clothSimRoot = Skeleton.ClothSimulationRoot;
+            if (clothSimRoot == null)
             {
-                RemapPoseRecursive(child, pose[bone.Index], remapTable, sourcePose, pose);
+                return;
+            }
+
+            var delta = InverseBindPose[clothSimRoot.Index] * Pose[clothSimRoot.Index];
+
+            foreach (var root in Skeleton.Roots)
+            {
+                if (root.IsProceduralCloth)
+                {
+                    Pose[root.Index] = root.BindPose * delta;
+                }
             }
         }
 
@@ -220,15 +240,17 @@ namespace ValveResourceFormat.Renderer
         /// </summary>
         /// <param name="animation">The animation to activate, or <see langword="null"/> to clear.</param>
         /// <param name="blendTime">The time in seconds to blend from previous animations to the new animation.</param>
-        public void SetAnimation(Animation? animation, float blendTime)
+        /// <param name="warp">Whether re-activating the animation already playing should cross over
+        /// into a second instance of it rather than restarting it in place.</param>
+        public void SetAnimation(Animation? animation, float blendTime, bool warp = false)
         {
             var newPlayer = modelPlayer;
-            int[]? newRemapTable = null;
+            SkeletonRetargeter? newRetargeter = null;
 
             if (animation is ClipAnimation clipAnimation && externalSkeletons.TryGetValue(clipAnimation.Clip.SkeletonName, out var external))
             {
                 newPlayer = external.Player;
-                newRemapTable = external.RemapTable;
+                newRetargeter = external.Retargeter;
             }
 
             if (newPlayer != player)
@@ -238,9 +260,9 @@ namespace ValveResourceFormat.Renderer
             }
 
             player = newPlayer;
-            remapTable = newRemapTable;
+            externalRetargeter = newRetargeter;
 
-            player.SetAnimation(animation, blendTime, Looping);
+            player.SetAnimation(animation, blendTime, Looping, warp);
             updateHandler(ActiveAnimation, -1);
         }
 
@@ -273,11 +295,12 @@ namespace ValveResourceFormat.Renderer
         public AnimationPlayer? CurrentPlayer => player == modelPlayer ? null : player;
 
         /// <summary>
-        /// An external NM skeleton the model can be animated from, and the bone mapping back onto it.
+        /// An external NM skeleton the model can be animated from, and the retargeter mapping its
+        /// poses back onto the model skeleton.
         /// </summary>
         /// <param name="Player">The player animating the external skeleton.</param>
-        /// <param name="RemapTable">Bone index mapping from the model skeleton to the external one.</param>
-        public readonly record struct ExternalSkeleton(AnimationPlayer Player, int[] RemapTable)
+        /// <param name="Retargeter">Retargets the external skeleton's poses onto the model skeleton.</param>
+        public readonly record struct ExternalSkeleton(AnimationPlayer Player, SkeletonRetargeter Retargeter)
         {
             /// <summary>The external skeleton.</summary>
             public Skeleton Skeleton => Player.Skeleton;
@@ -289,36 +312,26 @@ namespace ValveResourceFormat.Renderer
         public IReadOnlyDictionary<string, ExternalSkeleton> ExternalSkeletons => externalSkeletons;
 
         /// <summary>
+        /// Whether the animation can play correctly on this controller.
+        /// </summary>
+        public bool IsPlayable(Animation animation)
+        {
+            if (animation is ClipAnimation clipAnimation)
+            {
+                return externalSkeletons.ContainsKey(clipAnimation.TargetSkeletonName);
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Registers an external skeleton animations can be played on, creating a bone remapping table.
         /// </summary>
         /// <param name="skeletonName">The name identifying the external skeleton.</param>
         /// <param name="skeleton">The external skeleton to register.</param>
         public void RegisterExternalSkeleton(string skeletonName, Skeleton skeleton)
         {
-            var sourceBoneCount = skeleton.Bones.Length;
-            var destinationBoneCount = Skeleton.Bones.Length;
-
-            var remap = new int[destinationBoneCount];
-            var nameToIndex = new Dictionary<uint, int>(sourceBoneCount);
-
-            for (var i = 0; i < sourceBoneCount; i++)
-            {
-                var name = skeleton.Bones[i].Name;
-                nameToIndex[StringToken.Store(name)] = i;
-            }
-
-            for (var i = 0; i < destinationBoneCount; i++)
-            {
-                var name = Skeleton.Bones[i].Name;
-                var hash = StringToken.Store(name);
-
-                remap[i] = -1;
-
-                if (nameToIndex.TryGetValue(hash, out var idx))
-                {
-                    remap[i] = idx;
-                }
-            }
+            var retargeter = new SkeletonRetargeter(Skeleton, skeleton);
 
             var bindPose = ComputeBindPose(skeleton);
             var externalPlayer = new AnimationPlayer(skeleton, [], bindPose, bindPose.AsSpan().ToArray())
@@ -326,7 +339,7 @@ namespace ValveResourceFormat.Renderer
                 ResolvePosition = ResolvePosition,
             };
 
-            externalSkeletons[skeletonName] = new(externalPlayer, remap);
+            externalSkeletons[skeletonName] = new(externalPlayer, retargeter);
         }
 
         /// <summary>

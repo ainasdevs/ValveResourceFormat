@@ -9,22 +9,22 @@ namespace ValveResourceFormat.CompiledShader;
 public class VfxShaderFileGL : VfxShaderFile
 {
     /// <inheritdoc/>
-    public override string BlockName => "GLSL";
+    public override string SourceType => "GLSL";
 
-    /// <summary>Gets the argument value.</summary>
-    public int Arg0 { get; }
+    /// <summary>Gets the shader file version. It is 2 for PCGL and 3 for MOBILE_GLES.</summary>
+    public int Version { get; }
 
-    /// <summary>Gets the shader source code size.</summary>
+    /// <summary>Gets the size of the GLSL source text including its null terminator; <see cref="VfxShaderFile.Bytecode"/> holds one byte less.</summary>
     public int BytecodeSize { get; } = -1;
 
     /// <summary>
     /// Initializes a new instance from a binary reader.
     /// </summary>
-    public VfxShaderFileGL(BinaryReader datareader, int sourceId, VfxStaticComboData parent) : base(datareader, sourceId, parent)
+    public VfxShaderFileGL(BinaryReader datareader, int shaderFileId, VfxStaticComboData parent) : base(datareader, shaderFileId, parent)
     {
         if (Size > 0)
         {
-            Arg0 = datareader.ReadInt32();
+            Version = datareader.ReadInt32();
             BytecodeSize = datareader.ReadInt32();
             Bytecode = datareader.ReadBytes(BytecodeSize - 1); // -1 because the sourcebytes are null-term
             datareader.BaseStream.Position += 1;
@@ -39,6 +39,6 @@ public class VfxShaderFileGL : VfxShaderFile
     /// </remarks>
     public override string GetDecompiledFile()
     {
-        return Encoding.UTF8.GetString(this.Bytecode);
+        return Encoding.UTF8.GetString(Bytecode);
     }
 }

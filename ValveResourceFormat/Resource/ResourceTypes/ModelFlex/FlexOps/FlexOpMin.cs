@@ -3,7 +3,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelFlex.FlexOps
     /// <summary>
     /// Flex operation that computes the minimum of two values.
     /// </summary>
-    public class FlexOpMin : FlexOp
+    internal class FlexOpMin : FlexOp
     {
         /// <summary>
         /// Initializes a new instance of the <see cref="FlexOpMin"/> class.
@@ -16,8 +16,8 @@ namespace ValveResourceFormat.ResourceTypes.ModelFlex.FlexOps
         /// </remarks>
         public override void Run(in FlexRuleContext context)
         {
-            var v1 = context.Stack.Pop();
-            var v2 = context.Stack.Pop();
+            var v1 = context.Pop();
+            var v2 = context.Pop();
 
             context.Stack.Push(Math.Min(v1, v2));
         }

@@ -7,10 +7,11 @@
 #include "utils.slang"
 #include "texturing.slang"
 #include "lighting_common.slang"
+#include "shadowmapping.slang"
 
 // DIFFUSE LIGHTING
 
-#if (F_DIFFUSE_WRAP == 1) || (GameVfx_vr_xen_foliage != 0)
+#if (diffuseWrap)
 // idea: what if we included individual features in tiny files per feature. they would all be used in #includes
 #define S_DIFFUSE_WRAP
 
@@ -31,12 +32,16 @@ vec3 diffuseWrapped(vec3 vNormal, vec3 vLightVector)
 
 // Normal Distribution function --------------------------------------
 // D = Normal distribution (Distribution of the microfacets)
+
+// No 1/PI unlike most GGX implementation, s2 lights carry it instead i think.
+// Diffuse is simply NoL rather than albedo/PI, which means lightColor is really E/PI, so specular owes a PI back.
+// Omitting the divide here is that extra PI.
 float D_GGX(float NoH, float roughness)
 {
 	float oneMinusNoHSquared = 1.0 - pow2(NoH);
 	float a = NoH * roughness;
 	float k = min(roughness / (oneMinusNoHSquared + pow2(a)), 453.5); // 453.5 prevents fp16 overflow
-	float d = k * (k * (1.0 / PI));
+	float d = k * k;
 	return d;
 }
 
@@ -69,7 +74,7 @@ float D_AnisoGGX(vec2 roughness, vec3 halfVector, vec3 normal, vec3 tangent, vec
 
     Dots /= vec3(alpha, 1.0);
     float ndf = pow2(dot(Dots, Dots)) * alpha.x * alpha.y;
-    return 1.0 / (PI * max(ndf, 0.0001));
+    return 1.0 / max(ndf, 0.0001); // not normalised to match D_GGX, see the note there
 }
 #endif
 
@@ -104,8 +109,25 @@ vec3 GetRetroReflectiveNormal(float retroReflectivity, vec3 L, vec3 V, vec3 N, v
 
 uniform int F_CLOTH_SHADING; // csgo_character, csgo_complex, csgo_customglove, csgo_textile_layer, vr_complex
 
+#if (secondSpecularLobe)
+    uniform float g_flSecondSpecularLobeGlossiness = 0.423;
+    uniform float g_flSecondSpecularLobeRatio = 0.021;
+#endif
+#if (subsurface)
+    uniform sampler2D g_tDiffuseFalloff; // SrgbRead(true)
+    uniform float g_flCurvatureScale = 1.0;
+
+    #if (subsurfaceSkin)
+        uniform vec3 g_vAmbientNormalSoftness = vec3(0.0);
+        #define NORMAL_SOFTNESS g_vAmbientNormalSoftness
+    #else
+        uniform vec3 g_vNormalSoftness = vec3(0.0);
+        #define NORMAL_SOFTNESS g_vNormalSoftness
+    #endif
+#endif
+
 // BRDF. Layer 1 is the GGX split sum, layer 2 the sheen directional albedo; layer 0 is unused.
-uniform sampler2DArray g_tBRDFLookup;
+uniform sampler2DArray g_tBRDFLookup; // reserved
 
 #define BRDF_LUT_GGX 1.0
 #define BRDF_LUT_SHEEN 2.0
@@ -131,6 +153,8 @@ float V_Neubelt(float NoL, float NoV)
     return saturate(1.0 / max(4.0 * (NoL + NoV - NoL * NoV), 0.00001532));
 }
 
+#define CLOTH_ENERGY_SCALE PI
+
 // Still pass normal due to some effects modifying normal per light
 vec3 specularLighting(vec3 lightVector, vec3 normal, MaterialProperties_t mat, float sheenAlbedoScaling)
 {
@@ -140,7 +164,7 @@ vec3 specularLighting(vec3 lightVector, vec3 normal, MaterialProperties_t mat, f
 
     if (F_RETRO_REFLECTIVE == 1)
     {
-        normal = GetRetroReflectiveNormal(mat.ExtraParams.r, lightVector, mat.ViewDir, normal, halfVector);
+        normal = GetRetroReflectiveNormal(mat.RetroReflectivity, lightVector, mat.ViewDir, normal, halfVector);
     }
 
 	float NoH = saturate(dot(normal, halfVector));
@@ -160,11 +184,19 @@ vec3 specularLighting(vec3 lightVector, vec3 normal, MaterialProperties_t mat, f
 	vec3 F = F_Schlick(VoH, mat.SpecularColor);
     float ndfVis = NDF * Vis;
 
+#if (secondSpecularLobe)
+    float flSecondPerceptualRoughness = mat.IsometricRoughness * g_flSecondSpecularLobeGlossiness;
+    float flSecondRoughness = max(pow2(flSecondPerceptualRoughness), MIN_GGX_ALPHA);
+    float flSecondNdfVis = D_GGX(NoH, flSecondRoughness) * G_SchlickSmithGGX(NoL, NoV, flSecondPerceptualRoughness);
+
+    ndfVis = mix(ndfVis, flSecondNdfVis, g_flSecondSpecularLobeRatio);
+#endif
+
     if (F_CLOTH_SHADING == 1)
     {
         float ClothNDF = D_Charlie(roughness, NoH);
         float ClothVis = V_Neubelt(NoL, NoV);
-        ndfVis = mix(ndfVis, ClothNDF * ClothVis, mat.ClothMask);
+        ndfVis = mix(ndfVis, ClothNDF * ClothVis * CLOTH_ENERGY_SCALE * NoL, mat.ClothMask);
     }
 
     // Sheen is a second lobe over the top, with its own colour and roughness, rather than a
@@ -203,14 +235,75 @@ float GetSheenAlbedoScaling(MaterialProperties_t mat, vec3 lightVector)
     return ClampToPositive(1.0 - sheenMax * directionalAlbedo);
 }
 
+vec3 GetSpecularEnergyCompensation(MaterialProperties_t mat)
+{
+    float flRoughnessSum = mat.Roughness.x + mat.Roughness.y;
+    float flBoost = 0.125 * pow2(pow2(flRoughnessSum)) * saturate(dot(mat.AmbientNormal, mat.ViewDir));
+
+    vec3 vCompensation = vec3(1.0) + mat.SpecularColor * flBoost;
+
+    if (F_CLOTH_SHADING == 1)
+    {
+        vCompensation = mix(vCompensation, vec3(1.0), mat.ClothMask);
+    }
+
+    return vCompensation;
+}
+
+#if (subsurface)
+const float SSS_CURVATURE_RADIUS_MIN_METRES = 0.01;
+const float SSS_CURVATURE_RADIUS_MAX_METRES = 1.0;
+
+const float SSS_CURVATURE_MIN = INCH_TO_M / SSS_CURVATURE_RADIUS_MAX_METRES;
+const float SSS_CURVATURE_MAX = INCH_TO_M / SSS_CURVATURE_RADIUS_MIN_METRES;
+
+vec3 GetSubsurfaceDiffuse(MaterialProperties_t mat, vec3 lightVector, vec3 diffuseLight)
+{
+    #if (F_USE_PER_VERTEX_CURVATURE == 1)
+        float flCurvature = vCurvatureOut * g_flCurvatureScale;
+    #else
+        float flCurvature = GetCurvature(mat.GeometricNormal, mat.PositionWS) * g_flCurvatureScale;
+    #endif
+
+    flCurvature = RemapValClamped(flCurvature, SSS_CURVATURE_MIN, SSS_CURVATURE_MAX, 0.0, 1.0);
+
+    #if (subsurfaceSkin)
+        vec3 vSoftNormal = mat.SoftNormal;
+    #else
+        vec3 vSoftNormal = normalize(mat.Tangent * mat.NormalMap.x - mat.Bitangent * mat.NormalMap.y + mat.GeometricNormal * mat.NormalMap.z);
+    #endif
+
+    float flSoftNoL = dot(vSoftNormal, lightVector);
+
+    vec3 vScatter = saturate(vec3(1.0) - vec3(flSoftNoL));
+    vScatter *= vScatter;
+
+    vec3 vChannelNoL;
+
+    for (int i = 0; i < 3; i++)
+    {
+        vec3 vChannelNormal = normalize(mix(mat.Normal, vSoftNormal, mix(NORMAL_SOFTNESS[i], 1.0, vScatter[i])));
+        vChannelNoL[i] = saturate(dot(vChannelNormal, lightVector));
+    }
+
+    vec3 vFalloff = textureLod(g_tDiffuseFalloff, vec2(flSoftNoL * 0.5 + 0.5, flCurvature), 0.0).rgb * 0.5 - 0.25;
+
+    return mix(diffuseLight, saturate(vChannelNoL + vFalloff), mat.SSSMask);
+}
+#endif
+
 // Calculate PBR shading for a light
 void CalculateShading(inout LightingTerms_t lighting, vec3 lightVector, vec3 lightColor, MaterialProperties_t mat)
 {
 #if defined(S_DIFFUSE_WRAP)
     vec3 diffuseLight = diffuseWrapped(mat.Normal, lightVector);
 #else
-    float diffuseLight = ClampToPositive(dot(mat.Normal, lightVector));
+    vec3 diffuseLight = vec3(ClampToPositive(dot(mat.Normal, lightVector)));
 #endif
+
+    #if (subsurface)
+        diffuseLight = GetSubsurfaceDiffuse(mat, lightVector, diffuseLight);
+    #endif
 
     float sheenAlbedoScaling = GetSheenAlbedoScaling(mat, lightVector);
     diffuseLight *= sheenAlbedoScaling;
@@ -223,6 +316,13 @@ void CalculateShading(inout LightingTerms_t lighting, vec3 lightVector, vec3 lig
     #if (F_TRANSMISSIVE_BACKFACE_NDOTL == 1)
         float transmissiveLight = ClampToPositive(-dot(mat.Normal, lightVector)); // Light passing through the back face
         lighting.TransmissiveDirect += transmissiveLight * lightColor * mat.TransmissiveColor;
+    #endif
+
+    #if (subsurfaceSkin)
+        float flTransmissionWrap = saturate(0.5 - 0.5 * dot(mat.GeometricNormal, lightVector));
+        float flTransmissionDepth = CalculateSunShadowThickness(mat.PositionWS) * g_flTransmissionFalloff;
+
+        lighting.TransmissiveDirect += exp(-pow2(flTransmissionDepth)) * flTransmissionWrap * lightColor * mat.TransmissiveColor;
     #endif
 }
 

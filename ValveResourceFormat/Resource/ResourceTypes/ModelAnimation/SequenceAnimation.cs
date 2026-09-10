@@ -28,6 +28,12 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
         public bool Delta { get; init; }
 
         /// <summary>
+        /// Gets a value indicating whether the animation graph plays this animation additively
+        /// (<c>m_bAnimGraphAdditive</c>, present in newer engine branches).
+        /// </summary>
+        public bool AnimGraphAdditive { get; }
+
+        /// <summary>
         /// Gets a value indicating whether this animation is in world space.
         /// </summary>
         public bool Worldspace { get; init; }
@@ -44,6 +50,12 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
 
         private AnimationFrameBlock[] FrameBlocks { get; } = [];
         private AnimationSegmentDecoder?[] SegmentArray { get; } = [];
+
+        private bool? hasFlexData;
+
+        /// <inheritdoc/>
+        public override bool HasFlexData => hasFlexData ??=
+            Array.Exists(SegmentArray, segment => segment?.ChannelAttribute == AnimationChannelAttribute.Data);
 
         /// <summary>
         /// Gets the movement data for this animation.
@@ -91,7 +103,6 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
 
         private SequenceAnimation(KVObject animDesc, AnimationSegmentDecoder?[] segmentArray)
         {
-            // Get animation properties
             Name = animDesc.GetStringProperty("m_name");
             Fps = animDesc.GetFloatProperty("fps");
             SegmentArray = segmentArray;
@@ -100,7 +111,9 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             IsLooping = flags.GetBooleanProperty("m_bLooping");
             Hidden = flags.GetBooleanProperty("m_bHidden");
             Delta = flags.GetBooleanProperty("m_bDelta");
+            AnimGraphAdditive = flags.GetBooleanProperty("m_bAnimGraphAdditive");
             Worldspace = flags.GetBooleanProperty("m_bLegacyWorldspace");
+            IsAdditive = Delta || AnimGraphAdditive;
 
             var pData = animDesc.GetSubCollection("m_pData");
             FrameCount = pData.GetInt32Property("m_nFrames");
@@ -144,12 +157,18 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             Name = seqDesc.GetStringProperty("m_sName");
 
             var seqFlags = seqDesc.GetSubCollection("m_flags");
+            var animFlags = animDesc.GetSubCollection("m_flags");
+
             IsLooping = seqFlags.GetBooleanProperty("m_bLooping");
             Hidden = seqFlags.GetBooleanProperty("m_bHidden");
-            Delta = seqFlags.GetBooleanProperty("m_bLegacyDelta");
+            Delta = seqFlags.GetBooleanProperty("m_bLegacyDelta") || animFlags.GetBooleanProperty("m_bDelta");
+
             Worldspace = seqFlags.GetBooleanProperty("m_bLegacyWorldspace");
             Realtime = seqFlags.GetBooleanProperty("m_bLegacyRealtime");
             Autoplay = seqFlags.GetBooleanProperty("m_bAutoplay");
+            AnimGraphAdditive = animFlags.GetBooleanProperty("m_bAnimGraphAdditive");
+
+            IsAdditive = Delta || AnimGraphAdditive;
 
             // Activities from sequence descriptor
             Activities = seqDesc.GetArray("m_activityArray")
@@ -188,7 +207,6 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                 .Select(x => new AnimationEvent(x))
                 .ToArray();
 
-            // Auto layers
             var autoLayerArray = seqDesc.GetArray("m_autoLayerArray");
             AutoLayers = new AnimationAutoLayer[autoLayerArray.Count];
             for (var i = 0; i < autoLayerArray.Count; i++)
@@ -196,7 +214,6 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                 AutoLayers[i] = new AnimationAutoLayer(autoLayerArray[i]);
             }
 
-            // Fetch
             var fetch = seqDesc.GetSubCollection("m_fetch");
             Fetch = new AnimationFetch(fetch);
 
@@ -315,7 +332,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             var segmentArray = BuildSegmentArray(animationData, decodeKey, skeleton, flexControllers);
 
             return animArray
-                .Select(anim => new SequenceAnimation(anim, segmentArray))
+                .Select(anim => new SequenceAnimation(anim, segmentArray) { TargetSkeletonName = skeleton.Name })
                 .ToArray();
         }
 
@@ -338,7 +355,6 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                 return [];
             }
 
-            // Build segment array from animation data
             var segmentArray = BuildSegmentArray(animationData, decodeKey, skeleton, flexControllers);
             var sequenceNameArray = sequenceData.GetArray<string>("m_localSequenceNameArray");
 
@@ -381,7 +397,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                 var seqName = seqDesc.GetStringProperty("m_sName");
                 processedAnimNames.Add(seqName);
 
-                animations.Add(new SequenceAnimation(seqDesc, animDesc, segmentArray));
+                animations.Add(new SequenceAnimation(seqDesc, animDesc, segmentArray) { TargetSkeletonName = skeleton.Name });
             }
 
             // Add remaining animations not already output as sequences
@@ -394,7 +410,7 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
                     continue;
                 }
 
-                animations.Add(new SequenceAnimation(anim, segmentArray));
+                animations.Add(new SequenceAnimation(anim, segmentArray) { TargetSkeletonName = skeleton.Name });
             }
 
             return animations;
@@ -493,10 +509,86 @@ namespace ValveResourceFormat.ResourceTypes.ModelAnimation
             t = Math.Min(1f, elapsedTime / movementDuration);
         }
 
+        private enum AnimatedChannels : byte
+        {
+            None = 0,
+            Position = 1,
+            Angle = 2,
+        }
+
+        /// <summary>
+        /// Sequences decode into a bind-pose frame and only write the channels they animate (see
+        /// <see cref="BuildAnimatedChannels"/>), so a channel the animation leaves alone holds the bind
+        /// pose rather than a delta, and has to be neutralized before it is composed onto a pose.
+        /// </summary>
+        public override FrameBone GetAdditiveDelta(int boneIndex, FrameBone bone)
+        {
+            var animated = animatedChannelsCache ??= BuildAnimatedChannels();
+            var channels = boneIndex < animated.Length ? animated[boneIndex] : AnimatedChannels.None;
+
+            var position = (channels & AnimatedChannels.Position) != 0 ? bone.Position : Vector3.Zero;
+            var angle = (channels & AnimatedChannels.Angle) != 0 ? bone.Angle : Quaternion.Identity;
+
+            // Sequence scale is authored around one rather than around zero, so the delta is what it is
+            // over one. That is also zero for a bone this animation does not scale, masking it for free.
+            return new FrameBone(position, bone.Scale - 1f, angle);
+        }
+
+        private AnimatedChannels[]? animatedChannelsCache;
+
+        /// <summary>
+        /// Returns, per bone, which transform channels this animation actually writes, derived from
+        /// the segment decoders' bone targets and channel attributes. Bones past the end of it are
+        /// animated by nothing.
+        /// </summary>
+        private AnimatedChannels[] BuildAnimatedChannels()
+        {
+            var boneCount = 0;
+
+            foreach (var segment in SegmentArray)
+            {
+                foreach (var boneIndex in segment?.RemapTable ?? [])
+                {
+                    boneCount = Math.Max(boneCount, boneIndex + 1);
+                }
+            }
+
+            var animated = new AnimatedChannels[boneCount];
+
+            foreach (var segment in SegmentArray)
+            {
+                if (segment is null)
+                {
+                    continue;
+                }
+
+                var channel = segment.ChannelAttribute switch
+                {
+                    AnimationChannelAttribute.Position => AnimatedChannels.Position,
+                    AnimationChannelAttribute.Angle => AnimatedChannels.Angle,
+                    _ => AnimatedChannels.None,
+                };
+
+                if (channel == AnimatedChannels.None)
+                {
+                    continue;
+                }
+
+                foreach (var boneIndex in segment.RemapTable)
+                {
+                    if (boneIndex >= 0)
+                    {
+                        animated[boneIndex] |= channel;
+                    }
+                }
+            }
+
+            return animated;
+        }
+
         /// <inheritdoc/>
         public override void DecodeFrame(Frame outFrame)
         {
-            // Read all frame blocks
             foreach (var frameBlock in FrameBlocks)
             {
                 // Only consider blocks that actually contain info for this frame

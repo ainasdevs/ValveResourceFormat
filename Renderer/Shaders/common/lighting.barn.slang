@@ -23,18 +23,18 @@ struct BarnLightConstants
     mat3x4 m_mBarnIlluminationFromWorld;
 };
 
-layout(std430, binding = 12) readonly buffer BarnLightBuffer {
+layout(std430, binding = 11) readonly buffer BarnLightBuffer {
     BarnLightConstants g_BarnLights[];
 };
 
-int g_nBarnLightsIterated = 0;
+uint g_nBarnLightsIterated = 0u;
 
 // Game uses Texture3D
-uniform layout(binding = 15) sampler2DArray g_tLightCookieTexture; // ClampToBorder
-uniform layout(binding = 16) sampler2DArray g_tLightCookieTextureWrap; // Wrap
+uniform sampler2DArray g_tLightCookieTexture; // ClampToBorder, reserved
+uniform sampler2DArray g_tLightCookieTextureWrap; // Wrap, reserved
 
 // We currently have a separate shadow map for all barn lights
-uniform layout(binding = 14) sampler2DShadow g_tBarnLightShadowDepth;
+uniform sampler2DShadow g_tBarnLightShadowDepth; // reserved
 
 float ComputeBarnLightShadow(vec2 shadowUV, float shadowRef)
 {
@@ -69,14 +69,26 @@ float ComputeBarnLightShadow_PCF_3x3_Gaussian(vec2 shadowUV, float shadowRef, ve
 
 void CalculateBarnLighting(inout LightingTerms_t lighting, in MaterialProperties_t mat, vec4 bakedShadow)
 {
-    uvec4 cullBits = GetCullMaskWords(GetBarnLightCullMasks(mat.PositionWS));
+    CullMasks_t masks = GetBarnLightCullMasks(mat.PositionWS);
 
-    for (uint i = 0; i < g_nNumBarnLights; i++)
+    uint word = 0u;
+    uint mask = 0u;
+
+    while (g_nBarnLightsIterated < g_nNumBarnLights)
     {
-        if (!IsCullBitSet(cullBits, i))
+        while (mask == 0u)
         {
-            continue;
+            if (word >= masks.m_nWords)
+            {
+                return;
+            }
+
+            mask = GetCullMaskWord(masks, word, GetCullLiveMask(word, g_nNumBarnLights));
+            word++;
         }
+
+        uint i = uint(findLSB(mask)) + ((word - 1u) * 32u);
+        mask &= mask - 1u;
 
         g_nBarnLightsIterated++;
 
@@ -198,8 +210,8 @@ void CalculateBarnLighting(inout LightingTerms_t lighting, in MaterialProperties
                 float p = 2.0 / roundness;
                 float np = -0.5 * roundness;
                 float innerDist = (barnLight.m_vBarnLightCookieParameters.x * barnLight.m_vBarnLightCookieParameters.y)
-                    * pow(max(pow(barnLight.m_vBarnLightCookieParameters.y * absNdc.x, p) + pow(barnLight.m_vBarnLightCookieParameters.x * absNdc.y, p), 1.175e-38), np);
-                float outerDist = pow(max(pow(absNdc.x, p) + pow(absNdc.y, p), 1.175e-38), np);
+                    * pow(max(SafePow(barnLight.m_vBarnLightCookieParameters.y * absNdc.x, p) + SafePow(barnLight.m_vBarnLightCookieParameters.x * absNdc.y, p), 1.175e-38), np);
+                float outerDist = pow(max(SafePow(absNdc.x, p) + SafePow(absNdc.y, p), 1.175e-38), np);
 
                 softEdge = innerDist < outerDist ? smoothstep(outerDist, innerDist, 1.0) : float(outerDist > 1.0);
             }
@@ -256,7 +268,7 @@ bool GetBarnLightTileHeatmap(out vec3 color)
 {
     const float kBusyTile = 12.0;
 
-    if (g_nBarnLightsIterated == 0)
+    if (g_nBarnLightsIterated == 0u)
     {
         color = vec3(0.0);
         return false;

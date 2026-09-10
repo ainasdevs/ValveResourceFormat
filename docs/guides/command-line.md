@@ -10,14 +10,14 @@ The binary name is `Source2Viewer-CLI`.
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Input**                    |                                                                                                                                                                 |
 | `--input` (or `-i`)          | Input file to be processed. With no additional arguments, a summary of the input(s) will be displayed.                                                          |
-| `--recursive`                | If specified and given input is a folder, all subdirectories will be scanned too.                                                                              |
+| `--recursive`                | If specified and given input is a folder, all subdirectories will be scanned too.                                                                               |
 | `--recursive_vpk`            | If specified along with `--recursive`, will also recurse into VPK archives.                                                                                     |
 | `--vpk_extensions` (or `-e`) | File extension(s) filter, example: "vcss_c,vjs_c,vxml_c".                                                                                                       |
 | `--vpk_filepath` (or `-f`)   | File path filter(s), supports comma-separated values. Example: "panorama/,sounds/" or "scripts/items/items_game.txt".                                           |
 | `--vpk_cache`                | Use cached VPK manifest to keep track of updates. Only changed files will be written to disk.                                                                   |
 | `--vpk_verify`               | Verify checksums and signatures.                                                                                                                                |
 | **Output**                   |                                                                                                                                                                 |
-| `--output` (or `-o`)         | Output path to write to. If input is a folder (or a VPK), this should be a folder.                                                                              |
+| `--output` (or `-o`)         | Output path to write to. Treated as a folder when it is an existing folder, ends with a path separator, or has no file extension; otherwise it names the file to write, which requires the input to be a single file or `--vpk_filepath` to match exactly one file. |
 | `--all` (or `-a`)            | Print the content of each resource block in the file.                                                                                                           |
 | `--block` (or `-b`)          | Print the content of a specific block, example: DATA, RERL, REDI, NTRO.                                                                                         |
 | `--vpk_decompile` (or `-d`)  | Decompile supported resource files.                                                                                                                             |
@@ -35,6 +35,7 @@ The binary name is `Source2Viewer-CLI`.
 | `--tools_asset_info_short`   | Whether to print only file paths for tools_asset_info files.                                                                                                    |
 | **Other**                    |                                                                                                                                                                 |
 | `--threads`                  | If higher than 1, files will be processed concurrently.                                                                                                         |
+| `--game`                     | Path to a `gameinfo.gi` file to load game search paths from. Useful when the input file is not located inside a game folder.                                    |
 | `--version`                  | Show version information.                                                                                                                                       |
 | `--help`                     | Show help information.                                                                                                                                          |
 

@@ -4,12 +4,14 @@ using OpenTK.Graphics.OpenGL;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
 using OpenTK.Windowing.GraphicsLibraryFramework;
-using SteamDatabase.ValvePak;
+using ValvePak;
+using ValveResourceFormat;
+using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Input;
-using ValveResourceFormat.Renderer.Utils;
 using ValveResourceFormat.Renderer.World;
+using ValveResourceFormat.Utils;
 using Vector2 = System.Numerics.Vector2;
 using Vector3 = System.Numerics.Vector3;
 
@@ -90,6 +92,8 @@ internal class RenderTestWindow : GameWindow
     {
         base.OnLoad();
 
+        rendererContext.Device.CreateContext().Begin();
+
         GLEnvironment.Initialize(rendererContext.Logger);
         GLEnvironment.SetDefaultRenderState();
 
@@ -102,6 +106,7 @@ internal class RenderTestWindow : GameWindow
 
         // Lock cursor for mouse look
         CursorState = CursorState.Grabbed;
+        RawMouseInput = GLFW.RawMouseMotionSupported();
         isCursorLocked = true;
     }
 
@@ -274,8 +279,8 @@ internal class RenderTestWindow : GameWindow
 
         // Create framebuffer for rendering
         framebuffer = Framebuffer.Prepare("MainFramebuffer", 4, 4, 4,
-            new(PixelInternalFormat.Rgba16f, PixelFormat.Rgba, PixelType.HalfFloat),
-            Framebuffer.DepthAttachmentFormat.Depth32FStencil8);
+            ImageFormat.RGBA16161616F,
+            ImageFormat.D32);
         framebuffer.Initialize();
 
         SceneRenderer.Initialize();

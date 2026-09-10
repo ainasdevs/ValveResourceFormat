@@ -24,4 +24,49 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Selection outline pass.</summary>
         Outline,
     }
+
+    /// <summary>
+    /// Which target a pass draws into, for the layers that share one.
+    /// </summary>
+    public enum RenderLayer
+    {
+        /// <summary>The scene itself.</summary>
+        Scene,
+
+        /// <summary>The water effects map the fancy water shader samples.</summary>
+        WaterEffects,
+
+        /// <summary>Effects rendered in the bloom buffer.</summary>
+        Bloom,
+    }
+
+    /// <summary>
+    /// Per node flags about their desired render passes.
+    /// </summary>
+    [Flags]
+    public enum CustomRenderPasses
+    {
+        /// <summary>Draws in no pass at all.</summary>
+        None = 0,
+
+        /// <summary>Draws in <see cref="RenderPass.Opaque"/>.</summary>
+        Opaque = 1 << 0,
+
+        /// <summary>Draws in <see cref="RenderPass.Translucent"/>.</summary>
+        Translucent = 1 << 1,
+
+        /// <summary>
+        /// Routes the node's drawing into the dedicated first-person viewmodel layer.
+        /// </summary>
+        Viewmodel = 1 << 2,
+
+        /// <summary>Draws in the translucent pass, into the water effects map instead of the scene.</summary>
+        WaterEffects = 1 << 3,
+
+        /// <summary>Draws in <see cref="RenderPass.DepthOnly"/> too, and so casts a shadow.</summary>
+        DepthOnly = 1 << 4,
+
+        /// <summary>Draws in the opaque and translucent passes, the default for a node that draws itself.</summary>
+        Default = Opaque | Translucent,
+    }
 }

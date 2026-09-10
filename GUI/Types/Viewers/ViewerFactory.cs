@@ -1,7 +1,7 @@
 using System.IO;
 using System.Threading.Tasks;
 using GUI.Utils;
-using SteamDatabase.ValvePak;
+using ValvePak;
 using ValveResourceFormat.IO;
 
 namespace GUI.Types.Viewers;
@@ -135,6 +135,12 @@ static class ViewerFactory
         else if (SpirvBinary.IsAccepted(magic))
         {
             var viewer = new SpirvBinary(vrfGuiContext);
+            await viewer.LoadAsync(stream).ConfigureAwait(false);
+            return viewer;
+        }
+        else if (TextKeyValues3.IsAccepted(magic, magicResourceVersion))
+        {
+            var viewer = new TextKeyValues3(vrfGuiContext);
             await viewer.LoadAsync(stream).ConfigureAwait(false);
             return viewer;
         }

@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -20,10 +19,13 @@ namespace ValveResourceFormat.Renderer
         {
             public const int Size = 6;
 
-            public Vector2 Position;
-            public Vector2 TexCoord;
-            public float Depth;
-            public Color32 Color;
+            [VertexAttribute(VertexSlot.Position)] public Vector2 Position;
+            [VertexAttribute(VertexSlot.TexCoord)] public Vector2 TexCoord;
+            [VertexAttribute("vDEPTH")] public float Depth;
+            [VertexAttribute(VertexSlot.Color)] public Color32 Color;
+
+            /// <summary>The layout of this vertex, for creating vertex array objects.</summary>
+            public static readonly VertexInputLayout InputLayout = VertexInputLayout.FromStruct<Vertex>();
         }
 
         /// <summary>
@@ -240,46 +242,16 @@ namespace ValveResourceFormat.Renderer
             using var fontStream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Renderer.Resources.jetbrains_mono_msdf.png");
             using var bitmap = SKBitmap.Decode(fontStream);
 
-            shader = RendererContext.ShaderLoader.LoadShader("vrf.font_msdf");
+            shader = RendererContext.ShaderLoader.LoadShader("font_msdf");
 
-            fontTexture = new RenderTexture(TextureTarget.Texture2D, (int)AtlasSize, (int)AtlasSize, 1, 1);
-            fontTexture.SetWrapMode(TextureWrapMode.ClampToEdge);
+            fontTexture = new RenderTexture(TextureTarget.Texture2D, (int)AtlasSize, (int)AtlasSize, 1, 1, nameof(TextRenderer));
+            fontTexture.SetWrapMode(RsTextureAddressMode.Clamp);
             fontTexture.SetFiltering(TextureMinFilter.Linear, TextureMagFilter.Linear);
             GL.TextureStorage2D(fontTexture.Handle, 1, SizedInternalFormat.Rgba8, bitmap.Width, bitmap.Height);
             GL.TextureSubImage2D(fontTexture.Handle, 0, 0, 0, bitmap.Width, bitmap.Height, PixelFormat.Bgra, PixelType.UnsignedByte, bitmap.GetPixels());
 
-            // Create VAO
-            var attributes = new List<(string Name, int Size, VertexAttribType Type, bool Normalized)>
-            {
-                ("vPOSITION", 2, VertexAttribType.Float, false),
-                ("vTEXCOORD", 2, VertexAttribType.Float, false),
-                ("vDEPTH", 1, VertexAttribType.Float, false),
-                ("vCOLOR", 4, VertexAttribType.UnsignedByte, true),
-            };
-
-            var stride = sizeof(float) * Vertex.Size;
-            var offset = 0;
-
-            GL.CreateVertexArrays(1, out vao);
-            GL.CreateBuffers(1, out bufferHandle);
-            GL.VertexArrayVertexBuffer(vao, 0, bufferHandle, 0, stride);
-            GL.VertexArrayElementBuffer(vao, RendererContext.MeshBufferCache.QuadIndices.GLHandle);
-
-            foreach (var (name, size, type, normalized) in attributes)
-            {
-                var attributeLocation = GL.GetAttribLocation(shader.Program, name);
-                GL.EnableVertexArrayAttrib(vao, attributeLocation);
-                GL.VertexArrayAttribFormat(vao, attributeLocation, size, type, normalized, offset);
-                GL.VertexArrayAttribBinding(vao, attributeLocation, 0);
-                offset += sizeof(float) * size;
-            }
-
-#if DEBUG
-            var objectLabel = nameof(TextRenderer);
-            GL.ObjectLabel(ObjectLabelIdentifier.VertexArray, vao, objectLabel.Length, objectLabel);
-            GL.ObjectLabel(ObjectLabelIdentifier.Buffer, bufferHandle, objectLabel.Length, objectLabel);
-            GL.ObjectLabel(ObjectLabelIdentifier.Texture, fontTexture.Handle, objectLabel.Length, objectLabel);
-#endif
+            bufferHandle = GraphicsDevice.CreateBuffer(nameof(TextRenderer));
+            vao = Vertex.InputLayout.CreateVertexArray(nameof(TextRenderer), bufferHandle, RendererContext.MeshBufferCache.QuadIndices.GLHandle);
         }
 
         /// <summary>Projects a 3D world position to screen space and queues the text for rendering.</summary>
@@ -387,12 +359,11 @@ namespace ValveResourceFormat.Renderer
 
             PerfStats.Active.SuspendTriangleCounter();
 
-            verticesSize *= Vertex.Size * 4;
-            var vertexBuffer = ArrayPool<float>.Shared.Rent(verticesSize);
+            verticesSize *= 4;
 
-            try
+            using (var vertexBuffer = new RentedBuffer<Vertex>(verticesSize))
             {
-                var vertices = MemoryMarshal.Cast<float, Vertex>(vertexBuffer.AsSpan());
+                var vertices = vertexBuffer.Span;
                 var i = 0;
 
                 foreach (var textRenderRequest in TextRenderRequests)
@@ -484,23 +455,16 @@ namespace ValveResourceFormat.Renderer
 
                         x += metrics.Advance * textRenderRequest.Scale;
                     }
-
                 }
 
                 verticesSize = i * Vertex.Size * sizeof(float);
-                GL.NamedBufferData(bufferHandle, verticesSize, vertexBuffer, BufferUsageHint.DynamicDraw);
+                GL.NamedBufferData(bufferHandle, verticesSize, vertexBuffer.ByteArray, BufferUsageHint.DynamicDraw);
             }
-            finally
-            {
-                ArrayPool<float>.Shared.Return(vertexBuffer);
-            }
-
-            GL.Disable(EnableCap.DepthTest);
-            GL.Enable(EnableCap.Blend);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
 
             Debug.Assert(shader != null);
             Debug.Assert(fontTexture != null);
+
+            using var textState = GraphicsContext.RenderState.Scope(depthTest: false, blend: true);
 
             shader.Use();
             shader.SetUniform4x4("transform", Matrix4x4.CreateOrthographicOffCenter(0f, camera.WindowSize.X, camera.WindowSize.Y, 0f, -100f, 100f));
@@ -508,16 +472,13 @@ namespace ValveResourceFormat.Renderer
 
             if (sceneDepth != null)
             {
-                shader.SetTexture(1, "g_tSceneDepth", sceneDepth);
+                shader.SetTexture((int)ReservedTextureSlots.SceneDepth, "g_tSceneDepth", sceneDepth);
             }
 
-            shader.SetUniform1("g_fRange", TextureRange);
+            shader.SetUniform("g_fRange", TextureRange);
 
-            GL.BindVertexArray(vao);
+            VertexArray.Bind(vao, shader);
             GL.DrawElements(PrimitiveType.Triangles, letters * 6, DrawElementsType.UnsignedShort, 0);
-
-            GL.Disable(EnableCap.Blend);
-            GL.Enable(EnableCap.DepthTest);
 
             PerfStats.Active.ResumeTriangleCounter();
 

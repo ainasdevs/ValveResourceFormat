@@ -38,16 +38,13 @@ namespace ValveResourceFormat.Renderer
             /// <summary>Gets whether this clip uses manual weight blending.</summary>
             public bool IsManualBlend => BlendTime == -1;
 
-            /// <summary>Gets or sets the current frame index.</summary>
+            /// <summary>Gets or sets the current frame index within the cycle being played.</summary>
             public int Frame
             {
                 get
                 {
-                    if (Animation.FrameCount > 1)
-                    {
-                        return (int)MathF.Round(Time * Animation.Fps) % Animation.FrameCount;
-                    }
-                    return 0;
+                    var (_, frame, remainder) = Animation.GetCyclePosition(Time);
+                    return remainder < 0.5f ? frame : frame + 1;
                 }
                 set
                 {
@@ -69,6 +66,7 @@ namespace ValveResourceFormat.Renderer
         private PlaybackClip? activeClip;
         private PlaybackClip? previousClip;
         private readonly Dictionary<string, PlaybackClip> clips = [];
+        private const string WarpSuffix = ".warp";
         private readonly Frame BlendedFrame;
         private float currentBlendTime;
 
@@ -119,7 +117,6 @@ namespace ValveResourceFormat.Renderer
                 return;
             }
 
-            // Update time for all clips
             foreach (var clip in clips.Values)
             {
                 if (!clip.IsPaused && clip.Animation.FrameCount > 1)
@@ -222,7 +219,6 @@ namespace ValveResourceFormat.Renderer
                 return null;
             }
 
-            // Check if blending is needed
             var needsBlending = false;
             foreach (var clip in clips.Values)
             {
@@ -256,7 +252,6 @@ namespace ValveResourceFormat.Renderer
                     ? clip.Weight
                     : clip.Weight / (totalWeight + clip.Weight);
 
-                // Apply bone mask if specified
                 Half[]? boneMask = null;
                 if (!string.IsNullOrEmpty(clip.BoneMask))
                 {
@@ -269,7 +264,7 @@ namespace ValveResourceFormat.Renderer
                     var weightedBlendFactor = blendFactor * boneMaskWeight;
 
                     BlendedFrame.Bones[i] = clip.IsAdditive
-                        ? BlendedFrame.Bones[i].BlendAdd(frame.Bones[i], weightedBlendFactor)
+                        ? BlendedFrame.Bones[i].BlendAdd(clip.Animation.GetAdditiveDelta(i, frame.Bones[i]), weightedBlendFactor)
                         : BlendedFrame.Bones[i].Blend(frame.Bones[i], weightedBlendFactor);
                 }
 
@@ -316,22 +311,29 @@ namespace ValveResourceFormat.Renderer
         /// <param name="animation">The animation to transition to.</param>
         /// <param name="blendTime">The blend time in seconds. 0 for instant transition, -1 for manual blending.</param>
         /// <param name="looping">Whether the clip should loop when reaching the end.</param>
-        private void TransitionToClip(Animation animation, float blendTime, bool looping)
+        /// <param name="warp">Whether re-entering the animation already playing should cross
+        /// over into a second instance of it rather than restarting it in place.</param>
+        private void TransitionToClip(Animation animation, float blendTime, bool looping, bool warp)
         {
             var animName = animation.Name;
+
+            if (warp && blendTime > 0f && activeClip?.Animation == animation)
+            {
+                animName = clips.TryGetValue(animName, out var primary) && primary == activeClip
+                    ? animName + WarpSuffix
+                    : animName;
+            }
 
             // Check if clip already exists
             if (!clips.TryGetValue(animName, out var newClip))
             {
-                var isAdditive = animation.IsAdditive;
-                newClip = new PlaybackClip(animation) { Looping = looping, BlendTime = blendTime, IsAdditive = isAdditive };
+                newClip = new PlaybackClip(animation) { Looping = looping, BlendTime = blendTime, IsAdditive = animation.IsAdditive };
                 clips[animName] = newClip;
 
                 PrewarmAnimationSounds(animation);
             }
             else
             {
-                // Update existing clip properties
                 newClip.Looping = looping;
                 newClip.BlendTime = blendTime;
 
@@ -339,7 +341,6 @@ namespace ValveResourceFormat.Renderer
                 newClip.Frame = 0;
             }
 
-            // Handle blending
             if (activeClip == newClip)
             {
                 // Re-setting the same animation should not create a self-blend transition.
