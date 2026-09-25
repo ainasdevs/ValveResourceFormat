@@ -7,6 +7,7 @@ using ValveResourceFormat;
 using ValveResourceFormat.CompiledShader;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Utils;
+using Vortice.SPIRV;
 using static ValveResourceFormat.CompiledShader.ShaderUtilHelpers;
 
 namespace Tests.Formats
@@ -517,6 +518,147 @@ namespace Tests.Formats
 
             var reference = await File.ReadAllTextAsync(referencePath);
             await Assert.That(code).IsEqualTo(reference).IgnoringWhitespace().Because("Spirv reflection output does not match reference.");
+        }
+
+        [Test]
+        public async Task TestSpirvReflectionUsesSelectedDynamicComboContext()
+        {
+            if (!IsSpirvCrossAvailable())
+            {
+                Skip.Test("There are no native binaries for SPIR-V on arm linux yet.");
+                return;
+            }
+
+            var path = Path.Combine(ShadersDir, "vcs68_tower_force_field_vulkan_40_ps.vcs");
+            using var shader = new VfxProgramData();
+            shader.Read(path);
+
+            var staticCombo = shader.GetStaticCombo(1);
+            var source = (VfxShaderFileVulkan)staticCombo.ShaderFiles[1];
+            var selectedCombo = staticCombo.DynamicComboRenderStates[0];
+            staticCombo.DynamicComboRenderStates[0] = new VfxRenderStateInfo(
+                selectedCombo.DynamicComboId,
+                source.ShaderFileId,
+                selectedCombo.ShaderFileOffset);
+
+            var names = new SpirvNameMap();
+            ShaderSpirvReflection.ReflectSpirv(source, Vortice.SpirvCross.Backend.GLSL, out var code,
+                names, selectedCombo.DynamicComboId);
+
+            using (Assert.Multiple())
+            {
+                await Assert.That(names.Names.Values).DoesNotContain("g_tGBufferDepth");
+                await Assert.That(names.Names.Values).Contains("undetermined");
+                await Assert.That(code).DoesNotContain("// Dynamic combos:");
+            }
+        }
+
+        [Test]
+        public async Task TestSpirvReflectionIncludesNonzeroDynamicComboValues()
+        {
+            if (!IsSpirvCrossAvailable())
+            {
+                Skip.Test("There are no native binaries for SPIR-V on arm linux yet.");
+                return;
+            }
+
+            var path = Path.Combine(ShadersDir, "vcs68_tower_force_field_vulkan_40_ps.vcs");
+            using var shader = new VfxProgramData();
+            shader.Read(path);
+
+            var staticCombo = shader.GetStaticCombo(1);
+            var selectedCombo = staticCombo.DynamicComboRenderStates[1];
+            var source = (VfxShaderFileVulkan)staticCombo.ShaderFiles[selectedCombo.ShaderFileId];
+            var names = new SpirvNameMap();
+
+            ShaderSpirvReflection.ReflectSpirv(source, Vortice.SpirvCross.Backend.GLSL, out var code,
+                names, selectedCombo.DynamicComboId);
+
+            using (Assert.Multiple())
+            {
+                await Assert.That(names.Names.Values).Contains("g_tGBufferDepth");
+                await Assert.That(code).Contains("// Dynamic combos: D_DEPTH_FEATHERING");
+            }
+        }
+
+        [Test]
+        public async Task TestSpirvReflectionCanEmitStandardGlsl()
+        {
+            if (!IsSpirvCrossAvailable())
+            {
+                Skip.Test("There are no native binaries for SPIR-V on arm linux yet.");
+                return;
+            }
+
+            const string ShaderFile = "vcs68_tower_force_field_vulkan_40_ps.vcs";
+            var path = Path.Combine(ShadersDir, ShaderFile);
+            using var shader = new VfxProgramData();
+            shader.Read(path);
+
+            var staticCombo = shader.GetStaticCombo(1);
+            var dynamicCombo = staticCombo.DynamicComboRenderStates[1];
+            var source = (VfxShaderFileVulkan)staticCombo.ShaderFiles[dynamicCombo.ShaderFileId];
+
+            ShaderSpirvReflection.ReflectSpirv(source, Vortice.SpirvCross.Backend.GLSL, out var readableCode);
+            ShaderSpirvReflection.ReflectSpirv(source, Vortice.SpirvCross.Backend.GLSL, out var standardCode, readable: false);
+            ShaderSpirvReflection.ReflectSpirv(source, Vortice.SpirvCross.Backend.GLSL, out var flattenedStandardCode,
+                readable: false, flattenUniformBuffers: true);
+
+            readableCode = readableCode.Replace(StringToken.VRF_GENERATOR, "VRF-TEST", StringComparison.Ordinal);
+            var reference = await File.ReadAllTextAsync(Path.Combine(ShadersDir, "SpirvOutput", $"{ShaderFile}.glsl"));
+
+            using (Assert.Multiple())
+            {
+                await Assert.That(readableCode).IsEqualTo(reference).IgnoringWhitespace();
+                await Assert.That(standardCode).DoesNotContain("saturate(");
+                await Assert.That(standardCode).Contains("uniform PerViewConstantBuffer_t");
+                await Assert.That(flattenedStandardCode).DoesNotContain("saturate(");
+                await Assert.That(flattenedStandardCode).DoesNotContain("uniform PerViewConstantBuffer_t");
+            }
+        }
+
+        [Test]
+        public async Task TestSpirvReflectionRejectsUnknownEntryPoint()
+        {
+            if (!IsSpirvCrossAvailable())
+            {
+                Skip.Test("There are no native binaries for SPIR-V on arm linux yet.");
+                return;
+            }
+
+            var path = Path.Combine(ShadersDir, "vcs68_tower_force_field_vulkan_40_ps.vcs");
+            using var shader = new VfxProgramData();
+            shader.Read(path);
+            var staticCombo = shader.GetStaticCombo(1);
+            var dynamicCombo = staticCombo.DynamicComboRenderStates[1];
+            var source = (VfxShaderFileVulkan)staticCombo.ShaderFiles[dynamicCombo.ShaderFileId];
+
+            var success = ShaderSpirvReflection.ReflectSpirvEntryPoint(source, Vortice.SpirvCross.Backend.GLSL, out var error,
+                "missing_entry_point", SpvExecutionModel.Fragment, selectedDynamicComboId: dynamicCombo.DynamicComboId);
+
+            using (Assert.Multiple())
+            {
+                await Assert.That(success).IsFalse();
+                await Assert.That(error).Contains("Entry point");
+            }
+        }
+
+        [Test]
+        [Arguments(1L)]
+        [Arguments(long.MaxValue)]
+        public async Task TestSpirvReflectionRejectsDynamicComboForDifferentPayload(long selectedDynamicComboId)
+        {
+            var path = Path.Combine(ShadersDir, "vcs68_tower_force_field_vulkan_40_ps.vcs");
+            using var shader = new VfxProgramData();
+            shader.Read(path);
+
+            var staticCombo = shader.GetStaticCombo(1);
+            var source = (VfxShaderFileVulkan)staticCombo.ShaderFiles[0];
+
+            var exception = await Assert.That(() => ShaderSpirvReflection.ReflectSpirv(source, Vortice.SpirvCross.Backend.GLSL,
+                out _, selectedDynamicComboId: selectedDynamicComboId)).Throws<ArgumentOutOfRangeException>();
+
+            await Assert.That(exception!.ParamName).IsEqualTo("selectedDynamicComboId");
         }
 
         [Test]

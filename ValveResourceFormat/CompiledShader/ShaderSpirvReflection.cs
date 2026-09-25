@@ -157,9 +157,32 @@ public static partial class ShaderSpirvReflection
     /// Optional collector for resource names assigned during reflection. Names are recorded before SPIRV-Cross
     /// emits the target source, so callers receive the mapping even if backend compilation later fails.
     /// </param>
+    /// <param name="selectedDynamicComboId">Explicit dynamic combo for metadata names and comments.</param>
+    /// <param name="readable">Use display-oriented uniform flattening and expression substitutions.</param>
+    /// <param name="flattenUniformBuffers">Override uniform flattening, which otherwise follows readable mode.</param>
     /// <returns>True if decompilation succeeded, false otherwise.</returns>
-    public static bool ReflectSpirv(VfxShaderFileVulkan vulkanSource, Backend backend, out string code, SpirvNameMap? nameMap = null)
+    public static bool ReflectSpirv(VfxShaderFileVulkan vulkanSource, Backend backend, out string code, SpirvNameMap? nameMap = null, long? selectedDynamicComboId = null, bool readable = true, bool? flattenUniformBuffers = null)
+        => ReflectSpirvCore(vulkanSource, backend, out code, nameMap, selectedDynamicComboId, readable, flattenUniformBuffers, null, null);
+
+    /// <summary>
+    /// Reflects one explicitly selected SPIR-V entry point.
+    /// </summary>
+    public static bool ReflectSpirvEntryPoint(VfxShaderFileVulkan vulkanSource, Backend backend, out string code,
+        string entryPoint, SpvExecutionModel executionModel, SpirvNameMap? nameMap = null,
+        long? selectedDynamicComboId = null, bool readable = true, bool? flattenUniformBuffers = null)
+        => ReflectSpirvCore(vulkanSource, backend, out code, nameMap, selectedDynamicComboId, readable,
+            flattenUniformBuffers, entryPoint, executionModel);
+
+    private static bool ReflectSpirvCore(VfxShaderFileVulkan vulkanSource, Backend backend, out string code,
+        SpirvNameMap? nameMap, long? selectedDynamicComboId, bool readable, bool? flattenUniformBuffers,
+        string? entryPoint, SpvExecutionModel? executionModel)
     {
+        if (selectedDynamicComboId.HasValue &&
+            vulkanSource.ParentCombo.DynamicComboRenderStates.Count(r => r.DynamicComboId == selectedDynamicComboId.Value && r.ShaderFileId == vulkanSource.ShaderFileId) != 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(selectedDynamicComboId), "Dynamic combo must uniquely reference this shader payload.");
+        }
+
         static bool Error(out string code, spvc_context context)
         {
             var lastError = SpirvCrossApi.spvc_context_get_last_error_string(context);
@@ -193,6 +216,23 @@ public static partial class ShaderSpirvReflection
                 return Error(out code, context);
             }
 
+            if (entryPoint is not null)
+            {
+                unsafe
+                {
+                    fixed (byte* entryPointBytes = entryPoint.GetUtf8Span())
+                    {
+                        result = SpirvCrossApi.spvc_compiler_set_entry_point(compiler, entryPointBytes,
+                            executionModel!.Value);
+                    }
+                }
+
+                if (result != Result.Success)
+                {
+                    return Error(out code, context);
+                }
+            }
+
             result = SpirvCrossApi.spvc_compiler_create_compiler_options(compiler, out var options);
 
             if (result != Result.Success)
@@ -207,7 +247,7 @@ public static partial class ShaderSpirvReflection
                 SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics,
                     SpirvCrossApi.SPVC_TRUE);
                 SpirvCrossApi.spvc_compiler_options_set_bool(options,
-                    CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, SpirvCrossApi.SPVC_TRUE);
+                    CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, (flattenUniformBuffers ?? readable) ? SpirvCrossApi.SPVC_TRUE : SpirvCrossApi.SPVC_FALSE);
             }
             else if (backend == Backend.HLSL)
             {
@@ -231,14 +271,14 @@ public static partial class ShaderSpirvReflection
                     return Error(out code, context);
                 }
 
-                RenameResource(compiler, resources, SpirvResourceType.SeparateImage, vulkanSource, nameMap);
-                RenameResource(compiler, resources, SpirvResourceType.SeparateSamplers, vulkanSource, nameMap);
+                RenameResource(compiler, resources, SpirvResourceType.SeparateImage, vulkanSource, nameMap, selectedDynamicComboId);
+                RenameResource(compiler, resources, SpirvResourceType.SeparateSamplers, vulkanSource, nameMap, selectedDynamicComboId);
 
-                RenameResource(compiler, resources, SpirvResourceType.StorageBuffer, vulkanSource, nameMap);
-                RenameResource(compiler, resources, SpirvResourceType.UniformBuffer, vulkanSource, nameMap);
+                RenameResource(compiler, resources, SpirvResourceType.StorageBuffer, vulkanSource, nameMap, selectedDynamicComboId);
+                RenameResource(compiler, resources, SpirvResourceType.UniformBuffer, vulkanSource, nameMap, selectedDynamicComboId);
 
-                RenameResource(compiler, resources, SpirvResourceType.StageInput, vulkanSource, nameMap);
-                RenameResource(compiler, resources, SpirvResourceType.StageOutput, vulkanSource, nameMap);
+                RenameResource(compiler, resources, SpirvResourceType.StageInput, vulkanSource, nameMap, selectedDynamicComboId);
+                RenameResource(compiler, resources, SpirvResourceType.StageOutput, vulkanSource, nameMap, selectedDynamicComboId);
 
                 RenameSpecializationConstants(compiler, vulkanSource, nameMap);
             }
@@ -266,12 +306,15 @@ public static partial class ShaderSpirvReflection
                 }
             }
 
-            code = ReplaceCommonPatterns(code);
+            if (readable)
+            {
+                code = ReplaceCommonPatterns(code);
+            }
 
             buffer.WriteLine($"// {StringToken.VRF_GENERATOR}");
             buffer.WriteLine($"// SPIR-V source, {backend} reflection with SPIRV-Cross by KhronosGroup");
 
-            BuildComboComment(vulkanSource, buffer);
+            BuildComboComment(vulkanSource, buffer, selectedDynamicComboId);
 
             buffer.WriteLine();
             buffer.WriteLine(code);
@@ -286,7 +329,7 @@ public static partial class ShaderSpirvReflection
         return result == Result.Success;
     }
 
-    private static void BuildComboComment(VfxShaderFile shaderFile, StringWriter buffer)
+    private static void BuildComboComment(VfxShaderFile shaderFile, StringWriter buffer, long? selectedDynamicComboId)
     {
         var staticCombo = shaderFile.ParentCombo;
         var program = staticCombo?.ParentProgramData;
@@ -322,9 +365,9 @@ public static partial class ShaderSpirvReflection
         }
 
         var dynamicComboEntry = Array.Find(staticCombo.DynamicComboRenderStates, r => r.ShaderFileId == shaderFile.ShaderFileId);
-        var dynamicComboId = dynamicComboEntry?.DynamicComboId ?? 0;
+        var dynamicComboId = selectedDynamicComboId ?? dynamicComboEntry?.DynamicComboId ?? 0;
 
-        if (dynamicComboId != 0)
+        if (program.DynamicComboArray.Length > 0)
         {
             var parts = new List<string>();
             var state = program.GetDynamicComboConfig(dynamicComboId);
@@ -384,7 +427,7 @@ public static partial class ShaderSpirvReflection
     }
 
     private static void RenameResource(spvc_compiler compiler, spvc_resources resources, SpirvResourceType resourceType,
-        VfxShaderFile shaderFile, SpirvNameMap? nameMap)
+        VfxShaderFile shaderFile, SpirvNameMap? nameMap, long? selectedDynamicComboId)
     {
         var staticComboData = shaderFile.ParentCombo;
         var program = staticComboData?.ParentProgramData;
@@ -396,7 +439,9 @@ public static partial class ShaderSpirvReflection
 
         // Arrays that are one entry per dynamic combo (such as VsInputSignatureIndices) are indexed by the position of the
         // combo, which is only the same as its id when no combos were skipped, and never the same as the shader file id.
-        var dynamicComboIndex = Array.FindIndex(staticComboData.DynamicComboRenderStates, r => r.ShaderFileId == shaderFile.ShaderFileId);
+        var dynamicComboIndex = Array.FindIndex(staticComboData.DynamicComboRenderStates, r => selectedDynamicComboId.HasValue
+            ? r.DynamicComboId == selectedDynamicComboId.Value
+            : r.ShaderFileId == shaderFile.ShaderFileId);
         var dynamicComboId = dynamicComboIndex >= 0 ? staticComboData.DynamicComboRenderStates[dynamicComboIndex].DynamicComboId : 0;
         var writeSequence = staticComboData.DynamicComboVariables[Math.Max(staticComboData.GetDynamicComboIndex(dynamicComboId), 0)];
 
