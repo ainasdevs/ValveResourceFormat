@@ -7,7 +7,6 @@ using System.Windows.Forms;
 using GUI.Controls;
 using GUI.Forms;
 using GUI.Utils;
-using ValveResourceFormat;
 using ValveResourceFormat.IO;
 using static ValveResourceFormat.CompiledShader.ShaderUtilHelpers;
 
@@ -15,13 +14,13 @@ namespace GUI.Types.Viewers
 {
     class CompiledShader : IDisposable, IViewer
     {
-        private TextControl control;
-        private TreeView fileListView;
+        private readonly TextControl control;
+        private readonly TreeView fileListView;
         private readonly Container components;
-        private ThemedContextMenuStrip shaderFileContextMenu;
-        private ThemedContextMenuStrip collectionContextMenu;
-        private ThemedContextMenuStrip programContextMenu;
-        private ThemedToolStripMenuItem exportSpirvNamedMenuItem = null!;
+        private readonly ThemedContextMenuStrip shaderFileContextMenu;
+        private readonly ThemedContextMenuStrip collectionContextMenu;
+        private readonly ThemedContextMenuStrip programContextMenu;
+        private readonly ThemedToolStripMenuItem exportSpirvNamedMenuItem;
         private readonly VrfGuiContext vrfGuiContext;
         private VfxProgramData? featuresProgram;
 
@@ -697,7 +696,7 @@ namespace GUI.Types.Viewers
             if (program.StaticComboEntries.Count == 0)
                 return;
 
-            var configGen = new ConfigMappingParams(program);
+            var configGen = new ComboConfigMapping(program);
             List<string> sfNamesAbbrev = [];
             List<string> dfNamesAbbrev = [];
 
@@ -728,7 +727,7 @@ namespace GUI.Types.Viewers
                 var staticPart = sfNamesAbbrev.Count > 0 ? string.Join("+", sfNamesAbbrev) : "base";
 
                 var sourceIdToRenderStateInfo = new Dictionary<int, VfxRenderStateInfo>(combo.ShaderFiles.Length);
-                foreach (var renderStateInfo in combo.DynamicCombos)
+                foreach (var renderStateInfo in combo.DynamicComboRenderStates)
                     sourceIdToRenderStateInfo.TryAdd(renderStateInfo.ShaderFileId, renderStateInfo);
 
                 var candidateFiles = combo.ShaderFiles.Where(sf => sf.Bytecode.Length > 0);
@@ -747,7 +746,7 @@ namespace GUI.Types.Viewers
                     dfNamesAbbrev.Clear();
                     if (sourceIdToRenderStateInfo.TryGetValue(shaderFile.ShaderFileId, out var renderStateInfo))
                     {
-                        var dConfig = program.GetDBlockConfig(renderStateInfo.DynamicComboId);
+                        var dConfig = program.GetDynamicComboConfig(renderStateInfo.DynamicComboId);
                         for (var i = 0; i < program.DynamicComboArray.Length; i++)
                         {
                             if (dConfig[i] == 0)
@@ -760,7 +759,7 @@ namespace GUI.Types.Viewers
 
                     var dynamicPart = dfNamesAbbrev.Count > 0 ? $"__{string.Join("+", dfNamesAbbrev)}" : string.Empty;
 
-                    var platform = shaderFile.BlockName.ToLowerInvariant();
+                    var platform = shaderFile.SourceType.ToLowerInvariant();
                     var ext = mode switch
                     {
                         ShaderExportMode.SpirvWithNames => "spv",

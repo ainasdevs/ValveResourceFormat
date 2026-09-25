@@ -1,7 +1,6 @@
 using System.Windows.Forms;
 using GUI.Utils;
 using ValveKeyValue;
-using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.ResourceTypes.EntityLump;
 
 namespace GUI.Forms
@@ -45,7 +44,7 @@ namespace GUI.Forms
 
         private void SetTabVisible(TabPage page, bool shouldShow)
         {
-            bool isShown = tabControl.TabPages.Contains(page);
+            var isShown = tabControl.TabPages.Contains(page);
 
             if (shouldShow && !isShown)
             {
@@ -59,10 +58,10 @@ namespace GUI.Forms
 
         private int GetInsertIndex(TabPage page)
         {
-            int targetOrder = Array.IndexOf(TabPageOrder, page);
-            int index = 0;
+            var targetOrder = Array.IndexOf(TabPageOrder, page);
+            var index = 0;
 
-            for (int i = 0; i < targetOrder; i++)
+            for (var i = 0; i < targetOrder; i++)
             {
                 if (tabControl.TabPages.Contains(TabPageOrder[i]))
                 {

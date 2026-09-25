@@ -35,6 +35,24 @@ namespace GUI.Utils
 
         public VrfGuiContext? ParentGuiContext { get; }
         public ToolsAssetInfo? ToolsAssetInfo { get; private set; }
+
+        /// <summary>File name followed by the chain of parent files it was opened from.</summary>
+        public string FullPath
+        {
+            get
+            {
+                var path = FileName;
+                var parentContext = ParentGuiContext;
+
+                while (parentContext != null)
+                {
+                    path = $"{path} ← {parentContext.FileName}";
+                    parentContext = parentContext.ParentGuiContext;
+                }
+
+                return path;
+            }
+        }
         private bool ToolsAssetInfoLoaded;
 
         // This is a hack to set camera and properties when clicking a mesh from a model or map
@@ -46,7 +64,7 @@ namespace GUI.Utils
         private int Children;
         private bool WantsToBeDisposed;
         private readonly ConcurrentDictionary<string, Resource> CachedResources = [];
-        private readonly ConcurrentBag<RendererContext> rendererContexts = [];
+        private readonly ConcurrentQueue<RendererContext> rendererContexts = [];
 
 #if DEBUG
         private int TotalChildren;
@@ -209,7 +227,7 @@ namespace GUI.Utils
                 MaxTextureSize = Settings.Config.MaxTextureSize,
             };
 
-            rendererContexts.Add(context);
+            rendererContexts.Enqueue(context);
 
             return context;
         }

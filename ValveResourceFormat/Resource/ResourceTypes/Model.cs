@@ -40,6 +40,56 @@ namespace ValveResourceFormat.ResourceTypes
         }
 
         /// <summary>
+        /// Gets the NM skeletons this model can be animated on, by resource path, in declaration order.
+        /// </summary>
+        public string[] NmSkeletonRefs => Data.GetArray<string>("m_vecNmSkeletonRefs") ?? [];
+
+        /// <summary>
+        /// Gets the animation graphs bound to this model, in declaration order. The first is the default.
+        /// </summary>
+        public IReadOnlyList<(string Identifier, string GraphPath)> AnimGraph2References
+            => cachedAnimGraph2References ??= ReadAnimGraph2References();
+
+        private (string Identifier, string GraphPath)[] ReadAnimGraph2References()
+        {
+            var graphRefs = Data.GetArray("m_animGraph2Refs");
+
+            if (graphRefs == null)
+            {
+                return [];
+            }
+
+            var references = new (string Identifier, string GraphPath)[graphRefs.Count];
+
+            for (var i = 0; i < graphRefs.Count; i++)
+            {
+                references[i] = (graphRefs[i].GetStringProperty("m_sIdentifier"), graphRefs[i].GetStringProperty("m_hGraph"));
+            }
+
+            return references;
+        }
+
+        /// <summary>
+        /// Gets the bone constraints the model was authored with, in compiled order.
+        /// </summary>
+        public IReadOnlyList<BoneConstraint> BoneConstraints => cachedBoneConstraints ??= BoneConstraint.ReadList(KeyValues);
+
+        /// <summary>
+        /// Gets the compiled data of every bone constraint of one class, in compiled order.
+        /// </summary>
+        /// <param name="className">The compiled constraint class, e.g. <c>CTiltTwistConstraint</c>.</param>
+        public IEnumerable<KVObject> GetBoneConstraints(string className)
+        {
+            foreach (var constraint in BoneConstraints)
+            {
+                if (constraint.ClassName == className)
+                {
+                    yield return constraint.Data;
+                }
+            }
+        }
+
+        /// <summary>
         /// Gets the skeleton for this model.
         /// </summary>
         public Skeleton Skeleton
@@ -67,8 +117,13 @@ namespace ValveResourceFormat.ResourceTypes
         private KVObject? cachedKeyValues;
         private Skeleton? cachedSkeleton;
         private FlexController[]? cachedFlexControllers;
-        private List<(Mesh Mesh, int MeshIndex, string Name)>? cachedEmbeddedMeshes;
+        private EmbeddedSequenceGroup? cachedSequenceGroup;
+        private List<ModelMesh>? cachedEmbeddedMeshes;
         private ModelLodInfo? cachedLodInfo;
+        private BoneConstraint[]? cachedBoneConstraints;
+        private BoneRemapTable? cachedBoneRemapTable;
+        private ModelMeshGroups? cachedMeshGroups;
+        private (string Identifier, string GraphPath)[]? cachedAnimGraph2References;
 
         /// <summary>
         /// Gets the hitbox sets for this model.
@@ -87,7 +142,7 @@ namespace ValveResourceFormat.ResourceTypes
                 return [];
             }
 
-            var flexControllersData = morph.Data.GetArray("m_FlexControllers");
+            var flexControllersData = morph.Data.GetArray("m_FlexControllers") ?? [];
 
             var flexControllers = flexControllersData.Select(d =>
             {
@@ -118,71 +173,65 @@ namespace ValveResourceFormat.ResourceTypes
         /// <param name="morph">The morph data whose flex controllers should be reused.</param>
         public void SetExternalMorphData(Morph? morph)
         {
-            // An empty set carries nothing, and a model whose morph set sits in a separate vmorf has one.
-            if (cachedFlexControllers == null || cachedFlexControllers.Length == 0)
+            // The model's own morph block wins; a model whose morph set sits in a separate vmorf takes
+            // the one its meshes carry.
+            if (FlexControllers.Length == 0)
             {
                 cachedFlexControllers = morph?.FlexControllers;
             }
         }
 
         /// <summary>
-        /// Populates cached flex controller data from an external mesh resource's morph data.
+        /// Populates flex controllers, hitbox sets and attachments the model does not have from an external mesh resource.
         /// </summary>
         /// <param name="mesh">The mesh providing supplemental data.</param>
         public void SetExternalMeshData(Mesh mesh)
         {
             SetExternalMorphData(mesh.MorphData);
 
-            HitboxSets ??= mesh.HitboxSets;
-            Attachments ??= mesh.Attachments;
+            // Like the embedded MDAT case, the first mesh that carries hitboxes or attachments supplies them.
+            if (HitboxSets.Count == 0)
+            {
+                HitboxSets = mesh.HitboxSets;
+            }
+
+            if (Attachments.Count == 0)
+            {
+                Attachments = mesh.Attachments;
+            }
         }
 
         /// <summary>
         /// Get the bone remap table of a specific mesh.
         /// This is used to remap bone indices in the mesh <see cref="VBIB"/> to bone indices of the model skeleton.
         /// </summary>
-        public int[]? GetRemapTable(int meshIndex)
-        {
-            var remappingTableStarts = Data.GetIntegerArray("m_remappingTableStarts");
-
-            if (remappingTableStarts.Length <= meshIndex)
-            {
-                return null;
-            }
-
-            var remappingTable = Data.GetIntegerArray("m_remappingTable");
-
-            var remappingTableStart = (int)remappingTableStarts[meshIndex];
-
-            var nextMeshIndex = meshIndex + 1;
-            var nextMeshStart = remappingTableStarts.Length > nextMeshIndex
-                ? remappingTableStarts[nextMeshIndex]
-                : remappingTable.Length;
-
-            var meshBoneCount = nextMeshStart - remappingTableStart;
-
-            var meshRemappingTable = new int[meshBoneCount];
-            for (var i = 0; i < meshBoneCount; i++)
-            {
-                meshRemappingTable[i] = (int)remappingTable[remappingTableStart + i];
-            }
-
-            return meshRemappingTable;
-        }
+        public int[]? GetRemapTable(int meshIndex) => BoneRemapTable.GetMeshTable(meshIndex);
 
         /// <summary>
-        /// Gets referenced mesh names and their LoD masks.
+        /// Gets the model's bone remap table, which maps the bone indices a mesh's <c>BLENDINDICES</c>
+        /// carry to bone indices of the model skeleton.
         /// </summary>
-        /// <returns>Enumerable of mesh index, mesh name, and LoD mask tuples.</returns>
-        public IEnumerable<(int MeshIndex, string MeshName, long LoDMask)> GetReferenceMeshNamesAndLoD()
+        public BoneRemapTable BoneRemapTable => cachedBoneRemapTable ??= new BoneRemapTable(Data);
+
+        /// <summary>
+        /// Gets the model's mesh groups, and the body groups their names encode.
+        /// </summary>
+        public ModelMeshGroups MeshGroups => cachedMeshGroups ??= new ModelMeshGroups(Data);
+
+        /// <summary>
+        /// Gets the model's references to meshes that live in their own vmesh. Slots filled by an
+        /// embedded mesh are left out.
+        /// </summary>
+        public IEnumerable<ModelMeshReference> GetReferenceMeshNamesAndLoD()
         {
-            var refLODGroupMasks = Data.GetIntegerArray("m_refLODGroupMasks");
             var refMeshes = Data.GetArray<string>("m_refMeshes");
+
             if (refMeshes == null)
             {
                 return [];
             }
-            var result = new List<(int MeshIndex, string MeshName, long LoDMask)>(refMeshes.Length);
+
+            var result = new List<ModelMeshReference>(refMeshes.Length);
 
             for (var meshIndex = 0; meshIndex < refMeshes.Length; meshIndex++)
             {
@@ -190,8 +239,7 @@ namespace ValveResourceFormat.ResourceTypes
 
                 if (!string.IsNullOrEmpty(refMesh))
                 {
-                    var lodMask = meshIndex < refLODGroupMasks.Length ? refLODGroupMasks[meshIndex] : 0L;
-                    result.Add((meshIndex, refMesh, lodMask));
+                    result.Add(new ModelMeshReference(meshIndex, refMesh, LodInfo.GetMeshMask(meshIndex)));
                 }
             }
 
@@ -199,37 +247,31 @@ namespace ValveResourceFormat.ResourceTypes
         }
 
         /// <summary>
-        /// Gets embedded meshes with their LoD masks.
-        /// </summary>
-        /// <returns>Enumerable of mesh, mesh index, name, and LoD mask tuples.</returns>
-        public IEnumerable<(Mesh Mesh, int MeshIndex, string Name, long LoDMask)> GetEmbeddedMeshesAndLoD()
-            => GetEmbeddedMeshes().Zip(Data.GetIntegerArray("m_refLODGroupMasks"), (l, r) => (l.Mesh, l.MeshIndex, l.Name, r));
-
-        /// <summary>
         /// Gets this model's level-of-detail structure (which meshes belong to which LOD level and the
         /// per-level switch values). Built once and cached.
         /// </summary>
-        public ModelLodInfo LodInfo => cachedLodInfo ??= new ModelLodInfo(
-            Data.GetIntegerArray("m_refLODGroupMasks"),
-            Data.GetFloatArray("m_lodGroupSwitchDistances"));
+        public ModelLodInfo LodInfo => cachedLodInfo ??= new ModelLodInfo(Data);
 
         /// <summary>
         /// Gets the embedded meshes present in the given LOD <paramref name="level"/>.
         /// </summary>
-        public IEnumerable<(Mesh Mesh, int MeshIndex, string Name, long LoDMask)> GetEmbeddedMeshesForLod(int level)
-            => GetEmbeddedMeshesAndLoD().Where(m => LodInfo.IsMeshInLevel(m.MeshIndex, level));
+        public IEnumerable<ModelMesh> GetEmbeddedMeshesForLod(int level)
+            => GetEmbeddedMeshes().Where(m => LodInfo.IsMeshInLevel(m.MeshIndex, level));
 
         /// <summary>
         /// Gets the referenced mesh names present in the given LOD <paramref name="level"/>.
         /// </summary>
-        public IEnumerable<(int MeshIndex, string MeshName, long LoDMask)> GetReferenceMeshNamesForLod(int level)
+        public IEnumerable<ModelMeshReference> GetReferenceMeshNamesForLod(int level)
             => GetReferenceMeshNamesAndLoD().Where(m => LodInfo.IsMeshInLevel(m.MeshIndex, level));
 
         /// <summary>
-        /// Gets embedded meshes from the model.
+        /// Gets the meshes embedded in the model itself.
         /// </summary>
-        /// <returns>Enumerable of mesh, mesh index, and name tuples.</returns>
-        public IEnumerable<(Mesh Mesh, int MeshIndex, string Name)> GetEmbeddedMeshes()
+        /// <remarks>
+        /// A mesh's own index addresses the model's mask tables, which cover embedded and referenced
+        /// meshes alike.
+        /// </remarks>
+        public IEnumerable<ModelMesh> GetEmbeddedMeshes()
         {
             if (cachedEmbeddedMeshes != null)
             {
@@ -245,7 +287,7 @@ namespace ValveResourceFormat.ResourceTypes
                 return cachedEmbeddedMeshes;
             }
 
-            var meshes = new List<(Mesh Mesh, int MeshIndex, string Name)>(embeddedMeshes.Count);
+            var meshes = new List<ModelMesh>(embeddedMeshes.Count);
 
             foreach (var embeddedMesh in embeddedMeshes)
             {
@@ -273,14 +315,23 @@ namespace ValveResourceFormat.ResourceTypes
                     mesh.MorphData = Resource.GetBlockByIndex(morphBlockIndex) as Morph;
                 }
 
-                meshes.Add((mesh, meshIndex, name));
+                if (embeddedMesh.ContainsKey("tools_vb_block"))
+                {
+                    var toolsVbBlockIndex = (int)embeddedMesh.GetIntegerProperty("tools_vb_block");
+                    if (toolsVbBlockIndex >= 0 && Resource.GetBlockByIndex(toolsVbBlockIndex) is TBUF toolsBuffer)
+                    {
+                        mesh.VBIB.AddToolsBuffers(toolsBuffer.VertexBuffers);
+                    }
+                }
+
+                meshes.Add(new ModelMesh(mesh, meshIndex, name, LodInfo.GetMeshMask(meshIndex)));
             }
 
             cachedEmbeddedMeshes = meshes;
             return cachedEmbeddedMeshes;
         }
 
-        private (Mesh Mesh, int MeshIndex, string Name) ParseEmbeddedMesh2(KVObject embeddedMesh)
+        private ModelMesh ParseEmbeddedMesh2(KVObject embeddedMesh)
         {
             var name = embeddedMesh.GetStringProperty("m_Name");
             var meshIndex = (int)embeddedMesh.GetIntegerProperty("m_nMeshIndex");
@@ -300,7 +351,7 @@ namespace ValveResourceFormat.ResourceTypes
                 mesh.MorphData = Resource.GetBlockByIndex(morphBlockIndex) as Morph;
             }
 
-            return (mesh, meshIndex, name);
+            return new ModelMesh(mesh, meshIndex, name, LodInfo.GetMeshMask(meshIndex));
         }
 
         /// <summary>
@@ -336,121 +387,43 @@ namespace ValveResourceFormat.ResourceTypes
             => Data.GetArray<string>("m_refAnimGroups");
 
         /// <summary>
-        /// Gets the faceposer folders mapping animation names to folder names.
+        /// Gets the model's embedded animation data and the legacy sequence group behind it.
         /// </summary>
-        /// <returns>Dictionary mapping animation names to their folder names, or empty dictionary if no folders exist.</returns>
-        public Dictionary<string, string> GetFaceposerFolders()
-        {
-            var ctrl = Resource.GetBlockByType(BlockType.CTRL) as BinaryKV3;
-            var embeddedAnimation = ctrl?.Data.Root.GetSubCollection("embedded_animation");
-
-            if (embeddedAnimation == null)
-            {
-                return [];
-            }
-
-            var seqGroupDataBlockIndex = embeddedAnimation.GetIntegerProperty("seqgroup_data_block");
-            if (seqGroupDataBlockIndex <= 0)
-            {
-                return [];
-            }
-
-            var sequenceDataBlock = Resource.GetBlockByIndex((int)seqGroupDataBlockIndex) as KeyValuesOrNTRO;
-            var sequenceKeyValues = sequenceDataBlock?.Data.GetSubCollection("m_keyValues");
-            var faceposerFolders = sequenceKeyValues?.GetSubCollection("faceposer_folders");
-
-            if (faceposerFolders == null)
-            {
-                return [];
-            }
-
-            var animationToFolder = new Dictionary<string, string>();
-            foreach (var folder in faceposerFolders)
-            {
-                var folderName = folder.Key;
-                var animationNames = faceposerFolders.GetArray<string>(folderName);
-
-                if (animationNames != null)
-                {
-                    foreach (var animationName in animationNames)
-                    {
-                        animationToFolder[animationName] = folderName;
-                    }
-                }
-            }
-
-            return animationToFolder;
-        }
+        public EmbeddedSequenceGroup SequenceGroup
+            => cachedSequenceGroup ??= Resource != null ? new EmbeddedSequenceGroup(Resource) : EmbeddedSequenceGroup.Empty;
 
         /// <summary>
         /// Gets embedded animations from the model.
         /// </summary>
         /// <returns>Enumerable of animations.</returns>
-        public IEnumerable<SequenceAnimation> GetEmbeddedAnimations()
-        {
-            var ctrl = Resource.GetBlockByType(BlockType.CTRL) as BinaryKV3;
-            var embeddedAnimation = ctrl?.Data.Root.GetSubCollection("embedded_animation");
+        public IEnumerable<SequenceAnimation> GetEmbeddedAnimations() => GetEmbeddedAnimations(Skeleton, FlexControllers);
 
-            if (embeddedAnimation == null)
+        /// <summary>
+        /// Gets embedded animations from the model, with remap tables built for the provided skeleton and flex controllers.
+        /// </summary>
+        public IEnumerable<SequenceAnimation> GetEmbeddedAnimations(Skeleton skeleton, FlexController[] flexControllers)
+        {
+            var group = SequenceGroup;
+
+            if (group.AnimationData is not { } animationData || group.DecodeKey is not { } decodeKey)
             {
                 return [];
             }
 
-            var groupDataBlockIndex = (int)embeddedAnimation.GetIntegerProperty("group_data_block");
-            var animDataBlockIndex = (int)embeddedAnimation.GetIntegerProperty("anim_data_block");
-
-            var animationGroup = Resource.GetBlockByIndex(groupDataBlockIndex) as KeyValuesOrNTRO;
-            Debug.Assert(animationGroup is not null);
-            var decodeKey = animationGroup.Data.GetSubCollection("m_decodeKey");
-
-            var animationDataBlock = Resource.GetBlockByIndex(animDataBlockIndex) as KeyValuesOrNTRO;
-            Debug.Assert(animationDataBlock is not null);
-
-            var seqGroupDataBlockIndex = embeddedAnimation.GetIntegerProperty("seqgroup_data_block");
-            if (seqGroupDataBlockIndex > 0)
+            if (group.SequenceData is { } sequenceData)
             {
-                var sequenceDataBlock = Resource.GetBlockByIndex((int)seqGroupDataBlockIndex) as KeyValuesOrNTRO;
-                if (sequenceDataBlock?.Data != null)
-                {
-                    return SequenceAnimation.FromSequenceData(
-                        sequenceDataBlock.Data,
-                        animationDataBlock.Data,
-                        decodeKey,
-                        Skeleton,
-                        FlexControllers);
-                }
+                return SequenceAnimation.FromSequenceData(sequenceData, animationData, decodeKey, skeleton, flexControllers);
             }
 
-            return SequenceAnimation.FromData(animationDataBlock.Data, decodeKey, Skeleton, FlexControllers);
-        }
-
-        /// <summary>
-        /// Get the embedded animations with a different skeleton as animation target.
-        /// </summary>
-        public static IEnumerable<Animation> GetEmbeddedAnimationsWithSkeleton(
-            IFileLoader fileLoader,
-            Skeleton skeleton,
-            Model model,
-            Predicate<string>? includeAnimationGraphClip = null)
-        {
-            var old = model.cachedSkeleton;
-
-            model.cachedSkeleton = skeleton;
-            var anims = model.GetAllAnimations(fileLoader, includeAnimationGraphClip);
-
-            model.cachedSkeleton = old;
-            return anims;
+            return SequenceAnimation.FromData(animationData, decodeKey, skeleton, flexControllers);
         }
 
         /// <summary>
         /// Gets animations referenced from other models.
         /// </summary>
         /// <param name="fileLoader">The file loader to use.</param>
-        /// <param name="includeAnimationGraphClip">Optional filter applied to animation graph clip resource names before loading them.</param>
         /// <returns>Enumerable of animations.</returns>
-        public IEnumerable<Animation> GetReferencedAnimations(
-            IFileLoader fileLoader,
-            Predicate<string>? includeAnimationGraphClip = null)
+        public IEnumerable<Animation> GetReferencedAnimations(IFileLoader fileLoader)
         {
             var refAnimModels = Data.GetArray<string>("m_refAnimIncludeModels");
             if (refAnimModels == null || refAnimModels.Length == 0)
@@ -472,11 +445,52 @@ namespace ValveResourceFormat.ResourceTypes
                     continue;
                 }
 
-                var anims = GetEmbeddedAnimationsWithSkeleton(fileLoader, Skeleton, model, includeAnimationGraphClip);
-                allAnims.AddRange(anims);
+                allAnims.AddRange(model.GetEmbeddedAnimations(Skeleton, FlexControllers));
+                allAnims.AddRange(model.GetAnimationGroupAnimations(fileLoader, Skeleton, FlexControllers));
             }
 
             return allAnims;
+        }
+
+        /// <summary>
+        /// Gets the animations this model reaches through the standalone animation groups it references.
+        /// </summary>
+        /// <param name="fileLoader">The file loader to use.</param>
+        /// <returns>Enumerable of animations.</returns>
+        public IEnumerable<SequenceAnimation> GetAnimationGroupAnimations(IFileLoader fileLoader) => GetAnimationGroupAnimations(fileLoader, Skeleton, FlexControllers);
+
+        /// <summary>
+        /// Gets the animations this model reaches through the standalone animation groups it references.
+        /// With remap tables built for the provided skeleton and flex controllers.
+        /// </summary>
+        public IEnumerable<SequenceAnimation> GetAnimationGroupAnimations(IFileLoader fileLoader, Skeleton skeleton, FlexController[] flexControllers)
+        {
+            var animGroupPaths = GetReferencedAnimationGroupNames();
+
+            if (animGroupPaths == null)
+            {
+                yield break;
+            }
+
+            foreach (var animGroupPath in animGroupPaths)
+            {
+                if (string.IsNullOrEmpty(animGroupPath))
+                {
+                    continue;
+                }
+
+                using var animGroup = fileLoader.LoadFileCompiled(animGroupPath);
+
+                if (animGroup == default)
+                {
+                    continue;
+                }
+
+                foreach (var animation in AnimationGroupLoader.LoadAnimationGroup(animGroup, fileLoader, skeleton, flexControllers))
+                {
+                    yield return animation;
+                }
+            }
         }
 
         /// <summary>
@@ -494,18 +508,9 @@ namespace ValveResourceFormat.ResourceTypes
                 return CachedAnimations;
             }
 
-            var animGroupPaths = GetReferencedAnimationGroupNames();
             var animations = GetEmbeddedAnimations().ToList<Animation>();
 
-            // Load animations from referenced animation groups
-            foreach (var animGroupPath in animGroupPaths)
-            {
-                using var animGroup = fileLoader.LoadFileCompiled(animGroupPath);
-                if (animGroup != default)
-                {
-                    animations.AddRange(AnimationGroupLoader.LoadAnimationGroup(animGroup, fileLoader, Skeleton, FlexControllers));
-                }
-            }
+            animations.AddRange(GetAnimationGroupAnimations(fileLoader));
 
             // Animation graph (AG2) clips are part of the model's animation set.
             foreach (var clipName in IO.AnimationGraphLoader.GetClipNames(this, fileLoader))
@@ -529,7 +534,7 @@ namespace ValveResourceFormat.ResourceTypes
                 }
             }
 
-            animations.AddRange(GetReferencedAnimations(fileLoader, includeAnimationGraphClip));
+            animations.AddRange(GetReferencedAnimations(fileLoader));
 
             HashSet<string> additiveSequences;
             try
@@ -573,27 +578,6 @@ namespace ValveResourceFormat.ResourceTypes
         }
 
         /// <summary>
-        /// Gets the per-mesh bitmask array indicating which mesh groups each mesh belongs to.
-        /// Index corresponds to mesh index; each bit position maps to a group index in <see cref="GetMeshGroups"/>.
-        /// </summary>
-        public ulong[] GetMeshGroupMasks()
-            => Data.GetUnsignedIntegerArray("m_refMeshGroupMasks");
-
-        /// <summary>
-        /// Gets the default mesh group mask bitmask.
-        /// Each set bit selects a group index from <see cref="GetMeshGroups"/> as active by default.
-        /// </summary>
-        public ulong GetDefaultMeshGroupMask()
-            => Data.GetUnsignedIntegerProperty("m_nDefaultMeshGroupMask");
-
-        /// <summary>
-        /// Gets the mesh groups defined in the model.
-        /// </summary>
-        /// <returns>Enumerable of mesh group names.</returns>
-        public IEnumerable<string> GetMeshGroups()
-            => Data.GetArray<string>("m_meshGroups");
-
-        /// <summary>
         /// Gets the material groups defined in the model.
         /// </summary>
         /// <returns>Enumerable of material group names and their materials.</returns>
@@ -602,15 +586,13 @@ namespace ValveResourceFormat.ResourceTypes
                 .Select(group => (group.GetStringProperty("m_name"), group.GetArray<string>("m_materials")));
 
         /// <summary>
-        /// Gets the default mesh groups based on the default mesh group mask.
+        /// Gets the material attributes the anim graph is allowed to drive, with their channel count
+        /// (1 for a scalar float target, 4 for a color target).
         /// </summary>
-        /// <returns>Enumerable of default mesh group names.</returns>
-        public IEnumerable<string> GetDefaultMeshGroups()
-        {
-            var defaultGroupMask = Data.GetUnsignedIntegerProperty("m_nDefaultMeshGroupMask");
-
-            return GetMeshGroups().Where((group, index) => index < 64 && ((1UL << index) & defaultGroupMask) != 0);
-        }
+        /// <returns>Enumerable of attribute name and channel count pairs.</returns>
+        public IEnumerable<(string AttributeName, int NumChannels)> GetAnimatedMaterialAttributes()
+            => (Data.GetArray("m_AnimatedMaterialAttributes") ?? [])
+                .Select(attr => (attr.GetStringProperty("m_AttributeName"), (int)attr.GetIntegerProperty("m_nNumChannels")));
 
         KVObject? ParseKeyValuesText()
         {

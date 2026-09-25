@@ -111,7 +111,7 @@ public sealed class SoundscapeBank
                     // a range like everything else in these scripts; the engine draws from it per
                     // activation, this resolution happens once so it takes the middle of the range.
                     var (min, max) = SoundscapeOperatorParsing.ParseRange(operation.Value, "volume", 1f);
-                    var nestedVolume = volume * Math.Clamp((min + max) * 0.5f, 0f, 1f);
+                    var nestedVolume = volume * MathUtils.Saturate((min + max) * 0.5f);
 
                     Flatten(nestedName, nested, events, visited, nestedVolume, depth + 1, ref syntheticIndex);
                 }
@@ -142,9 +142,11 @@ public sealed class SoundscapeBank
     {
         var syntheticName = $"{ownerName}#{operatorName}{syntheticIndex++}";
 
-        var wrapper = new KVObject();
-        wrapper.Add("type", type);
-        wrapper.Add("operator", data);
+        var wrapper = new KVObject
+        {
+            { "type", type },
+            { "operator", data }
+        };
 
         eventBank.AddSoundEvent(syntheticName, wrapper);
         return syntheticName;

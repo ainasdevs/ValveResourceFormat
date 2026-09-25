@@ -3,6 +3,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using OpenTK.Graphics.OpenGL;
+using ValveResourceFormat.Particles;
 using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.ResourceTypes;
 
@@ -43,7 +44,7 @@ namespace ValveResourceFormat.Renderer.World
     /// <summary>
     /// Scene lighting data including lightmaps, reflection probes, and shadow maps.
     /// </summary>
-    public class WorldLightingInfo(Scene scene)
+    public class WorldLightingInfo(Scene scene) : IParticleLighting
     {
         /// <summary>Gets the lightmap textures indexed by uniform name.</summary>
         public Dictionary<string, RenderTexture> Lightmaps { get; } = [];
@@ -305,7 +306,7 @@ namespace ValveResourceFormat.Renderer.World
         {
             // The uniform stores surface-to-sun; the frustum looks along the rays, away from the sun
             var toSun = new Vector3(LightingData.SunDirection.X, LightingData.SunDirection.Y, LightingData.SunDirection.Z);
-            var sunDir = toSun.LengthSquared() > 0.0001f ? Vector3.Normalize(-toSun) : Vector3.UnitX;
+            var sunDir = MathUtils.SafeNormalize(-toSun, Vector3.UnitX, 0.0001f);
 
             var baseHalfExtent = Math.Max(shadowMapSize / 2.5f, 512f) * SunLightShadowCoverageScale;
             var bias = 0.001f;
@@ -313,7 +314,7 @@ namespace ValveResourceFormat.Renderer.World
             // Shift each coverage square toward the view. A caster shares its light-space footprint
             // with the shadow it casts, so area behind the view catches nothing the visible region
             // needs; casters toward the sun are captured along depth, not by the square.
-            var forwardOnLightPlane = camera.Forward - sunDir * Vector3.Dot(camera.Forward, sunDir);
+            var forwardOnLightPlane = MathUtils.ProjectOntoPlane(camera.Forward, sunDir);
 
             sunShadowFitsDepthToCasters = true;
 
@@ -328,7 +329,7 @@ namespace ValveResourceFormat.Renderer.World
                 var staticBounds = scene.StaticOctree.GetBounds();
                 var dynamicBounds = scene.DynamicOctree.GetBounds();
                 var sceneBounds = staticBounds.Union(dynamicBounds);
-                var max = Math.Max(sceneBounds.Size.X, Math.Max(sceneBounds.Size.Y, sceneBounds.Size.Z));
+                var max = sceneBounds.Size.MaxComponent();
 
                 if (max > 0 && max < shadowMapSize)
                 {

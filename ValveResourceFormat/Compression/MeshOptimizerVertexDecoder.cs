@@ -33,12 +33,6 @@ namespace ValveResourceFormat.Compression
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static uint Rotate32(uint v, int r)
-        {
-            return (v << r) | (v >> ((32 - r) & 31));
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static byte Unzigzag8(byte v)
         {
             return (byte)((0 - (v & 1)) ^ (v >> 1));
@@ -190,7 +184,7 @@ namespace ValveResourceFormat.Compression
             }
 
             // round number of groups to 4 to get number of header bytes
-            var headerSize = ((buffer.Length / ByteGroupSize) + 3) / 4;
+            var headerSize = MathUtils.DivideRoundUp(buffer.Length / ByteGroupSize, 4);
 
             if (data.Length < headerSize)
             {
@@ -244,7 +238,7 @@ namespace ValveResourceFormat.Compression
                     {
                         1 => Unzigzag8((byte)v) + p,
                         2 => Unzigzag16((ushort)v) + p,
-                        4 => Rotate32(v, rot) ^ p,
+                        4 => BitOperations.RotateLeft(v, rot) ^ p,
                         _ => throw new UnreachableException(),
                     };
 
@@ -271,7 +265,7 @@ namespace ValveResourceFormat.Compression
                 throw new ArgumentException("Expected vertexCount to be between 0 and VertexMaxBlockSize");
             }
 
-            var vertexCountAligned = (vertexCount + ByteGroupSize - 1) & ~(ByteGroupSize - 1);
+            var vertexCountAligned = MathUtils.AlignUp(vertexCount, ByteGroupSize);
             var controlSize = version == 0 ? 0 : vertexSize / 4;
 
             if (data.Length < controlSize)

@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Particles;
 using ValveResourceFormat.Particles.Utils;
-using ValveResourceFormat.Serialization.KeyValues;
+using ValveResourceFormat.ResourceTypes;
 
 namespace ValveResourceFormat.Renderer.Particles.Renderers
 {
@@ -23,7 +23,6 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         private const string DefaultTextureName = "materials/particle/base_sprite.vtex";
 
         private readonly Shader shader;
-        private readonly RendererContext rendererContext;
         private readonly int vaoHandle;
         private readonly ParticleTextureLayer[] layers;
 
@@ -64,8 +63,6 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
 
         public RenderSprites(ParticleDefinitionParser parse, RendererContext rendererContext) : base(parse)
         {
-            this.rendererContext = rendererContext;
-
             blendMode = parse.Enum<ParticleBlendMode>("m_nOutputBlendMode", blendMode);
 
             (layers, var textureName) = ParticleTextureLayer.Build(parse, rendererContext, DefaultTextureName, srgbRead: OutputIsColor);
@@ -110,6 +107,9 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                     parse.Float("m_flOutlineEnd1", outlineRanges.W));
             }
         }
+
+        /// <inheritdoc/>
+        public override Texture.SpritesheetData? SpriteSheet => ParticleTextureLayer.FindSpriteSheet(layers);
 
         /// <inheritdoc/>
         // The override stands in for the card's base texture; the layers composited over it keep their
@@ -177,31 +177,101 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             return instanceLayout.CreateVertexArray(label, vertexBufferHandle, indexBuffer: 0, instanceDivisor: 1);
         }
 
-        private (Vector2 UvMin, Vector2 UvMax, Vector2 NextMin, Vector2 NextMax) GetLayerSheetUvs(int layer, ref Particle particle, out float frameBlend)
+        /// <summary>
+        /// The part of a sheet tile its art covers, in card coordinates.
+        /// </summary>
+        private readonly record struct CropWindow(Vector2 Min, Vector2 Max)
         {
-            frameBlend = 0f;
+            /// <summary>The window that covers a whole tile, for a sheet that crops nothing away.</summary>
+            public static CropWindow Full { get; } = new(Vector2.Zero, Vector2.One);
 
+            /// <summary>The window's extent along each card axis.</summary>
+            public Vector2 Size => Max - Min;
+        }
+
+        /// <summary>The two sheet frames one layer is blending between, and how far it has crossed.</summary>
+        private readonly record struct LayerFrames(
+            Texture.SpritesheetData.Sequence.Frame.Image Current,
+            Texture.SpritesheetData.Sequence.Frame.Image Next,
+            float Blend);
+
+        private static Vector2 Normalize(Vector2 point, Vector2 min, Vector2 size) => new(
+            size.X != 0f ? (point.X - min.X) / size.X : 0f,
+            size.Y != 0f ? (point.Y - min.Y) / size.Y : 0f);
+
+        /// <summary>The card coordinates a frame's cropped art occupies within its own tile.</summary>
+        private static CropWindow TileWindow(Texture.SpritesheetData.Sequence.Frame.Image image)
+        {
+            var size = image.UncroppedMax - image.UncroppedMin;
+
+            return new CropWindow(
+                Normalize(image.CroppedMin, image.UncroppedMin, size),
+                Normalize(image.CroppedMax, image.UncroppedMin, size));
+        }
+
+        /// <summary>Places a card window back in the atlas, against the tile it was measured in.</summary>
+        private static (Vector2 Min, Vector2 Max) WindowRect(Texture.SpritesheetData.Sequence.Frame.Image image, CropWindow window)
+        {
+            var size = image.UncroppedMax - image.UncroppedMin;
+
+            return (image.UncroppedMin + (window.Min * size), image.UncroppedMin + (window.Max * size));
+        }
+
+        /// <summary>The frames a layer's own sheet is showing, or null when it carries no sequence.</summary>
+        private LayerFrames? GetLayerFrames(int layer, ref Particle particle)
+        {
             var spriteSheetData = layers[layer].Texture.SpriteSheetData;
+
             if (spriteSheetData == null || spriteSheetData.Sequences.Length == 0)
             {
-                return (Vector2.Zero, Vector2.One, Vector2.Zero, Vector2.One);
+                return null;
             }
 
             var sequence = spriteSheetData.Sequences[particle.SequenceNumber % spriteSheetData.Sequences.Length];
 
             if (sequence.Frames.Length == 0)
             {
-                return (Vector2.Zero, Vector2.One, Vector2.Zero, Vector2.One);
+                return null;
             }
 
             var (frame, nextFrame, blend) = GetSheetFrame(ref particle, sequence, animationRate, animationType, animateInFps);
-            frameBlend = blend;
 
             // TODO: Support more than one image per frame?
-            var currentImage = sequence.Frames[frame].Images[0];
-            var nextImage = sequence.Frames[nextFrame].Images[0];
+            return new LayerFrames(sequence.Frames[frame].Images[0], sequence.Frames[nextFrame].Images[0], blend);
+        }
 
-            return (currentImage.UncroppedMin, currentImage.UncroppedMax, nextImage.UncroppedMin, nextImage.UncroppedMax);
+        /// <summary>
+        /// The window the card shrinks to, covering the art of both frames it is blending so neither is
+        /// clipped, and none of the tile's packed neighbours is drawn.
+        /// </summary>
+        private static CropWindow GetCardCropWindow(LayerFrames? frames)
+        {
+            if (frames is not { } cardFrames)
+            {
+                return CropWindow.Full;
+            }
+
+            var current = TileWindow(cardFrames.Current);
+            var next = TileWindow(cardFrames.Next);
+
+            return new CropWindow(
+                Vector2.Min(current.Min, next.Min),
+                Vector2.Max(current.Max, next.Max));
+        }
+
+        /// <summary>The atlas rectangles a layer draws its two frames from, cropped to the card's window.</summary>
+        private static (Vector2 UvMin, Vector2 UvMax, Vector2 NextMin, Vector2 NextMax) GetLayerSheetUvs(
+            LayerFrames? frames, CropWindow window)
+        {
+            if (frames is not { } layerFrames)
+            {
+                return (Vector2.Zero, Vector2.One, Vector2.Zero, Vector2.One);
+            }
+
+            var (uvMin, uvMax) = WindowRect(layerFrames.Current, window);
+            var (nextMin, nextMax) = WindowRect(layerFrames.Next, window);
+
+            return (uvMin, uvMax, nextMin, nextMax);
         }
 
         // One corner of a uv rectangle, in the quad's winding order (top-left, bottom-left,
@@ -234,7 +304,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             }
 
             var face = Vector3.Cross(right, up);
-            face = face.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(face) : Vector3.UnitZ;
+            face = MathUtils.SafeNormalize(face, Vector3.UnitZ, ParticleMath.MinimumLengthSquared);
             return new Matrix4x4(
                 right.X, right.Y, right.Z, 0f,
                 up.X, up.Y, up.Z, 0f,
@@ -244,14 +314,14 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
 
         // World-space camera forward (into the scene): the billboard maps local +Z to the toward-camera axis.
         private static Vector3 CameraForward(Matrix4x4 billboard)
-            => -new Vector3(billboard.M31, billboard.M32, billboard.M33);
+            => -billboard.GetRow(2).AsVector3();
 
         // SCREEN_ALIGNED: the plain camera billboard, built from the camera's own right and up axes. The
         // particle's pitch never enters, so a normal-setting operator cannot tilt the card out of plane.
         private static Matrix4x4 ScreenAlignedBasis(Matrix4x4 billboard, float roll, float yaw)
             => QuadBasis(
-                new Vector3(billboard.M11, billboard.M12, billboard.M13),
-                new Vector3(billboard.M21, billboard.M22, billboard.M23), roll, yaw);
+                billboard.GetRow(0).AsVector3(),
+                billboard.GetRow(1).AsVector3(), roll, yaw);
 
         // SCREEN_Z_ALIGNED: up locked to world +Z, right = cross(worldZ, forward) left un-normalized, so the
         // sprite yaws about vertical to face the camera and foreshortens as the view tilts off-horizontal.
@@ -291,16 +361,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         /// <summary>Fills and uploads the quad buffer, returning the number of quads actually emitted.</summary>
         private int UpdateVertices(ParticleCollection particles, ParticleSystemState systemState, Camera camera)
         {
-            var modelViewMatrix = camera.CameraViewMatrix;
-
-            // Create billboarding rotation (always facing camera)
-            if (!Matrix4x4.Decompose(modelViewMatrix, out _, out var modelViewRotation, out _))
-            {
-                throw new InvalidOperationException("Matrix decompose failed");
-            }
-
-            modelViewRotation = Quaternion.Inverse(modelViewRotation);
-            var billboardMatrix = Matrix4x4.CreateFromQuaternion(modelViewRotation);
+            var billboardMatrix = camera.BillboardMatrix;
 
             // All four bounds are a radius per unit of camera distance
             var minSizeSlope = minSize.NextNumber(systemState);
@@ -361,7 +422,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                             continue;
                         }
 
-                        colorFade = 1f - ((radius - fadeStart) / (fadeEnd - fadeStart));
+                        colorFade = 1f - MathUtils.Remap(radius, fadeStart, fadeEnd);
                     }
 
                     // Nested min/max rather than a clamp, so an inverted range resolves to the maximum
@@ -398,18 +459,28 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                     // The corner map is corner.x * row0 + corner.y * row1 + translation, so the first two
                     // rows are already the card's axes with the radius folded in. Handing those over
                     // replaces four Vector4.Transform calls here and three duplicate vertices.
-                    var right = new Vector3(modelMatrix.M11, modelMatrix.M12, modelMatrix.M13);
-                    var up = new Vector3(modelMatrix.M21, modelMatrix.M22, modelMatrix.M23);
+                    var right = modelMatrix.GetRow(0).AsVector3();
+                    var up = modelMatrix.GetRow(1).AsVector3();
 
                     // The centre offset shifts the corners before the model matrix scales them, so it is
                     // measured in half-widths and folds into the origin along those same two axes.
-                    var origin = new Vector3(modelMatrix.M41, modelMatrix.M42, modelMatrix.M43)
+                    var origin = modelMatrix.Translation
                         + (centerOffset.X * right)
                         + (centerOffset.Y * up);
 
+                    var cardFrames = GetLayerFrames(0, ref particle);
+                    var window = GetCardCropWindow(cardFrames);
+                    var windowSize = window.Size;
+
+                    origin += ((window.Max.X + window.Min.X - 1f) * right)
+                        + ((1f - window.Min.Y - window.Max.Y) * up);
+
+                    right *= windowSize.X;
+                    up *= windowSize.Y;
+
                     // Each layer resolves frame rects against its own sheet, timed by the base sequence:
                     // companion sheets match the base rects, one-frame sequences pin an atlas region.
-                    var (uvMin, uvMax, uvNextMin, uvNextMax) = GetLayerSheetUvs(0, ref particle, out var frameBlend);
+                    var (uvMin, uvMax, uvNextMin, uvNextMax) = GetLayerSheetUvs(cardFrames, window);
 
                     var start = i * instanceFloats;
 
@@ -421,7 +492,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                         Color = new Vector4(particle.Color * colorFade, alpha),
                         UvRect = Rect(uvMin, uvMax),
                         UvRectNext = Rect(uvNextMin, uvNextMax),
-                        FrameBlend = frameBlend,
+                        FrameBlend = cardFrames?.Blend ?? 0f,
                     };
 
                     var layerRects = MemoryMarshal.Cast<float, Vector4>(
@@ -429,7 +500,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
 
                     for (var layer = 1; layer < layers.Length; layer++)
                     {
-                        var (layerMin, layerMax, layerNextMin, layerNextMax) = GetLayerSheetUvs(layer, ref particle, out _);
+                        var (layerMin, layerMax, layerNextMin, layerNextMax) = GetLayerSheetUvs(GetLayerFrames(layer, ref particle), window);
 
                         layerRects[(layer - 1) * 2] = Rect(layerMin, layerMax);
                         layerRects[((layer - 1) * 2) + 1] = Rect(layerNextMin, layerNextMax);

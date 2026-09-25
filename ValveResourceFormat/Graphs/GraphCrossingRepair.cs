@@ -604,9 +604,9 @@ internal sealed class CrossingRepair
         => Count(incident[node], candidates) > 0;
 
     private readonly List<int> localScratch = [];
-    private int[] allWires = [];
+    private readonly int[] allWires = [];
     private readonly List<int> unionScratch = [];
-    private int[] unionMarks = [];
+    private readonly int[] unionMarks = [];
     private int unionStamp;
     private int unionMark;
 
@@ -778,7 +778,7 @@ internal sealed class CrossingRepair
             }
 
             var span = maxX[wire] - minX[wire];
-            var t = span > 0.01f ? Math.Clamp((middle - minX[wire]) / span, 0f, 1f) : 0f;
+            var t = span > 0.01f ? MathUtils.Saturate((middle - minX[wire]) / span) : 0f;
             var lower = from[wire].X <= to[wire].X ? from[wire] : to[wire];
             var upper = from[wire].X <= to[wire].X ? to[wire] : from[wire];
             var crossing = lower.Y + ((upper.Y - lower.Y) * t);

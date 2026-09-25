@@ -1,7 +1,6 @@
 using System.Linq;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
-using ValveResourceFormat.Utils;
 using Connection = ValveResourceFormat.ResourceTypes.EntityLump.Connection;
 
 namespace ValveResourceFormat.Graphs;
@@ -57,6 +56,11 @@ internal static class EntityIOGraphBuilder
         if (!string.IsNullOrEmpty(connection.OverrideParam) && connection.OverrideParam != "(null)")
         {
             parts.Add($"({connection.OverrideParam})");
+        }
+
+        if (connection.ParamMap is { Count: > 0 })
+        {
+            parts.Add("(mapped params)");
         }
 
         return parts.Count > 0 ? string.Join(" ", parts) : null;

@@ -197,7 +197,7 @@ namespace ValveResourceFormat.Renderer.Utils
                 dir = a + b;
             }
 
-            return dir.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(dir) : Vector3.UnitX;
+            return MathUtils.SafeNormalize(dir, Vector3.UnitX, ParticleMath.MinimumLengthSquared);
         }
 
         private static Vector3 InitialNormal(Vector3 tangent)
@@ -208,7 +208,7 @@ namespace ValveResourceFormat.Renderer.Utils
 
         private static Vector3 NormalFromPrevious(Vector3 tangent, Vector3 previousNormal)
         {
-            var projected = previousNormal - (tangent * Vector3.Dot(previousNormal, tangent));
+            var projected = MathUtils.ProjectOntoPlane(previousNormal, tangent);
             return projected.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(projected) : InitialNormal(tangent);
         }
 
@@ -279,13 +279,13 @@ namespace ValveResourceFormat.Renderer.Utils
             for (var i = 1; i <= subdivisions; i++)
             {
                 var point = MathUtils.CubicBezier(p0, p1, p2, p3, i / (float)subdivisions);
-                length += (point - previous).Length();
+                length += Vector3.Distance(point, previous);
                 previous = point;
             }
 
             return length;
         }
 
-        private static Vector3 Normalize(Vector3 v) => v.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(v) : Vector3.UnitZ;
+        private static Vector3 Normalize(Vector3 v) => MathUtils.SafeNormalize(v, Vector3.UnitZ, ParticleMath.MinimumLengthSquared);
     }
 }

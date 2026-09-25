@@ -17,7 +17,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
     {
         private const string ShaderName = "particle_cable";
 
-        private Shader shader;
+        private readonly Shader shader;
         private readonly Shader? depthShader;
         private readonly Scene scene;
         private readonly RenderMaterial material;
@@ -25,11 +25,6 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         private readonly int vaoHandle;
         private int vertexBufferHandle;
         private int indexBufferHandle;
-
-        // The probe volume the cable's scene node is bound to, resolved on first draw because the
-        // scene computes the bindings after all nodes are loaded.
-        private SceneLightProbe? lightProbe;
-        private bool lightProbeResolved;
 
         private const int MaxTessellationLevel = 7;
         private const int MaxTubeRings = 8192;
@@ -78,8 +73,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             textureRepetitionMode = parse.Enum("m_nTextureRepetitionMode", textureRepetitionMode);
             tessScale = parse.Float("m_flTessScale", tessScale);
             minTessellation = parse.Int32("m_nMinTesselation", minTessellation);
-            // Guard against inverted authored bounds so the per-frame Math.Clamp cannot throw.
-            maxTessellation = Math.Max(minTessellation, parse.Int32("m_nMaxTesselation", maxTessellation));
+            maxTessellation = parse.Int32("m_nMaxTesselation", maxTessellation);
             textureRepeatsPerSegment = parse.NumberProvider("m_flTextureRepeatsPerSegment", textureRepeatsPerSegment);
             circumferenceRepeats = parse.NumberProvider("m_flTextureRepeatsCircumference", circumferenceRepeats);
 
@@ -133,11 +127,6 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             }
 
             chain.Sort(ChainComparer);
-
-            if (!lightProbeResolved)
-            {
-                ResolveLightProbe(systemState, chain[count / 2].Position);
-            }
 
             positionsScratch = EnsureCapacity(positionsScratch, count);
             radiiScratch = EnsureCapacity(radiiScratch, count);
@@ -227,6 +216,13 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             }
         }
 
+        /// <inheritdoc/>
+        public override bool CanRenderReplacement => true;
+
+        /// <inheritdoc/>
+        public override void RenderReplacement(Shader replacement, uint objectId)
+            => DrawReplacement(replacement, objectId, vaoHandle, indexCount, DrawElementsType.UnsignedInt);
+
         /// <summary>
         /// Per-segment length tessellation: the apparent on-screen radius scaled by m_flTessScale picks a
         /// power-of-two subdivision count within [m_nMinTesselation, m_nMaxTesselation], bumped one or two
@@ -247,22 +243,22 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             for (var i = 0; i < segmentCount; i++)
             {
                 var direction = positions[i + 1] - positions[i];
-                directions[i] = direction.LengthSquared() > ParticleMath.MinimumLengthSquared ? Vector3.Normalize(direction) : Vector3.UnitX;
+                directions[i] = MathUtils.SafeNormalize(direction, Vector3.UnitX, ParticleMath.MinimumLengthSquared);
             }
 
             for (var i = 0; i < segmentCount; i++)
             {
                 var radius = chain[i].Radius;
                 var midpoint = (positions[i] + positions[i + 1]) * 0.5f;
-                var distanceSquared = (midpoint - camera.Location).LengthSquared();
+                var distanceSquared = Vector3.DistanceSquared(midpoint, camera.Location);
 
                 // Apparent radius as a fraction of the viewport; full when the camera is inside the tube.
                 var size = distanceSquared <= radius * radius
                     ? 1f
-                    : Math.Clamp(radius * camera.ProjectionMatrix.M22 / MathF.Sqrt(distanceSquared), 0f, 1f);
+                    : MathUtils.Saturate(radius * camera.ProjectionMatrix.M22 / MathF.Sqrt(distanceSquared));
 
                 var tess = size * tessScale * resolutionScale;
-                var subdivisions = Math.Clamp(Math.Clamp((int)tess, minTessellation, maxTessellation), 1, 1 << MaxTessellationLevel);
+                var subdivisions = Math.Clamp(MathUtils.Clamp((int)tess, minTessellation, maxTessellation), 1, 1 << MaxTessellationLevel);
                 var level = BitOperations.Log2((uint)subdivisions);
 
                 var bendPrev = i > 0 ? Vector3.Dot(directions[i], directions[i - 1]) : 1f;
@@ -334,21 +330,6 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             ringSamples[cursor] = new RopeSample(positions[last], chain[last].Radius, chain[last].Color, last * repeats, false);
         }
 
-        // Prefers the probe volume containing the cable midpoint, falling back to the binding the
-        // scene assigned to the owning node. Failing to find one is a lighting problem and the
-        // cable renders unlit, the same way a model with a bad probe binding would.
-        private void ResolveLightProbe(ParticleSystemState systemState, Vector3 cablePosition)
-        {
-            lightProbeResolved = true;
-
-            if (!scene.LightingInfo.HasValidLightProbes)
-            {
-                return;
-            }
-
-            lightProbe = scene.FindLightProbe(cablePosition) ?? OwnerNode?.LightProbeBinding;
-        }
-
         private bool GeometryChanged(ReadOnlySpan<Vector3> positions, ReadOnlySpan<int> levels, ReadOnlySpan<float> radii, ReadOnlySpan<Vector3> colors)
         {
             // The count check guards the slices below: when it passes, lastCount >= 2.
@@ -376,17 +357,18 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
             if (!depthOnly)
             {
                 // todo: batch tube draws and call this less often
+                // todo: should be a scene node drawn with standard pass
                 scene.LightingInfo.BindLightmapTextures();
 
-                if (lightProbe is not null)
+                if (OwnerNode?.LightProbeBinding is { } lightProbe)
                 {
-                    drawShader.SetUniform1("uLightProbeIndex", (uint)lightProbe.ShaderIndex);
                     scene.LightingInfo.BindInstanceLightProbeTextures(lightProbe);
                 }
             }
 
             PerfStats.Active.Count(Counter.ParticleDraw);
-            GL.DrawElements(PrimitiveType.Triangles, indexCount, DrawElementsType.UnsignedInt, 0);
+
+            GL.DrawElementsInstancedBaseInstance(PrimitiveType.Triangles, indexCount, DrawElementsType.UnsignedInt, 0, 1, OwnerNode?.Id ?? 0);
 
             material.PostRender();
         }

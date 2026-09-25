@@ -87,7 +87,7 @@ internal sealed class SpectralCueFilters
 
         targetNotchHz = NotchFrequency(elevationDegrees);
         targetNotchDecibels = -depth;
-        targetShelfDecibels = RearShelfDecibels * strength * Math.Clamp(rearAmount, 0f, 1f);
+        targetShelfDecibels = RearShelfDecibels * strength * MathUtils.Saturate(rearAmount);
     }
 
     /// <summary>Interpolates <see cref="NotchFrequencies"/>, holding the end values beyond the measured range.</summary>
@@ -102,7 +102,7 @@ internal sealed class SpectralCueFilters
         {
             if (elevationDegrees <= NotchElevations[i])
             {
-                var t = (elevationDegrees - NotchElevations[i - 1]) / (NotchElevations[i] - NotchElevations[i - 1]);
+                var t = MathUtils.Remap(elevationDegrees, NotchElevations[i - 1], NotchElevations[i]);
                 return float.Lerp(NotchFrequencies[i - 1], NotchFrequencies[i], t);
             }
         }
@@ -119,7 +119,7 @@ internal sealed class SpectralCueFilters
     public bool Update(int sampleRate, int frames)
     {
         var elapsed = (float)frames / Math.Max(sampleRate, 1);
-        var smoothing = 1f - MathF.Exp(-elapsed / SmoothingSeconds);
+        var smoothing = MathUtils.ExponentialSmoothing(elapsed, SmoothingSeconds);
 
         notchHz = float.Lerp(notchHz, targetNotchHz, smoothing);
         notchDecibels = float.Lerp(notchDecibels, targetNotchDecibels, smoothing);

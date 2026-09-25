@@ -1,5 +1,5 @@
-using ValveResourceFormat.Particles.Utils;
 using ValveResourceFormat.ResourceTypes;
+using ValveResourceFormat.Utils;
 
 namespace ValveResourceFormat.Particles
 {
@@ -18,6 +18,14 @@ namespace ValveResourceFormat.Particles
         /// </summary>
         Matrix4x4 NextTransform(ParticleSystemState renderState)
             => NextTransform(ref Particle.Default, renderState);
+
+        /// <summary>
+        /// Returns the transform as it stood at <paramref name="time"/> within the frame being simulated, so a
+        /// particle spawned part way through a frame starts from where its source was at that moment.
+        /// Providers without a history answer with their current transform.
+        /// </summary>
+        Matrix4x4 NextTransformAtTime(ref Particle particle, ParticleSystemState renderState, float time)
+            => NextTransform(ref particle, renderState);
 
         /// <summary>
         /// Gets just the position component of the transform.
@@ -94,6 +102,30 @@ namespace ValveResourceFormat.Particles
         }
 
         /// <inheritdoc/>
+        public Matrix4x4 NextTransformAtTime(ref Particle particle, ParticleSystemState renderState, float time)
+        {
+            var cp = renderState.GetControlPoint(controlPoint);
+            var fraction = cp.StepFraction(renderState, time);
+
+            if (fraction >= 1f)
+            {
+                return NextTransform(ref particle, renderState);
+            }
+
+            var position = Vector3.Lerp(cp.PositionPrevious, cp.Position, fraction);
+
+            if (!HasOrientation(cp))
+            {
+                return Matrix4x4.CreateTranslation(position);
+            }
+
+            var rotation = cp.HasPreviousOrientation
+                ? Quaternion.Slerp(cp.GetPreviousRotation(), cp.GetRotation(), fraction)
+                : cp.GetRotation();
+            return Matrix4x4.CreateFromQuaternion(rotation) * Matrix4x4.CreateTranslation(position);
+        }
+
+        /// <inheritdoc/>
         public bool TryGetOrientation(ref Particle particle, ParticleSystemState renderState, out Vector3 orientation)
         {
             var cp = renderState.GetControlPoint(controlPoint);
@@ -108,7 +140,7 @@ namespace ValveResourceFormat.Particles
             // direction itself, so there is nothing to build here.
             orientation = cp.Rotation is { } fullRotation
                 ? Vector3.Transform(Vector3.UnitX, fullRotation)
-                : ParticleMath.Normalize(cp.Orientation);
+                : MathUtils.SafeNormalize(cp.Orientation);
 
             return true;
         }

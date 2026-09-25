@@ -107,6 +107,18 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     /// <summary>Gets or sets the normalized direction the light faces.</summary>
     public Vector3 Direction { get; set; }
 
+    /// <summary>
+    /// Places the light, setting <see cref="SceneNode.Transform"/>, <see cref="Position"/> and
+    /// <see cref="Direction"/> from one transform so a parent transform applies to all three.
+    /// </summary>
+    /// <param name="transform">The light's world transform; its first row is the direction it faces.</param>
+    public void PlaceAt(in Matrix4x4 transform)
+    {
+        Transform = transform;
+        Position = transform.Translation;
+        Direction = MathUtils.SafeNormalize(transform.GetRow(0).AsVector3());
+    }
+
     /// <summary>Gets or sets the sRGB color of the light.</summary>
     public Vector3 Color { get; set; } = Vector3.One;
 
@@ -351,7 +363,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             light.LuminaireShape = entity.GetInt32Property("luminaire_shape");
             light.LuminaireAnisotropy = entity.GetFloatProperty("luminaire_anisotropy");
             light.SizeParams = entity.GetVector3Property("size_params");
-            light.CookieTexturePath = entity.GetStringProperty("lightcookie");
+            light.CookieTexturePath = entity.GetStringProperty("lightcookie") is { Length: > 0 } cookie ? cookie : null;
             light.MinRoughness = entity.GetFloatProperty("minroughness", 0.04f);
 
             light.Shear = entity.GetVector2Property("shear");
@@ -372,7 +384,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             light.SpotInnerAngle = entity.GetFloatProperty("inner_angle");
             light.SpotOuterAngle = entity.GetFloatProperty("outer_angle", 180f);
             light.SizeParams = entity.GetVector3Property("size_params");
-            light.CookieTexturePath = entity.GetStringProperty("lightcookie");
+            light.CookieTexturePath = entity.GetStringProperty("lightcookie") is { Length: > 0 } cookie ? cookie : null;
             light.MinRoughness = entity.GetFloatProperty("minroughness", 0.04f);
             light.LuminaireShape = entity.GetInt32Property("shape");
             light.LuminaireSize = entity.GetFloatProperty("luminaire_size");
@@ -407,8 +419,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             }
         }
 
-        light.Position = entity.GetVector3Property("origin");
-        light.Direction = EntityTransformHelper.EulerAnglesToForwardDirection(entity.GetVector3Property("angles"));
+        // The caller places the light with PlaceAt, the keyvalues are in the entity's local space
         return light;
     }
 
@@ -710,10 +721,9 @@ public class SceneLight(Scene scene) : SceneNode(scene)
         var linearColor = ComputeOmni2Color(light);
 
         // custom point light hack
-        if (light.LuminaireShape == -1)
-        {
-            nearPlane = 0.001f;
-        }
+        const uint LitInsideNearPlaneFlag = 0x8000u;
+        const float ApexCullNearPlane = 0.001f;
+        var faceFlags = light.LuminaireShape == -1 ? 0xFFFF0000u | LitInsideNearPlaneFlag : 0xFFFF0000u;
 
         var cookieW = 0f;
         var cookieParams = new Vector4(1f, 1f, 0f, 0f);
@@ -737,6 +747,9 @@ public class SceneLight(Scene scene) : SceneNode(scene)
             var lightView = Matrix4x4.CreateLookAtLeftHanded(origin, origin + faceForward, faceUp);
             var lightProj = Matrix4x4.CreatePerspectiveLeftHanded(2f * nearPlane, 2f * nearPlane, nearPlane, nearPlane + range);
             var worldToFrustum = lightView * lightProj;
+            var cullProj = (faceFlags & LitInsideNearPlaneFlag) != 0u
+                ? Matrix4x4.CreatePerspectiveLeftHanded(2f * ApexCullNearPlane, 2f * ApexCullNearPlane, ApexCullNearPlane, nearPlane + range)
+                : lightProj;
             var (illuminationFromWorld, obbToWorld) = GetOmni2FaceOBB(light, faceIndex);
 
             return new BarnFaceData
@@ -754,11 +767,11 @@ public class SceneLight(Scene scene) : SceneNode(scene)
                     BarnLightBakedShadowMask = light.BakedShadowMask,
                     BarnLightMinRoughness = MathF.Max(0.04f, light.MinRoughness),
                     BarnLightShadowScale = 0f,
-                    PathTraceIndex_BarnLightFlags = 0xFFFF0000u,
+                    PathTraceIndex_BarnLightFlags = faceFlags,
                     BarnIlluminationFromWorld = illuminationFromWorld
                 },
                 WorldToFrustum = worldToFrustum,
-                FrustumToWorld = InvertFrustum(worldToFrustum),
+                FrustumToWorld = InvertFrustum(lightView * cullProj),
                 ObbToWorld = obbToWorld,
             };
         }
@@ -855,9 +868,9 @@ public class SceneLight(Scene scene) : SceneNode(scene)
 
     private static float SphericalTriangleArea(Vector3 p1, Vector3 p2, Vector3 p3)
     {
-        var a = MathF.Acos(Math.Clamp(Vector3.Dot(p2, p3), -1f, 1f));
-        var b = MathF.Acos(Math.Clamp(Vector3.Dot(p1, p3), -1f, 1f));
-        var c = MathF.Acos(Math.Clamp(Vector3.Dot(p1, p2), -1f, 1f));
+        var a = MathUtils.AngleBetween(p2, p3);
+        var b = MathUtils.AngleBetween(p1, p3);
+        var c = MathUtils.AngleBetween(p1, p2);
 
         if (a == 0f || b == 0f || c == 0f)
         {
@@ -902,9 +915,9 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     {
         var rotMatrix = EntityTransformHelper.EulerAnglesToRotationMatrix(angles);
 
-        var axis0 = new Vector3(rotMatrix.M11, rotMatrix.M12, rotMatrix.M13);
-        var axis1 = new Vector3(rotMatrix.M21, rotMatrix.M22, rotMatrix.M23);
-        var axis2 = new Vector3(rotMatrix.M31, rotMatrix.M32, rotMatrix.M33);
+        var axis0 = rotMatrix.GetRow(0).AsVector3();
+        var axis1 = rotMatrix.GetRow(1).AsVector3();
+        var axis2 = rotMatrix.GetRow(2).AsVector3();
 
         const float Shrink = 0.999f;
 
@@ -957,7 +970,7 @@ public class SceneLight(Scene scene) : SceneNode(scene)
     private static Vector3 ProjectNDCToWorld(Matrix4x4 frustumToWorld, float x, float y, float z)
     {
         var v = Vector4.Transform(new Vector4(x, y, z, 1f), frustumToWorld);
-        return new Vector3(v.X, v.Y, v.Z) / v.W;
+        return v.AsVector3() / v.W;
     }
 
     private static bool ShouldEnableOBB(SceneLight light)

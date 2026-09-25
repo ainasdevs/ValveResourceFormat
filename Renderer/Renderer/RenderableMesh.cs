@@ -17,12 +17,6 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets the axis-aligned bounding box of the mesh in local space.</summary>
         public AABB BoundingBox { get; }
 
-        /// <summary>Gets or sets the tint color multiplier applied to the entire mesh.</summary>
-        public Vector4 Tint { get; set; } = Vector4.One;
-
-        /// <summary>Gets or sets the alpha component of <see cref="Tint"/>.</summary>
-        public float Alpha { get => Tint.W; set => Tint = Tint with { W = value }; }
-
         private readonly RendererContext renderContext;
 
         /// <summary>Gets the list of meshlets for GPU-driven indirect culling.</summary>
@@ -40,8 +34,8 @@ namespace ValveResourceFormat.Renderer
         /// <summary>Gets all draw calls across all render buckets.</summary>
         public IEnumerable<DrawCall> DrawCalls => DrawCallsOpaque.Concat(DrawCallsOverlay).Concat(DrawCallsBlended);
 
-        /// <summary>Gets the GPU storage buffer holding the bone matrices for skeletal animation, or <see langword="null"/> if not animated.</summary>
-        public StorageBuffer? BoneMatricesGpu { get; private set; }
+        /// <summary>Gets whether this mesh is currently skinned.</summary>
+        public bool IsSkinningActive { get; private set; }
 
         /// <summary>Gets the starting bone index in the model-space bone array for this mesh.</summary>
         public int MeshBoneOffset { get; private set; }
@@ -56,7 +50,7 @@ namespace ValveResourceFormat.Renderer
         public MeshSkinning Skinning { get; private set; }
 
         /// <summary>Gets the variant to draw with now. Bind pose does not need skinning.</summary>
-        public MeshSkinning ActiveSkinning => BoneMatricesGpu != null ? Skinning : MeshSkinning.None;
+        public MeshSkinning ActiveSkinning => IsSkinningActive ? Skinning : MeshSkinning.None;
 
         /// <summary>Gets the name of the source mesh resource.</summary>
         public string Name { get; }
@@ -86,20 +80,11 @@ namespace ValveResourceFormat.Renderer
 
             if (model != null)
             {
-                var remapTableStarts = model.Data.GetIntegerArray("m_remappingTableStarts");
-                if (remapTableStarts.Length > meshIndex)
-                {
-                    MeshBoneOffset = (int)remapTableStarts[meshIndex];
-                }
-
-                var modelSpaceBoneIndices = model.GetRemapTable(meshIndex);
-                if (modelSpaceBoneIndices != null)
-                {
-                    MeshBoneCount = modelSpaceBoneIndices.Length;
-                }
+                MeshBoneOffset = model.BoneRemapTable.GetMeshStart(meshIndex);
+                MeshBoneCount = model.BoneRemapTable.GetMeshBoneCount(meshIndex);
             }
 
-            BoneWeightCount = mesh.Data.GetSubCollection("m_skeleton")?.GetInt32Property("m_nBoneWeightCount") ?? 0;
+            BoneWeightCount = mesh.BoneWeightCount;
             Skinning = GetSkinning(vbib, BoneWeightCount);
 
             mesh.GetBounds();
@@ -133,13 +118,23 @@ namespace ValveResourceFormat.Renderer
         }
 #endif
 
-        /// <summary>Assigns the GPU bone matrices buffer and resets flex controllers.</summary>
-        /// <param name="buffer">The storage buffer holding bone matrices, or <see langword="null"/> to disable skinning.</param>
-        public void SetBoneMatricesBuffer(StorageBuffer? buffer)
+        /// <summary>Turns skinning on or off for this mesh and resets flex controllers.</summary>
+        public void SetSkinningActive(bool active)
         {
-            BoneMatricesGpu = buffer;
+            IsSkinningActive = active;
 
-            FlexStateManager?.ResetControllers();
+            if (FlexStateManager is { } flexStateManager)
+            {
+                flexStateManager.ResetControllers();
+
+                var composite = flexStateManager.MorphComposite;
+
+                if (composite.IsPlaced)
+                {
+                    composite.Clear();
+                    renderContext.MorphAtlas.Queue(composite);
+                }
+            }
         }
 
         /// <summary>Recompiles all draw call materials with a modified shader static combo value.</summary>
@@ -274,15 +269,16 @@ namespace ValveResourceFormat.Renderer
 
                 foreach (var objectDrawCall in objectDrawCalls)
                 {
-                    var materialName = objectDrawCall.GetStringProperty("m_material") ?? objectDrawCall.GetStringProperty("m_pMaterial");
-                    if (materialReplacementTable?.TryGetValue(materialName, out var replacementName) is true)
-                    {
-                        materialName = replacementName;
-                    }
+                    var materialName = Mesh.GetMaterialName(objectDrawCall);
 
                     if (materialName == null && Mesh.IsOccluder(objectDrawCall))
                     {
                         continue;
+                    }
+
+                    if (materialName != null && materialReplacementTable?.TryGetValue(materialName, out var replacementName) is true)
+                    {
+                        materialName = replacementName;
                     }
 
                     var shaderArguments = new Dictionary<string, byte>(scene.RenderAttributes);
@@ -598,9 +594,6 @@ namespace ValveResourceFormat.Renderer
     /// </summary>
     public abstract class MeshCollectionNode : SceneNode
     {
-        /// <summary>Gets or sets the tint color applied to all meshes in this node.</summary>
-        public abstract Vector4 Tint { get; set; }
-
         /// <inheritdoc/>
         protected MeshCollectionNode(Scene scene) : base(scene)
         {
@@ -608,5 +601,7 @@ namespace ValveResourceFormat.Renderer
 
         /// <summary>Gets the list of renderable meshes owned by this node.</summary>
         public List<RenderableMesh> RenderableMeshes { get; protected init; } = [];
+
+        internal virtual List<RenderableMesh> AllRenderableMeshes => RenderableMeshes;
     }
 }

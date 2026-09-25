@@ -1,9 +1,6 @@
 //#define SCREENSHOT_MODE // Uncomment to hide version, keep title bar static, set an exact window size
 
-using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -16,12 +13,10 @@ using GUI.Types.GLViewers;
 using GUI.Types.PackageViewer;
 using GUI.Utils;
 using OpenTK.Windowing.Desktop;
-using Svg.Skia;
 using ValvePak;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.TextureDecoders;
 using Windows.Win32;
-using Windows.Win32.Graphics.Gdi;
 using Windows.Win32.UI.WindowsAndMessaging;
 using ResourceViewMode = GUI.Types.Viewers.ResourceViewMode;
 
@@ -148,6 +143,12 @@ namespace GUI
             mainLogo.Image = Themer.SvgToBitmap(AppIcons.ExtensionSVGS["Logo"], mainLogo.Width, mainLogo.Height);
         }
 
+        /// <summary>
+        /// Escapes a package or inner file path for a <c>vpk:</c> link, so that
+        /// <see cref="OpenCommandLineArgFiles"/> reads it back unchanged.
+        /// </summary>
+        public static string EscapeVpkLinkPath(string path) => path.Replace("%", "%25", StringComparison.Ordinal);
+
         public void OpenCommandLineArgFiles(string[] args)
         {
             for (var i = 0; i < args.Length; i++)
@@ -157,7 +158,7 @@ namespace GUI
                 // Handle vpk: protocol
                 if (file.StartsWith("vpk:", StringComparison.InvariantCulture))
                 {
-                    file = System.Net.WebUtility.UrlDecode(file[4..]);
+                    file = Uri.UnescapeDataString(file[4..]);
 
                     // Every ".vpk:" separates a package from the path inside it, so nested packages
                     // can be addressed as "outer_dir.vpk:maps/inner.vpk:models/file.vmdl_c"
@@ -705,14 +706,7 @@ namespace GUI
 
             try
             {
-                var parentContext = vrfGuiContext.ParentGuiContext;
-
-                while (parentContext != null)
-                {
-                    tab.ToolTipText = $"{tab.ToolTipText} ← {parentContext.FileName}";
-
-                    parentContext = parentContext.ParentGuiContext;
-                }
+                tab.ToolTipText = vrfGuiContext.FullPath;
 
                 var extension = Path.GetExtension(vrfGuiContext.FileName.AsSpan());
 
@@ -796,6 +790,11 @@ namespace GUI
                 {
                     BeginInvoke(() =>
                     {
+                        if (tab.IsDisposed)
+                        {
+                            return;
+                        }
+
                         var control = CodeTextBox.CreateFromException(ex, tab.ToolTipText);
 
                         tab.Controls.Add(control);
@@ -831,7 +830,20 @@ namespace GUI
                             Debug.Assert(false);
                         }
 
-                        viewer.Create(tab);
+                        try
+                        {
+                            viewer.Create(tab);
+                        }
+                        catch (Exception) when (tab.IsDisposed)
+                        {
+                            return;
+                        }
+
+                        if (tab.IsDisposed)
+                        {
+                            return;
+                        }
+
                         createdViewer = viewer;
 
                         if (mainTabs.SelectedTab == tab)
@@ -857,6 +869,11 @@ namespace GUI
                     {
                         BeginInvoke(() =>
                         {
+                            if (tab.IsDisposed)
+                            {
+                                return;
+                            }
+
                             var control = CodeTextBox.CreateFromException(ex, tab.ToolTipText);
 
                             tab.Controls.Add(control);
@@ -882,7 +899,11 @@ namespace GUI
                 {
                     vrfGuiContext.LoadingProgress = null;
 
-                    if (keepFrozen)
+                    if (tab.IsDisposed)
+                    {
+                        loadingFile?.Dispose();
+                    }
+                    else if (keepFrozen)
                     {
                         // Same-type preview: swap the frozen previous view for the newly loaded viewer.
                         Debug.Assert(packageTreeView != null);

@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text;
 using K4os.Compression.LZ4;
 using SkiaSharp;
@@ -174,6 +173,76 @@ namespace ValveResourceFormat.ResourceTypes
                 /// Gets the dictionary of floating-point parameters associated with this sequence.
                 /// </summary>
                 public Dictionary<string, float> FloatParams { get; } = [];
+
+                /// <summary>
+                /// Gets the time this sequence spans for playback, standing in one second for a
+                /// sequence that carries no total of its own.
+                /// </summary>
+                public float EffectiveTotalTime => TotalTime > 0f ? TotalTime : 1f;
+
+                /// <summary>
+                /// Gets a value indicating whether <see cref="Name"/> is a name the sheet was authored with.
+                /// A sequence that was never named carries the name of the element class it was built from.
+                /// </summary>
+                public bool IsNamed => Name.Length > 0
+                    && !Name.StartsWith("CDme", StringComparison.Ordinal)
+                    && !Name.Any(char.IsWhiteSpace);
+
+                /// <summary>
+                /// Gets the time at which a frame starts, measured from the start of the sequence.
+                /// </summary>
+                /// <param name="frameIndex">Index of the frame to locate.</param>
+                /// <returns>The frame's start time in seconds.</returns>
+                public float GetFrameStartTime(int frameIndex)
+                {
+                    var start = 0f;
+
+                    for (var frame = 0; frame < frameIndex && frame < Frames.Length; frame++)
+                    {
+                        start += Frames[frame].DisplayTime;
+                    }
+
+                    return start;
+                }
+
+                /// <summary>
+                /// The two frames a playback position sits between and how far it has crossed from the
+                /// first to the second. Every frame is held for its own display time as a share of the
+                /// sequence's total, so a sequence whose frames have uneven display times does not play
+                /// at a uniform rate. A clamping sequence holds its last frame; otherwise it wraps back
+                /// to the first.
+                /// </summary>
+                /// <param name="position">Playback position in seconds, within <see cref="EffectiveTotalTime"/>.</param>
+                /// <returns>The frame to show, the frame after it, and the fraction crossed between them.</returns>
+                public (int Frame, int NextFrame, float Blend) GetFrameAtPosition(float position)
+                {
+                    var lastFrame = Frames.Length - 1;
+
+                    if (lastFrame < 1)
+                    {
+                        return (0, 0, 0f);
+                    }
+
+                    var frameStart = 0f;
+
+                    for (var frame = 0; frame < lastFrame; frame++)
+                    {
+                        var displayTime = Frames[frame].DisplayTime;
+
+                        if (frameStart + displayTime > position)
+                        {
+                            return (frame, frame + 1, CrossedFraction(position - frameStart, displayTime));
+                        }
+
+                        frameStart += displayTime;
+                    }
+
+                    return Clamp
+                        ? (lastFrame, lastFrame, 0f)
+                        : (lastFrame, 0, CrossedFraction(position - frameStart, EffectiveTotalTime - frameStart));
+                }
+
+                private static float CrossedFraction(float into, float span) => span > 0f ? into / span : 0f;
             }
 
             /// <summary>
@@ -205,14 +274,28 @@ namespace ValveResourceFormat.ResourceTypes
             VTexFormat.IA88 => 2,
             VTexFormat.ETC2 => 8,
             VTexFormat.ETC2_EAC => 16,
+            VTexFormat.R11_EAC => 8,
+            VTexFormat.RG11_EAC => 16,
             VTexFormat.BGRA8888 => 4,
             VTexFormat.ATI1N => 8,
-            // TODO: ATI2N and RG11_EAC (16 bytes per 4x4 block) and R11_EAC (8 bytes per block) are
-            // block-compressed but fall through to 1 here, so their mip sizes are calculated as
-            // 1 byte per pixel with no block rounding. CalculateBufferSizeForMipLevel must also
-            // treat them as block-compressed.
+            VTexFormat.ATI2N => 16,
             _ => 1,
         };
+
+        /// <summary>
+        /// Gets a value indicating whether this texture stores 4x4 blocks rather than individual pixels.
+        /// </summary>
+        public bool IsBlockCompressed => Format
+            is VTexFormat.DXT1
+            or VTexFormat.DXT5
+            or VTexFormat.BC6H
+            or VTexFormat.BC7
+            or VTexFormat.ETC2
+            or VTexFormat.ETC2_EAC
+            or VTexFormat.R11_EAC
+            or VTexFormat.RG11_EAC
+            or VTexFormat.ATI1N
+            or VTexFormat.ATI2N;
 
         /// <inheritdoc/>
         public override BlockType Type => BlockType.DATA;
@@ -635,7 +718,7 @@ namespace ValveResourceFormat.ResourceTypes
             Debug.Assert(Reader is not null);
             ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(mipLevel, NumMipLevels, nameof(mipLevel));
 
-            var depthMip = (Flags & VTexFlags.VOLUME_TEXTURE) == 0 ? Depth : MipLevelSize(Depth, mipLevel);
+            var depthMip = (Flags & VTexFlags.VOLUME_TEXTURE) == 0 ? Depth : MathUtils.MipLevelSize(Depth, (int)mipLevel);
             ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(depth, (uint)depthMip, nameof(depth));
 
             if (face > 0)
@@ -648,8 +731,8 @@ namespace ValveResourceFormat.ResourceTypes
                 ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual((int)face, 6, nameof(face));
             }
 
-            var width = MipLevelSize(ActualWidth, mipLevel);
-            var height = MipLevelSize(ActualHeight, mipLevel);
+            var width = MathUtils.MipLevelSize(ActualWidth, (int)mipLevel);
+            var height = MathUtils.MipLevelSize(ActualHeight, (int)mipLevel);
 
             switch (Format)
             {
@@ -777,8 +860,8 @@ namespace ValveResourceFormat.ResourceTypes
 
         private ITextureDecoder CreateDecoder(uint mipLevel)
         {
-            var blockWidth = MipLevelSize(Width, mipLevel);
-            var blockHeight = MipLevelSize(Height, mipLevel);
+            var blockWidth = MathUtils.MipLevelSize(Width, (int)mipLevel);
+            var blockHeight = MathUtils.MipLevelSize(Height, (int)mipLevel);
 
             return Format switch
             {
@@ -793,6 +876,8 @@ namespace ValveResourceFormat.ResourceTypes
                 // ETC
                 VTexFormat.ETC2 => new DecodeETC2(blockWidth, blockHeight),
                 VTexFormat.ETC2_EAC => new DecodeETC2EAC(blockWidth, blockHeight),
+                VTexFormat.R11_EAC => new DecodeR11EAC(blockWidth, blockHeight),
+                VTexFormat.RG11_EAC => new DecodeRG11EAC(blockWidth, blockHeight),
 
                 // Simple colors
                 VTexFormat.I8 => new DecodeI8(),
@@ -865,9 +950,9 @@ namespace ValveResourceFormat.ResourceTypes
 
         private (int Width, int Height, int Depth) CalculateTextureSizesForMipLevel(uint mipLevel)
         {
-            var width = MipLevelSize(Width, mipLevel);
-            var height = MipLevelSize(Height, mipLevel);
-            var depth = (Flags & VTexFlags.VOLUME_TEXTURE) == 0 ? Depth : MipLevelSize(Depth, mipLevel);
+            var width = MathUtils.MipLevelSize(Width, (int)mipLevel);
+            var height = MathUtils.MipLevelSize(Height, (int)mipLevel);
+            var depth = (Flags & VTexFlags.VOLUME_TEXTURE) == 0 ? Depth : MathUtils.MipLevelSize(Depth, (int)mipLevel);
 
             if ((Flags & VTexFlags.CUBE_TEXTURE) != 0)
             {
@@ -881,13 +966,7 @@ namespace ValveResourceFormat.ResourceTypes
         {
             var bytesPerPixel = BlockSize;
 
-            if (Format == VTexFormat.DXT1
-            || Format == VTexFormat.DXT5
-            || Format == VTexFormat.BC6H
-            || Format == VTexFormat.BC7
-            || Format == VTexFormat.ETC2
-            || Format == VTexFormat.ETC2_EAC
-            || Format == VTexFormat.ATI1N)
+            if (IsBlockCompressed)
             {
                 var misalign = width % 4;
 
@@ -1282,12 +1361,6 @@ namespace ValveResourceFormat.ResourceTypes
             }
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int MipLevelSize(int size, uint level)
-        {
-            return Math.Max(size >> (int)level, 1);
-        }
-
         /// <summary>
         /// Retrieves the texture codec information from the resource's edit info.
         /// </summary>
@@ -1437,6 +1510,7 @@ namespace ValveResourceFormat.ResourceTypes
                         var sequence = data.Sequences[s];
 
                         writer.WriteLine("{0,-16} [Sequence {1}]:", string.Empty, s);
+                        writer.WriteLine("{0,-16}   m_nId             = {1}", string.Empty, sequence.Id);
                         writer.WriteLine("{0,-16}   m_name            = '{1}'", string.Empty, sequence.Name);
                         writer.WriteLine("{0,-16}   m_bClamp          = {1}", string.Empty, sequence.Clamp);
                         writer.WriteLine("{0,-16}   m_bAlphaCrop      = {1}", string.Empty, sequence.AlphaCrop);

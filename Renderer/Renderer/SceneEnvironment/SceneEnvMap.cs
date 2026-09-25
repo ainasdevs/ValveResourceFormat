@@ -1,4 +1,3 @@
-using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace ValveResourceFormat.Renderer.SceneEnvironment;
@@ -19,9 +18,6 @@ public class SceneEnvMap : SceneNode
 
     /// <summary>Gets the cubemap or cubemap-array texture for this environment map.</summary>
     public required RenderTexture EnvMapTexture { get; init; }
-
-    /// <summary>Gets the color tint applied to reflections from this env map.</summary>
-    public Vector3 Tint { get; init; } = Vector3.One;
 
     /// <summary>
     /// If <see cref="EnvMapTexture"/> is an array, this is the depth index.

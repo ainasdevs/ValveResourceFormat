@@ -1,3 +1,4 @@
+using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Particles;
 using ValveResourceFormat.ResourceTypes;
 
@@ -69,6 +70,9 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         /// <summary>Whether this renderer draws only into the water effects map, never into the scene.</summary>
         public bool OnlyRenderInEffectsWaterPass { get; }
 
+        /// <summary>Render in the bloom effects.</summary>
+        public bool OnlyRenderInEffectsBloomPass { get; }
+
         /// <summary>Whether what this renderer draws is an image; the water effects map takes data instead.</summary>
         protected bool OutputIsColor => !OnlyRenderInEffectsWaterPass;
 
@@ -90,6 +94,7 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         protected ParticleFunctionRenderer(ParticleDefinitionParser parse) : base(parse)
         {
             OnlyRenderInEffectsWaterPass = parse.Boolean("m_bOnlyRenderInEffectsWaterPass", false);
+            OnlyRenderInEffectsBloomPass = parse.Boolean("m_bOnlyRenderInEffectsBloomPass", false);
             RadiusScale = parse.NumberProvider("m_flRadiusScale", RadiusScale);
             AlphaScale = parse.NumberProvider("m_flAlphaScale", AlphaScale);
             ColorScale = parse.VectorProvider("m_vecColorScale", ColorScale);
@@ -214,6 +219,41 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
         {
         }
 
+        /// <summary>
+        /// Whether <see cref="RenderReplacement"/> draws anything. Only the renderers that hand over
+        /// world space vertices can; the rest expand their geometry in their own vertex shader.
+        /// </summary>
+        public virtual bool CanRenderReplacement => false;
+
+        /// <summary>
+        /// Draws with a pass replacement shader, for the picking buffer and the outline mask.
+        /// </summary>
+        /// <param name="replacement">The program the pass replaced the material shaders with.</param>
+        /// <param name="objectId">The owning scene node's id, drawn as the instancing base.</param>
+        public virtual void RenderReplacement(Shader replacement, uint objectId)
+        {
+        }
+
+        /// <summary>Draws indexed geometry with the object id as the instancing base, which is how the
+        /// picking and outline programs read it.</summary>
+        protected static void DrawReplacement(Shader replacement, uint objectId, int vaoHandle, int indexCount, DrawElementsType indexType)
+        {
+            if (indexCount == 0)
+            {
+                return;
+            }
+
+            VertexArray.Bind(vaoHandle, replacement);
+
+            GL.DrawElementsInstancedBaseInstance(PrimitiveType.Triangles, indexCount, indexType, 0, 1, objectId);
+        }
+
+        /// <summary>
+        /// The sheet this renderer animates its particles with, or null when the textures it draws
+        /// with carry none.
+        /// </summary>
+        public virtual Texture.SpritesheetData? SpriteSheet => null;
+
         /// <summary>A sheet frame rectangle as the shader reads it: minimum in xy, maximum in zw.</summary>
         /// <param name="min">Lower corner.</param>
         /// <param name="max">Upper corner.</param>
@@ -221,9 +261,8 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
 
         /// <summary>
         /// The two sheet frames a particle sits between and how far it has crossed from the first to
-        /// the second. Every frame is held for its own display time as a share of the sequence's total,
-        /// so a sequence whose frames have uneven display times does not play at a uniform rate.
-        /// A clamping sequence holds its last frame; otherwise it wraps back to the first.
+        /// the second. The particle's age and animation type give the playback position, which
+        /// <see cref="Texture.SpritesheetData.Sequence.GetFrameAtPosition"/> then resolves to frames.
         /// </summary>
         protected static (int Frame, int NextFrame, float Blend) GetSheetFrame(ref Particle particle,
             Texture.SpritesheetData.Sequence sequence, float animationRate, ParticleAnimationType animationType, bool animateInFps)
@@ -235,54 +274,36 @@ namespace ValveResourceFormat.Renderer.Particles.Renderers
                 return (0, 0, 0f);
             }
 
-            var totalTime = sequence.TotalTime > 0f ? sequence.TotalTime : 1f;
+            var totalTime = sequence.EffectiveTotalTime;
             var lastFrame = frameCount - 1;
+
+            float passes;
 
             if (animationType == ParticleAnimationType.ANIMATION_TYPE_MANUAL_FRAMES)
             {
-                var manualFrame = sequence.Clamp
-                    ? Math.Clamp(particle.ManualAnimationFrame, 0, lastFrame)
-                    : ((particle.ManualAnimationFrame % frameCount) + frameCount) % frameCount;
-
-                return (manualFrame, manualFrame, 0f);
+                passes = particle.ManualAnimationFrame;
             }
-
-            // The animation time is chosen by type first; animating in FPS only changes how the
-            // rate is interpreted afterwards, it does not replace the type
-            var animationTime = animationType switch
+            else
             {
-                ParticleAnimationType.ANIMATION_TYPE_FIT_LIFETIME => particle.NormalizedAge,
-                _ => particle.Age,
-            };
+                // The animation time is chosen by type first; animating in FPS only changes how the
+                // rate is interpreted afterwards, it does not replace the type
+                var animationTime = animationType switch
+                {
+                    ParticleAnimationType.ANIMATION_TYPE_FIT_LIFETIME => particle.NormalizedAge,
+                    _ => particle.Age,
+                };
 
-            var passes = animateInFps
-                ? animationTime * animationRate / totalTime
-                : animationTime * animationRate;
+                passes = animateInFps
+                    ? animationTime * animationRate / totalTime
+                    : animationTime * animationRate;
+            }
 
             var position = totalTime * (sequence.Clamp
-                ? Math.Clamp(passes, 0f, 1f)
-                : passes - MathF.Floor(passes));
+                ? MathUtils.Saturate(passes)
+                : MathUtils.Fract(passes));
 
-            var frameStart = 0f;
-
-            for (var frame = 0; frame < lastFrame; frame++)
-            {
-                var displayTime = sequence.Frames[frame].DisplayTime;
-
-                if (frameStart + displayTime > position)
-                {
-                    return (frame, frame + 1, CrossedFraction(position - frameStart, displayTime));
-                }
-
-                frameStart += displayTime;
-            }
-
-            return sequence.Clamp
-                ? (lastFrame, lastFrame, 0f)
-                : (lastFrame, 0, CrossedFraction(position - frameStart, totalTime - frameStart));
+            return sequence.GetFrameAtPosition(position);
         }
-
-        private static float CrossedFraction(float into, float span) => span > 0f ? into / span : 0f;
 
         /// <summary>
         /// Replaces the texture this renderer draws with.

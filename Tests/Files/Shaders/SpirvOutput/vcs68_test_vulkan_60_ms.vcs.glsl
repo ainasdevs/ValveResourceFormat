@@ -1,5 +1,5 @@
 // VRF-TEST
-// SPIR-V source (2492 bytes), GLSL reflection with SPIRV-Cross by KhronosGroup
+// SPIR-V source, GLSL reflection with SPIRV-Cross by KhronosGroup
 // Dynamic combos: D_MS_TEST
 
 #version 460

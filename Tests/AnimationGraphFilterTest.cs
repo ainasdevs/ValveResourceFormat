@@ -75,6 +75,14 @@ public class AnimationGraphFilterTest
         modelData["m_refAnimGroups"] = KVObject.Array();
         modelData["m_refAnimIncludeModels"] = KVObject.Array();
 
+        var skeleton = KVObject.Collection();
+        foreach (var key in new[] { "m_boneName", "m_nParent", "m_nFlag", "m_bonePosParent", "m_boneRotParent", "m_boneSphere" })
+        {
+            skeleton[key] = KVObject.Array();
+        }
+
+        modelData["m_modelSkeleton"] = skeleton;
+
         var modelInfo = KVObject.Collection();
         modelInfo["m_keyValueText"] = string.Empty;
         modelData["m_modelInfo"] = modelInfo;

@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows.Forms;
 using GUI.Controls;
-using GUI.Types.Graphs;
 using GUI.Types.Graphs.Core;
 using GUI.Utils;
 using OpenTK.Graphics.OpenGL;
@@ -212,7 +211,7 @@ namespace GUI.Types.GLViewers
                 InvalidateRender();
             });
             wireCombo = wireSelection.ComboBox;
-            wireCombo.Items.AddRange(new object[] { "Curved", "Straight" });
+            wireCombo.Items.AddRange(["Curved", "Straight"]);
             wireCombo.SelectedIndex = View.StraightWires ? 1 : 0;
             suppressWireChange = false;
             section.AddRow(wireSelection);

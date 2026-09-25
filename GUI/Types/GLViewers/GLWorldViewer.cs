@@ -9,7 +9,6 @@ using GUI.Utils;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Renderer;
-using ValveResourceFormat.Renderer.Entities;
 using ValveResourceFormat.Renderer.Input;
 using ValveResourceFormat.Renderer.SceneEnvironment;
 using ValveResourceFormat.Renderer.SceneNodes;
@@ -203,16 +202,16 @@ namespace GUI.Types.GLViewers
 
             if (world != null)
             {
-                LoadedWorld = new WorldLoader(world, Scene)
+                LoadedWorld = new WorldLoader(world, Scene, Renderer.EntitySystem)
                 {
                     LoadingProgress = GuiContext.LoadingProgress,
                 };
 
                 LoadedWorld.Load(mapExternalReferences);
 
-                if (LoadedWorld.SkyboxScene != null)
+                if (LoadedWorld.Skybox3D != null)
                 {
-                    Renderer.SkyboxScene = LoadedWorld.SkyboxScene;
+                    Renderer.Skybox3D = LoadedWorld.Skybox3D;
                 }
 
                 if (LoadedWorld.Skybox2D != null)
@@ -236,7 +235,7 @@ namespace GUI.Types.GLViewers
 
                 ReportLoadingStatus("Loading player model…");
 
-                Input.TryLoadViewmodel(Scene);
+                Input.TryLoadViewmodel(Scene, Renderer.EntitySystem);
 
                 var kzMapPrefixes = new[] { "bhop", "surf", "kz", "dr" };
                 var mapName = Path.GetFileName(LoadedWorld.MapName);
@@ -249,8 +248,8 @@ namespace GUI.Types.GLViewers
                     ? PlayerMovement.AirAccelerateMovementMaps
                     : PlayerMovement.AirAccelerateCompetitive;
 
-                Input.EntitySystem = Scene.EntitySystem;
-                Scene.EntitySystem.SpawnPlayer(Input.PlayerMovement);
+                Input.EntitySystem = Renderer.EntitySystem;
+                Renderer.EntitySystem.SpawnPlayer(Input.PlayerMovement, Scene);
             }
 
             if (!cameraSet)
@@ -377,8 +376,7 @@ namespace GUI.Types.GLViewers
 
                     worldLayersComboBox.EndUpdate();
 
-                    Scene.SetEnabledLayers(LoadedWorld.DefaultEnabledLayers);
-                    SkyboxScene?.SetEnabledLayers(LoadedWorld.DefaultEnabledLayers);
+                    SetEnabledLayers(LoadedWorld.DefaultEnabledLayers);
                 }
 
                 if (uniquePhysicsGroups.Count > 0)
@@ -395,28 +393,42 @@ namespace GUI.Types.GLViewers
 
                     UiControl.AddCheckBox("Show Fog", Scene.FogEnabled, v => Scene.FogEnabled = v);
 
-                    UiControl.AddCheckBox("Entity System", Scene.EntitySystem.Enabled, v => Scene.EntitySystem.Enabled = v);
+                    UiControl.AddCheckBox("Entity System", Renderer.EntitySystem.Enabled, v => Renderer.EntitySystem.Enabled = v);
 
                     UiControl.AddCheckBox("Color Correction", Renderer.Postprocess.ColorCorrectionEnabled, v => Renderer.Postprocess.ColorCorrectionEnabled = v);
 
-                    // TODO: PVS culling is not implemented yet
-                    // if (Scene.VoxelVisibility != null)
-                    // {
-                    //     UiControl.AddCheckBox("PVS Culling", Scene.EnablePvsCulling, v => Scene.EnablePvsCulling = v);
-                    // }
+                    if (Scene.VoxelVisibility != null)
+                    {
+                        UiControl.AddCheckBox("PVS Culling", Scene.EnablePvsCulling, v => Scene.EnablePvsCulling = v);
+                    }
+
+                    if (Renderer.Scenes.Any(static scene => scene.VisibilityBoxes.Count > 0))
+                    {
+                        UiControl.AddCheckBox("Visibility Boxes", Scene.VisibilityBoxes.Enabled, v =>
+                        {
+                            foreach (var scene in Renderer.Scenes)
+                            {
+                                scene.VisibilityBoxes.Enabled = v;
+                            }
+                        });
+                    }
 
                     CheckBox? occlusionCullingCheckBox = null;
 
                     if (GLEnvironment.SlowMultiDrawIndirect)
                     {
-                        Scene.EnableIndirectDraws = false;
-                        SkyboxScene?.EnableIndirectDraws = false;
+                        foreach (var scene in Renderer.Scenes)
+                        {
+                            scene.EnableIndirectDraws = false;
+                        }
                     }
 
                     UiControl.AddCheckBox("GPU Culling", Scene.EnableIndirectDraws, v =>
                     {
-                        Scene.EnableIndirectDraws = v;
-                        SkyboxScene?.EnableIndirectDraws = v;
+                        foreach (var scene in Renderer.Scenes)
+                        {
+                            scene.EnableIndirectDraws = v;
+                        }
 
                         if (occlusionCullingCheckBox != null)
                         {
@@ -557,19 +569,13 @@ namespace GUI.Types.GLViewers
                 tabControl.SelectTab(tabPage);
             }
 
-            var node = Scene.Find(entity);
-
-            if (node == null && SkyboxScene != null)
-            {
-                node = SkyboxScene.Find(entity);
-            }
+            var node = Renderer.FindNode(entity);
 
             if (node == null)
             {
                 // Tool entities (logic, sounds, finished particles) have no renderable
                 // scene node; fly to the entity origin instead.
-                var origin = entity.GetVector3Property("origin");
-                FocusCameraOnBounds(new AABB(origin - new Vector3(32f), origin + new Vector3(32f)));
+                FocusCameraOnBounds(EntityOriginBounds(entity));
                 return;
             }
 
@@ -597,7 +603,7 @@ namespace GUI.Types.GLViewers
 
             foreach (var entity in entities)
             {
-                var node = Scene.Find(entity) ?? SkyboxScene?.Find(entity);
+                var node = Renderer.FindNode(entity);
 
                 AABB entityBounds;
 
@@ -618,8 +624,7 @@ namespace GUI.Types.GLViewers
                 }
                 else
                 {
-                    var origin = entity.GetVector3Property("origin");
-                    entityBounds = new AABB(origin - new Vector3(32f), origin + new Vector3(32f));
+                    entityBounds = EntityOriginBounds(entity);
                 }
 
                 bounds = hasBounds ? bounds.Union(entityBounds) : entityBounds;
@@ -646,33 +651,46 @@ namespace GUI.Types.GLViewers
         private static AABB SelectionBounds(SceneNode node)
         {
             var bbox = node.BoundingBox;
-            var maxSpan = Math.Max(Math.Max(bbox.Size.X, bbox.Size.Y), bbox.Size.Z);
+            var maxSpan = bbox.Size.MaxComponent();
 
             // Empty or degenerate bounds (e.g. a particle system that finished playing)
             // would put the camera inside the node or at a garbage position.
             if (!float.IsFinite(maxSpan) || maxSpan < 1f)
             {
-                bbox = new AABB(node.Transform.Translation - new Vector3(32f), node.Transform.Translation + new Vector3(32f));
+                bbox = PointBounds(node.Transform.Translation);
             }
 
-            return bbox;
+            // Bounds of a 3D sky node are mapped to where the sky appears in the world
+            return bbox.Transform(node.Scene.ToViewerWorld);
         }
+
+        /// <summary>Bounds to focus on for an entity that has no scene node, from its authored origin.</summary>
+        private AABB EntityOriginBounds(EntityLump.Entity entity)
+        {
+            var origin = entity.GetVector3Property("origin");
+
+            if (Renderer.Skybox3D is { } skybox && skybox.Entities.Contains(entity))
+            {
+                origin = skybox.EntityOriginToWorld(origin);
+            }
+
+            return PointBounds(origin);
+        }
+
+        private static AABB PointBounds(Vector3 point) => new(point - new Vector3(32f), point + new Vector3(32f));
 
         private void FocusCameraOnBounds(in AABB bbox)
         {
             var center = bbox.Center;
-            var size = bbox.Size;
-            var maxDimension = Math.Max(Math.Max(size.X, size.Y), size.Z);
 
-            if (!float.IsFinite(maxDimension) || maxDimension < 1f)
-            {
-                maxDimension = 64f;
-            }
+            var size = bbox.Size * 1.25f;
 
-            // Orbit far enough out to frame the bounds, then let the physics probe move the camera
-            // off any wall or ceiling it would otherwise be spawned inside of.
-            var distance = Math.Max(maxDimension * 2.5f, 64f);
-            var location = CameraPlacement.FindOrbitPosition(Scene.PhysicsWorld, center, distance, maxDimension * 0.5f);
+            // Framed by what the bounds cover from where the camera will be: their longest axis would
+            // stand a cable or a trigger brush off by its own length. The floor keeps something player
+            // sized from filling the view with nothing around it to place it by.
+            var framing = Input.Camera.GetFramingDistance(size, -CameraPlacement.PreferredDirection(size));
+            var distance = Math.Max(framing, 192f);
+            var location = CameraPlacement.FindOrbitPosition(Renderer.EntitySystem.PhysicsWorld, center, distance, size);
 
             Input.SaveCameraForTransition();
             Input.Camera.SetLocation(location);
@@ -774,17 +792,17 @@ namespace GUI.Types.GLViewers
                     entityInfoForm.EntityInfoControl.AddProperty("Model Tint", ToRenderColor(sceneFragment.DrawCall.TintColor));
                     entityInfoForm.EntityInfoControl.AddProperty("Model Alpha", $"{sceneFragment.DrawCall.TintColor.W:F6}");
 
-                    if (sceneFragment.Tint != Vector4.One)
+                    if (sceneFragment.TintAlpha != Vector4.One)
                     {
-                        entityInfoForm.EntityInfoControl.AddProperty("Instance Tint", ToRenderColor(sceneFragment.Tint));
-                        entityInfoForm.EntityInfoControl.AddProperty("Final Tint", ToRenderColor(sceneFragment.DrawCall.TintColor * sceneFragment.Tint));
+                        entityInfoForm.EntityInfoControl.AddProperty("Instance Tint", ToRenderColor(sceneFragment.TintAlpha));
+                        entityInfoForm.EntityInfoControl.AddProperty("Final Tint", ToRenderColor(sceneFragment.DrawCall.TintColor * sceneFragment.TintAlpha));
                     }
                 }
                 else if (sceneNode is ModelSceneNode modelSceneNode)
                 {
                     entityInfoForm.EntityInfoControl.AddProperty("Model", modelSceneNode.Name!);
-                    entityInfoForm.EntityInfoControl.AddProperty("Model Tint", ToRenderColor(modelSceneNode.Tint));
-                    entityInfoForm.EntityInfoControl.AddProperty("Model Alpha", $"{modelSceneNode.Tint.W:F6}");
+                    entityInfoForm.EntityInfoControl.AddProperty("Model Tint", ToRenderColor(modelSceneNode.TintAlpha));
+                    entityInfoForm.EntityInfoControl.AddProperty("Model Alpha", $"{modelSceneNode.Alpha:F6}");
 
                     if (modelSceneNode.LightingOrigin.HasValue)
                     {
@@ -806,7 +824,7 @@ namespace GUI.Types.GLViewers
                 entityInfoForm.EntityInfoControl.AddProperty("Layer", sceneNode.LayerName ?? string.Empty);
             }
 
-            if (SkyboxScene != null && sceneNode.Scene == SkyboxScene)
+            if (sceneNode.Scene == Renderer.SkyboxScene)
             {
                 entityInfoForm.Text += " (in 3D skybox)";
             }
@@ -834,12 +852,7 @@ namespace GUI.Types.GLViewers
                 return;
             }
 
-            var node = Scene.FindNodeByTargetName(entityName);
-
-            if (node == null && SkyboxScene != null)
-            {
-                node = SkyboxScene.FindNodeByTargetName(entityName);
-            }
+            var node = Renderer.FindNodeByTargetName(entityName);
 
             if (node == null)
             {
@@ -867,12 +880,7 @@ namespace GUI.Types.GLViewers
                 return;
             }
 
-            var node = Scene.Find(sourceEntity);
-
-            if (node == null && SkyboxScene != null)
-            {
-                node = SkyboxScene.Find(sourceEntity);
-            }
+            var node = Renderer.FindNode(sourceEntity);
 
             if (node == null)
             {
@@ -989,7 +997,7 @@ namespace GUI.Types.GLViewers
             foundFile.Context.GLPostLoadAction = (viewerControl) =>
             {
                 // The inverse of a view matrix, so its third row is the camera's backward direction
-                var forward = -new Vector3(transform.M31, transform.M32, transform.M33);
+                var forward = -transform.GetRow(2).AsVector3();
 
                 if (viewerControl is GLSceneViewer sceneViewer)
                 {
@@ -1132,8 +1140,10 @@ namespace GUI.Types.GLViewers
 
             using var lockedGl = MakeCurrent();
 
-            Scene.UpdateOctrees();
-            SkyboxScene?.UpdateOctrees();
+            foreach (var scene in Renderer.Scenes)
+            {
+                scene.UpdateOctrees();
+            }
         }
     }
 }

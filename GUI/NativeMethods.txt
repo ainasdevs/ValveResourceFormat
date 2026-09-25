@@ -19,6 +19,7 @@ GetWindowThreadProcessId
 GetSystemMetricsForDpi
 GetWindowPlacement
 HTCAPTION
+HTCLIENT
 HTCLOSE
 HTLEFT
 HTMAXBUTTON
@@ -35,6 +36,7 @@ PostMessage
 SendMessage
 SendMessageTimeout
 SEND_MESSAGE_TIMEOUT_FLAGS
+SetDefaultDllDirectories
 SetParent
 SetWindowLongPtr
 SetWindowPlacement
@@ -61,5 +63,7 @@ WM_SIZE
 WM_SYSCOMMAND
 WM_VSCROLL
 WM_MOUSEWHEEL
+WM_LBUTTONDOWN
+WM_LBUTTONDBLCLK
 COPYDATASTRUCT
 HWND_MESSAGE

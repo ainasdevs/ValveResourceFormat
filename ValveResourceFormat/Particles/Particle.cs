@@ -1,6 +1,7 @@
 using ValveResourceFormat.Particles.Utils;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
+using ValveResourceFormat.Utils;
 
 namespace ValveResourceFormat.Particles
 {
@@ -110,7 +111,7 @@ namespace ValveResourceFormat.Particles
         public float Speed
         {
             readonly get => Velocity.Length();
-            set => Velocity = ParticleMath.Normalize(Velocity) * value;
+            set => Velocity = MathUtils.SafeNormalize(Velocity) * value;
         }
         /// <summary>
         /// Gets or sets the acceleration accumulated by force generators this frame; consumed and
@@ -124,8 +125,11 @@ namespace ValveResourceFormat.Particles
         /// </summary>
         public int SequenceNumber { get; set; } = 0;
 
-        /// <summary>Gets or sets the manually selected animation frame index.</summary>
-        public int ManualAnimationFrame { get; set; } = 0;
+        /// <summary>
+        /// Gets or sets the sprite sheet playback position an operator drives by hand, in sequence
+        /// loops: 0.5 is halfway through the sequence and 2.0 has played it twice.
+        /// </summary>
+        public float ManualAnimationFrame { get; set; }
 
         // Varying properties that we don't really support but are here in case they're used across operators
         /// <summary>

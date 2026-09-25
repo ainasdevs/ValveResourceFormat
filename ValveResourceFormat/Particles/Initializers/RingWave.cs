@@ -1,4 +1,4 @@
-using ValveResourceFormat.Particles.Utils;
+using ValveResourceFormat.Utils;
 
 namespace ValveResourceFormat.Particles.Initializers
 {
@@ -62,13 +62,13 @@ namespace ValveResourceFormat.Particles.Initializers
             var angle = GetNextAngle(particlesPerOrbit, particles.Capacity, particleSystemState);
             var radialDirection = new Vector3(MathF.Cos(angle), MathF.Sin(angle), 0);
 
-            var transform = transformInput.NextTransform(ref particle, particleSystemState);
+            var transform = transformInput.NextTransformAtTime(ref particle, particleSystemState, particle.CreationTime);
 
             particle.Position = Vector3.Transform((radius * radialDirection) + thicknessOffset, transform);
 
             // Initial speed pushes outward, along the line from the transform to where the particle
             // actually landed, so the thickness offset tilts the direction as well as the position.
-            var outward = ParticleMath.Normalize(particle.Position - transform.Translation);
+            var outward = MathUtils.SafeNormalize(particle.Position - transform.Translation);
 
             if (xyVelocityOnly)
             {

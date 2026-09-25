@@ -129,9 +129,7 @@ public class Rubikon
     /// </summary>
     private static (string[] InteractAs, string[] InteractExclude) GetInteractStrings(KVObject collisionAttributes)
     {
-        var interactAs = collisionAttributes.GetArray<string>("m_InteractAsStrings")
-            ?? collisionAttributes.GetArray<string>("m_PhysicsTagStrings")
-            ?? [];
+        var interactAs = PhysAggregateData.GetInteractAsTags(collisionAttributes);
         var interactExclude = collisionAttributes.GetArray<string>("m_InteractExcludeStrings") ?? [];
 
         return (interactAs, interactExclude);
@@ -270,15 +268,11 @@ public class Rubikon
             RayIntersectsWithMesh(ray, mesh, ref closestHit);
         }
 
-        foreach (var hull in Hulls)
+        if (HullTree.Length > 0)
         {
-            // Invisible clip geometry should not block picking, matching the mesh filter above
-            if (ContainsString(hull.InteractAs, "playerclip"))
-            {
-                continue;
-            }
-
-            RayIntersectsWithHull(ray, hull, ref closestHit);
+            var query = new RayHullsQuery(ray, Hulls, HullIndices) { ClosestHit = closestHit };
+            TraverseBvh(HullTree, ref query);
+            closestHit = query.ClosestHit;
         }
 
         return closestHit;
@@ -688,7 +682,7 @@ public class Rubikon
     {
         if (axis == 0)
         {
-            axisVector = Vector3.Cross(triangle[1] - triangle[0], triangle[2] - triangle[0]);
+            axisVector = MathUtils.TriangleCross(triangle[0], triangle[1], triangle[2]);
 
             if (skipDegenerateFace && axisVector.LengthSquared() < Epsilon * Epsilon)
             {
@@ -951,6 +945,35 @@ public class Rubikon
         }
     }
 
+    private struct RayHullsQuery(RayTraceContext ray, PhysicsHullData[] hulls, int[] hullIndices) : IBvhQuery
+    {
+        public TraceResult ClosestHit;
+
+        // Skip nodes that cannot contain a hit closer than the best one found so far
+        public readonly bool IntersectsNode(in Node node)
+            => RayIntersectsAABB(ray, node.Min, node.Max, out var entryDistance) && entryDistance <= ClosestHit.Distance;
+
+        // Traverse the child nearest along the ray first
+        public readonly bool DescendLeftFirst(int splitAxis) => ray.Direction[splitAxis] >= 0;
+
+        public bool VisitLeaf(int start, int count)
+        {
+            for (var i = start; i < start + count; i++)
+            {
+                var hull = hulls[hullIndices[i]];
+
+                if (ContainsString(hull.InteractAs, "playerclip"))
+                {
+                    continue;
+                }
+
+                RayIntersectsWithHull(ray, hull, ref ClosestHit);
+            }
+
+            return false;
+        }
+    }
+
     private static void RayIntersectsWithMesh(RayTraceContext ray, PhysicsMeshData mesh, ref TraceResult closestHit)
     {
         var query = new RayMeshQuery(ray, mesh) { ClosestHit = closestHit };
@@ -1002,8 +1025,8 @@ public class Rubikon
         var tNear = Vector3.Min(t1, t2);
         var tFar = Vector3.Max(t1, t2);
 
-        var tNearMax = MathF.Max(tNear.X, MathF.Max(tNear.Y, tNear.Z));
-        var tFarMin = MathF.Min(tFar.X, MathF.Min(tFar.Y, tFar.Z));
+        var tNearMax = tNear.MaxComponent();
+        var tFarMin = tFar.MinComponent();
 
         // Negative when the ray starts inside the box
         entryDistance = tNearMax;
@@ -1152,7 +1175,9 @@ public class Rubikon
 
             //avoids division early
             if (min > tracedDistanceAlongAxis)
+            {
                 return;
+            }
 
             min /= tracedDistanceAlongAxis;
             max /= tracedDistanceAlongAxis;
@@ -1165,18 +1190,20 @@ public class Rubikon
             exit = MathF.Min(exit, max);
 
             if (enter > exit || exit <= 0)
+            {
                 return;
+            }
         }
         if (enter > 1.0f)
+        {
             return;
+        }
 
         // Already overlapping this triangle at the start position - nothing can be closer,
         // so report start-solid and let the callers early-exit
         if (trace.DetectStartSolid && enter < 0 && exit >= 0)
         {
-            var startNormal = Vector3.Cross(v1 - v0, v2 - v0);
-            var startNormalLength = startNormal.Length();
-            startNormal = startNormalLength > Epsilon ? startNormal / startNormalLength : Vector3.UnitZ;
+            var startNormal = MathUtils.SafeNormalize(MathUtils.TriangleCross(v0, v1, v2), Vector3.UnitZ, Epsilon * Epsilon);
 
             if (Vector3.Dot(startNormal, trace.Direction) > 0)
             {

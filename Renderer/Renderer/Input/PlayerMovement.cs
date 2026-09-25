@@ -877,13 +877,13 @@ public partial class PlayerMovement : IPlayerController
     {
         var quarterExtents = new Vector3(halfExtents.X * 0.5f, halfExtents.Y * 0.5f, halfExtents.Z);
 
-        Span<Vector2> corners = stackalloc[]
-        {
+        Span<Vector2> corners =
+        [
             new Vector2(-1, -1),
             new Vector2(1, -1),
             new Vector2(-1, 1),
             new Vector2(1, 1),
-        };
+        ];
 
         foreach (var corner in corners)
         {
@@ -910,8 +910,8 @@ public partial class PlayerMovement : IPlayerController
         }
 
         // No downward candidates: don't unstuck into a fall
-        Span<Vector3> directions = stackalloc[]
-        {
+        Span<Vector3> directions =
+        [
             Vector3.UnitZ,        // Up
             Vector3.UnitX,        // Right
             -Vector3.UnitX,       // Left
@@ -921,7 +921,7 @@ public partial class PlayerMovement : IPlayerController
             Vector3.Normalize(new Vector3(-1, 1, 0)),
             Vector3.Normalize(new Vector3(1, -1, 0)),
             Vector3.Normalize(new Vector3(-1, -1, 0)),
-        };
+        ];
 
         for (var distance = 1f; distance < 100f; distance += 10f)
         {
@@ -1159,7 +1159,7 @@ public partial class PlayerMovement : IPlayerController
         // distance fraction, with no special case needed for a small ratio.
         var timeFraction = 2f * distanceFraction / (linearCoefficient + MathF.Sqrt(discriminant));
 
-        return float.IsFinite(timeFraction) ? Math.Clamp(timeFraction, 0f, 1f) : distanceFraction;
+        return float.IsFinite(timeFraction) ? MathUtils.Saturate(timeFraction) : distanceFraction;
     }
 
     /// <summary>
@@ -1469,7 +1469,7 @@ public partial class PlayerMovement : IPlayerController
 
         // Direct branch: stop at the wall
         var directPosition = direct.HitPosition;
-        var directLateral = new Vector2(directPosition.X - start.X, directPosition.Y - start.Y).LengthSquared();
+        var directLateral = LateralProgress(start, directPosition, delta);
 
         // Stepped branch: step up as far as headroom allows, sweep, then settle back down
         var stepUpEnd = start + new Vector3(0, 0, StepSize);
@@ -1477,6 +1477,15 @@ public partial class PlayerMovement : IPlayerController
         var steppedStart = upTrace.Hit ? upTrace.HitPosition : stepUpEnd;
 
         var steppedSweep = TraceBBox(steppedStart, steppedStart + delta, halfExtents);
+
+        // Blocked at once by a wall the direct sweep missed: it's a wall we're sliding along, so
+        // report it without moving and let the caller retry the step along it
+        if (steppedSweep.Hit && steppedSweep.IsMinimalDistance && direct.HitNormal.Z < WalkableSlope
+            && !ContainsPlane([direct.HitNormal], steppedSweep.HitNormal))
+        {
+            return (start, 0f, steppedSweep.HitNormal, true);
+        }
+
         var steppedSlide = steppedSweep.Hit ? steppedSweep.HitPosition : steppedStart + delta;
 
         var downEnd = steppedSlide + new Vector3(0, 0, -(StepSize + GroundProbeDistance));
@@ -1492,7 +1501,7 @@ public partial class PlayerMovement : IPlayerController
         if (!landingInvalid)
         {
             var steppedPosition = downTrace.HitPosition;
-            var steppedLateral = new Vector2(steppedPosition.X - start.X, steppedPosition.Y - start.Y).LengthSquared();
+            var steppedLateral = LateralProgress(start, steppedPosition, delta);
 
             if (steppedLateral >= directLateral)
             {
@@ -1511,6 +1520,25 @@ public partial class PlayerMovement : IPlayerController
     }
 
     /// <summary>
+    /// How far <paramref name="position"/> got from <paramref name="start"/> along the lateral
+    /// (XY) direction <paramref name="delta"/> meant to go, signed: a move ending up behind
+    /// where it started reports a negative distance. Zero for negligible lateral intent.
+    /// </summary>
+    private static float LateralProgress(Vector3 start, Vector3 position, Vector3 delta)
+    {
+        var intended = new Vector2(delta.X, delta.Y);
+        var intendedLength = intended.Length();
+
+        if (intendedLength < 1e-4f)
+        {
+            return 0f;
+        }
+
+        var achieved = new Vector2(position.X - start.X, position.Y - start.Y);
+        return Vector2.Dot(achieved, intended / intendedLength);
+    }
+
+    /// <summary>
     /// Fraction of a move's intended lateral (XY) distance that <paramref name="position"/>
     /// reached from <paramref name="start"/>. Returns 1 for negligible lateral intent so the
     /// caller treats the move as unobstructed.
@@ -1524,8 +1552,7 @@ public partial class PlayerMovement : IPlayerController
             return 1f;
         }
 
-        var achieved = new Vector2(position.X - start.X, position.Y - start.Y).Length();
-        return Math.Clamp(achieved / intended, 0f, 1f);
+        return MathUtils.Saturate(LateralProgress(start, position, delta) / intended);
     }
 
     /// <summary>
@@ -1543,7 +1570,7 @@ public partial class PlayerMovement : IPlayerController
             if (horizontalSpeed > 0.001f)
             {
                 var horizontalDir = horizontalVel / horizontalSpeed;
-                var projectedDir = horizontalDir - normal * Vector3.Dot(horizontalDir, normal);
+                var projectedDir = MathUtils.ProjectOntoPlane(horizontalDir, normal);
 
                 if (projectedDir.LengthSquared() > 0.001f)
                 {
@@ -1557,7 +1584,7 @@ public partial class PlayerMovement : IPlayerController
             if (deltaLength > 0.001f)
             {
                 var deltaDir = horizontalDelta / deltaLength;
-                var projectedDeltaDir = deltaDir - normal * Vector3.Dot(deltaDir, normal);
+                var projectedDeltaDir = MathUtils.ProjectOntoPlane(deltaDir, normal);
 
                 if (projectedDeltaDir.LengthSquared() > 0.001f)
                 {
@@ -1569,8 +1596,8 @@ public partial class PlayerMovement : IPlayerController
         }
         else
         {
-            delta -= normal * Vector3.Dot(delta, normal);
-            velocity -= normal * Vector3.Dot(velocity, normal);
+            delta = MathUtils.ProjectOntoPlane(delta, normal);
+            velocity = MathUtils.ProjectOntoPlane(velocity, normal);
             return 1f;
         }
     }
@@ -1953,7 +1980,7 @@ public partial class PlayerMovement : IPlayerController
         // Come to a complete stop from a crawl. Source runs this before Accelerate; after
         // it, high framerates would re-zero every frame's sub-unit acceleration gain and
         // the player could never start moving
-        if (Velocity.LengthSquared() < 1f)
+        if (wishspeed <= 0f && Velocity.LengthSquared() < 1f)
         {
             Velocity = Vector3.Zero;
         }
@@ -1975,7 +2002,7 @@ public partial class PlayerMovement : IPlayerController
             Velocity = CapSpeedNoPrestrafe(Velocity, wishdir, wishspeed, previousSpeed, preFrictionVelocity, deltaTime, frictionRate, accelMagnitude);
 
             // A cap intervention changes the trajectory mid-frame; fall back to the trapezoid
-            if ((Velocity - preCapVelocity).LengthSquared() > 1e-8f)
+            if (Vector3.DistanceSquared(Velocity, preCapVelocity) > 1e-8f)
             {
                 GroundMoveDelta = TrapezoidDisplacement(preFrictionVelocity, Velocity, deltaTime);
             }
@@ -2187,7 +2214,7 @@ public partial class PlayerMovement : IPlayerController
 
         foreach (var plane in DebugCollisionPlanes)
         {
-            var normal = new Vector3(plane.X, plane.Y, plane.Z);
+            var normal = plane.AsVector3();
             result.MinimizeWith(TraceStaticPlane(from, to, halfExtents, normal, plane.W, detectStartSolid));
         }
 

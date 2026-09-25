@@ -62,7 +62,7 @@
 #define F_BLEND_MODE 0 // csgo_projected_decals, csgo_static_overlay, csgo_unlitgeneric, vr_projected_decals, vr_static_overlay
 #define F_GLASS 0 // complex, pbr, vr_standard
 uniform int F_DISABLE_TONE_MAPPING; // vr_complex
-#define F_SCALE_NORMAL_MAP 0 // vr_complex
+uniform int F_SCALE_NORMAL_MAP; // vr_complex
 // TEXTURING
 #define F_TINT_MASK 0 // most shaders
 #define F_FANCY_BLENDING 0 // csgo_lightmappedgeneric
@@ -87,7 +87,7 @@ uniform int F_NO_SPECULAR_AT_FULL_ROUGHNESS; // csgo_lightmappedgeneric, pbr
 #define F_SUBSURFACE_SCATTERING 0 // csgo_character, vr_skin
 //#define F_USE_FACE_OCCLUSION_TEXTURE 0 // todo: weird; vr_skin, vr_xen_foliage
 #define F_USE_PER_VERTEX_CURVATURE 0 // vr_skin, vr_skin_blended
-#define F_SSS_MASK 0 // vr_skin
+uniform int F_SSS_MASK; // vr_skin
 
 //End of feature defines
 
@@ -198,7 +198,7 @@ uniform sampler2D g_tTintMask;
     #if F_TINT_MASK
         uniform bool g_bUseSecondaryUvForTintMask = true;
     #endif
-    #if F_DETAIL_TEXTURE > 0
+    #if defined(detail_texture_vfx_common)
         uniform bool g_bUseSecondaryUvForDetailMask = true;
     #endif
     #if (selfillum)
@@ -292,12 +292,12 @@ uniform sampler2D g_tTintMask;
     uniform float g_flRetroReflectivity = 1.0;
 #endif
 
-#if (F_SCALE_NORMAL_MAP == 1)
-    uniform float g_flNormalMapScaleFactor = 1.0;
-#endif
+uniform float g_flNormalMapScaleFactor = 1.0;
 
 #if defined(csgo_generic_vfx_common)
     uniform float g_flBumpStrength = 1.0;
+#else
+    #define g_flBumpStrength 1.0
 #endif
 
 #if (_ambientOcclusionTexture)
@@ -342,6 +342,7 @@ uniform sampler2D g_tTintMask;
 #include "common/lighting.slang"
 
 #include "features/csgo_character_eyes_ps.slang"
+#include "features/csgo_character_adjustments_ps.slang"
 
 MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
 {
@@ -356,7 +357,7 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
     vec3 viewDirInv = -mat.ViewDir;
     float invDepth = 1.0 / dot(viewDirInv, mat.GeometricNormal);
     float NdotV = clamp(dot(mat.ViewDir, mat.GeometricNormal), 0.0001, 1.0);
-    float fresnel = clamp(pow(NdotV, 0.7), 0.0, 1.0);
+    float fresnel = saturate(pow(NdotV, 0.7));
     vec2 viewDirTs = vec2(dot(viewDirInv, mat.Tangent), dot(viewDirInv, mat.Bitangent));
     vec2 normalXY = vec2(mat.NormalMap.x, -mat.NormalMap.y);
 
@@ -385,7 +386,7 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
 
     // Emissive
     vec3 layer1Emissive = (layer1Color.rgb * g_vLayer1EmissiveTint * g_flLayer1EmissiveLevel) * tintFactor;
-    float emissiveFresnel = clamp(pow(NdotV, g_flLayer2EmissiveFresnel), 0.0, 1.0);
+    float emissiveFresnel = saturate(pow(NdotV, g_flLayer2EmissiveFresnel));
     vec3 layer2Emissive = (layer2Color * emissiveFresnel * g_vLayer2EmissiveTint * g_flLayer2EmissiveLevel) * tintFactor;
     mat.IllumColor = mix(layer2Emissive, layer1Emissive, layer1Color.a) * (1.0 - mask);
 
@@ -472,11 +473,7 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
             //float flTintMask = combinedMasks.z;
         #endif
 
-        #if (F_SSS_MASK == 1)
-            mat.SSSMask = combinedMasks.a;
-        #else
-            mat.SSSMask = 1.0;
-        #endif
+        mat.SSSMask = (F_SSS_MASK == 1) ? combinedMasks.a : 1.0;
 
         #if (translucent) || (alphatest)
             mat.Opacity = combinedMasks.a;
@@ -575,14 +572,10 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
 #endif
 
 
-#if (F_SCALE_NORMAL_MAP == 1)
-    mat.NormalMap = normalize(mix(vec3(0, 0, 1), mat.NormalMap, g_flNormalMapScaleFactor));
-#elif defined(csgo_generic_vfx_common)
-    mat.NormalMap = normalize(mix(vec3(0, 0, 1), mat.NormalMap, g_flBumpStrength));
-#endif
+    mat.NormalMap = normalize(mix(vec3(0, 0, 1), mat.NormalMap, (F_SCALE_NORMAL_MAP == 1) ? g_flNormalMapScaleFactor : g_flBumpStrength));
 
     // Detail texture
-#if (F_DETAIL_TEXTURE > 0)
+#if defined(detail_texture_vfx_common)
     #if (F_SECONDARY_UV == 1) || (F_FORCE_UV2 == 1)
         vec2 detailMaskCoords = (g_bUseSecondaryUvForDetailMask || (F_FORCE_UV2 == 1)) ? vTexCoord2 : texCoord;
     #else
@@ -597,7 +590,7 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
     vec2 vNormalTexels = texCoord * vec2(textureSize(g_tNormal, 0));
     vec2 vNormalDdx = dFdx(vNormalTexels);
     vec2 vNormalDdy = dFdy(vNormalTexels);
-    float flBlurLod = max(0.5 * log2(max(dot(vNormalDdx, vNormalDdx), dot(vNormalDdy, vNormalDdy))), g_flDiffuseNormalBlur);
+    float flBlurLod = max(0.5 * log2(max(length_squared(vNormalDdx), length_squared(vNormalDdy))), g_flDiffuseNormalBlur);
 
     vec3 vBlurredNormalMap = DecodeHemiOctahedronNormal(textureLod(g_tNormal, texCoord, flBlurLod).rg);
     vec3 vBlurredNormal = calculateWorldNormal(vBlurredNormalMap, mat.GeometricNormal, mat.Tangent, mat.Bitangent);
@@ -659,6 +652,13 @@ MaterialProperties_t GetMaterial(vec2 texCoord, vec3 vertexNormals)
 
 #if (GameVfx_vr_complex != 0)
     mat.ClothMask = F_CLOTH_SHADING == 1 ? 1.0 : 0.0;
+#endif
+
+#if CS2_CHARACTER_ADJUSTMENTS
+    #if (F_TINT_MASK == 0)
+        float tintStrength = 1.0;
+    #endif
+    ApplyCharacterAdjustments(mat, tintStrength);
 #endif
 
     AdjustRoughnessByGeometricNormal(mat);

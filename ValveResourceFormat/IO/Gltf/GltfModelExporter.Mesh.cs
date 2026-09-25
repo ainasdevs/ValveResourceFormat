@@ -42,7 +42,7 @@ public partial class GltfModelExporter
 
         vmesh.LoadExternalMorphData(FileLoader);
 
-        var boneWeightCount = vmesh.Data.GetSubCollection("m_skeleton")?.GetInt32Property("m_nBoneWeightCount") ?? 0;
+        var boneWeightCount = vmesh.BoneWeightCount;
 
         var vertexBufferAccessors = CreateVertexBufferAccessors(exportedModel, vbib, boneRemapTable != null ? boneWeightCount : 0, boneRemapTable);
         var vertexOffset = 0;
@@ -324,7 +324,7 @@ public partial class GltfModelExporter
     {
         CancellationToken.ThrowIfCancellationRequested();
 
-        var drawCallMaterialPath = drawCall.GetStringProperty("m_material") ?? drawCall.GetStringProperty("m_pMaterial");
+        var drawCallMaterialPath = VMesh.GetMaterialName(drawCall)!;
 
         // Apply material group replacement table (from entity skin property)
         var effectiveMaterialPath = materialReplacementTable != null
@@ -505,7 +505,7 @@ public partial class GltfModelExporter
     // Copied from ValveResourceFormat.Renderer.SceneAggregate.CreateFragments
     private bool AggregateCreateFragments(ModelRoot exportedModel, Scene scene, VModel model, KVObject aggregateSceneObject, string name)
     {
-        var embeddedMeshes = model.GetEmbeddedMeshesAndLoD().ToList();
+        var embeddedMeshes = model.GetEmbeddedMeshes().ToList();
         VMesh vmesh;
 
         // TODO: Perhaps use <see cref="ModelSceneNode.LoadMeshes" />
@@ -579,7 +579,7 @@ public partial class GltfModelExporter
             var drawCall = drawCalls[drawCallIndex];
             var transform = Matrix4x4.Identity;
 
-            if (fragmentData.GetBooleanProperty("m_bHasTransform") == true)
+            if (fragmentData.GetBooleanProperty("m_bHasTransform"))
             {
                 transform *= fragmentTransforms[transformIndex++].ToMatrix4x4();
 
@@ -595,7 +595,7 @@ public partial class GltfModelExporter
 
             var lodGroupMask = fragmentData.GetUInt32Property("m_nLODGroupMask");
             var setupIndex = fragmentData.GetInt32Property("m_nLODSetupIndex", -1);
-            if (!ResourceTypes.ModelLodInfo.IsInLowestSetLevel(lodGroupMask, combinedLodMaskPerSetup[setupIndex]))
+            if (!ResourceTypes.ModelData.ModelLodInfo.IsInLowestSetLevel(lodGroupMask, combinedLodMaskPerSetup[setupIndex]))
             {
                 continue;
             }
@@ -676,7 +676,7 @@ public partial class GltfModelExporter
                     }
 
                     var normal = normalDeltas[vertexId];
-                    normals[i] = new Vector3(normal.X, normal.Y, normal.Z);
+                    normals[i] = normal.AsVector3();
                     anyNormal |= normals[i] != Vector3.Zero;
                 }
 
@@ -832,7 +832,7 @@ public partial class GltfModelExporter
         {
             var vec = vectorArray[i];
 
-            if (Math.Abs(new Vector3(vec.X, vec.Y, vec.Z).Length() - 1.0f) > UnitLengthThresholdVec3)
+            if (Math.Abs(vec.AsVector3().Length() - 1.0f) > UnitLengthThresholdVec3)
             {
                 vectorArray[i] = -Vector4.UnitZ;
                 vectorArray[i].W = vec.W;

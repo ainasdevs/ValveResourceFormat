@@ -14,7 +14,6 @@ using GUI.Utils;
 using ValveKeyValue;
 using ValveResourceFormat;
 using ValveResourceFormat.Blocks;
-using ValveResourceFormat.Graphs;
 using ValveResourceFormat.IO;
 using ValveResourceFormat.Particles;
 using ValveResourceFormat.Renderer;
@@ -32,8 +31,14 @@ namespace GUI.Types.Viewers
         ResourceBlocksOnly,
     };
 
-    class Resource(VrfGuiContext vrfGuiContext, ResourceViewMode viewMode, bool verifyFileSize) : IViewer, IDisposable
+    class Resource(VrfGuiContext vrfGuiContext, ResourceViewMode viewMode) : IViewer, IDisposable
     {
+        /// <summary>
+        /// Keyvalues blocks larger than this on disk are not turned into text for display, their text
+        /// would come close to or exceed the largest string .NET can hold.
+        /// </summary>
+        private const long MaxKeyValuesBlockSizeForText = 64 * 1024 * 1024;
+
         private ValveResourceFormat.Resource? resource;
         private RendererContext? rendererContext;
         private readonly List<(GLGraphViewer Viewer, string TabName)> preparedGraphViewers = [];
@@ -58,7 +63,7 @@ namespace GUI.Types.Viewers
             {
                 if (stream != null)
                 {
-                    resource.Read(stream, verifyFileSize);
+                    resource.Read(stream);
                 }
                 else
                 {
@@ -81,7 +86,7 @@ namespace GUI.Types.Viewers
                 }
                 catch (Exception ex)
                 {
-                    GLViewerError = CodeTextBox.CreateFromException(ex);
+                    GLViewerError = CodeTextBox.CreateFromException(ex, vrfGuiContext.FullPath);
                 }
             }
         }
@@ -237,7 +242,7 @@ namespace GUI.Types.Viewers
                     break;
 
                 case ResourceType.WorldVisibility:
-                    if (resource.GetBlockByType(BlockType.VXVS) is VoxelVisibility { BaseClusterCount: > 0 } vxvs)
+                    if (VoxelVisibility.GetWorldVisibility(resource) is { } vxvs)
                     {
                         GLViewer = new GLVoxelVisibilityViewer(vrfGuiContext, rendererContext, vxvs);
                         GLViewerTabName = "VISIBILITY";
@@ -298,8 +303,16 @@ namespace GUI.Types.Viewers
                     }
                     catch (Exception ex)
                     {
-                        GLViewerError = CodeTextBox.CreateFromException(ex);
+                        GLViewerError = CodeTextBox.CreateFromException(ex, vrfGuiContext.FullPath);
                     }
+                }
+
+                // Creating the GL viewer waits on other threads, and the tab can be closed while it does
+                if (resTabs.IsDisposed)
+                {
+                    GLViewerError?.Dispose();
+                    GLViewerError = null;
+                    return;
                 }
 
                 if (GLViewerError != null)
@@ -349,6 +362,7 @@ namespace GUI.Types.Viewers
             resTabs.Disposed += OnTabDisposed;
 
             List<RawBinary>? binaryBuffers = null;
+            var loadedResource = resource;
 
             foreach (var block in resource.Blocks)
             {
@@ -419,15 +433,18 @@ namespace GUI.Types.Viewers
                 var blockTab = new ThemedTabPage(block.Type.ToString());
                 resTabs.TabPages.Add(blockTab);
 
-                try
+                PopulateWhenShown(blockTab, () =>
                 {
-                    AddTextViewControl(resource, block, blockTab);
-                }
-                catch (Exception e)
-                {
-                    Log.Error(nameof(Resource), e.ToString());
-                    AddByteViewControl(resource, block, blockTab);
-                }
+                    try
+                    {
+                        AddTextViewControl(loadedResource, block, blockTab);
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Error(nameof(Resource), e.ToString());
+                        AddByteViewControl(loadedResource, block, blockTab);
+                    }
+                });
 
                 if (block.Type == BlockType.DATA && selectData)
                 {
@@ -457,7 +474,7 @@ namespace GUI.Types.Viewers
             }
             catch (Exception ex)
             {
-                var control = CodeTextBox.CreateFromException(ex);
+                var control = CodeTextBox.CreateFromException(ex, vrfGuiContext.FullPath);
 
                 var tabEx = new ThemedTabPage("Decompile Error");
                 tabEx.Controls.Add(control);
@@ -500,14 +517,14 @@ namespace GUI.Types.Viewers
                     {
                         var worldTabPage = new ThemedTabPage("World Data");
                         resTabs.TabPages.Add(worldTabPage);
-                        AddTextViewControl(ResourceType.WorldNode, loadedWorld.World, worldTabPage);
+                        PopulateWhenShown(worldTabPage, () => AddTextViewControl(ResourceType.WorldNode, loadedWorld.World, worldTabPage));
                     }
 
                     if (loadedWorld.MainWorldNode != null)
                     {
                         var worldNodeTabPage = new ThemedTabPage("Node Data");
                         resTabs.TabPages.Add(worldNodeTabPage);
-                        AddTextViewControl(ResourceType.WorldNode, loadedWorld.MainWorldNode, worldNodeTabPage);
+                        PopulateWhenShown(worldNodeTabPage, () => AddTextViewControl(ResourceType.WorldNode, loadedWorld.MainWorldNode, worldNodeTabPage));
                     }
 
                     var entitiesTabPage = new ThemedTabPage("Entity List");
@@ -701,6 +718,11 @@ namespace GUI.Types.Viewers
                         var specialTabPage = new ThemedTabPage("SOUND");
                         var autoPlay = ((Settings.QuickPreviewFlags)Settings.Config.QuickFilePreview & Settings.QuickPreviewFlags.AutoPlaySounds) != 0;
 
+                        if (resource.DataBlock is Sound soundData)
+                        {
+                            specialTabPage.Controls.Add(CreateSoundInfoLabel(soundData));
+                        }
+
                         try
                         {
                             if (AudioPlayer.CreateWaveStream(resource) is var (waveStream, loopMarkers))
@@ -764,6 +786,29 @@ namespace GUI.Types.Viewers
             }
 
             return false;
+        }
+
+        private static Label CreateSoundInfoLabel(Sound sound)
+        {
+            var text = new StringBuilder();
+
+            foreach (var (label, value) in sound.GetInfoRows())
+            {
+                if (text.Length > 0)
+                {
+                    text.Append("    ");
+                }
+
+                text.Append(label).Append(": ").Append(value);
+            }
+
+            return new Label
+            {
+                AutoSize = true,
+                Dock = DockStyle.Top,
+                Padding = new Padding(6, 6, 6, 2),
+                Text = text.ToString(),
+            };
         }
 
         public static bool OpenExternalReference(VrfGuiContext vrfGuiContext, string name)
@@ -943,7 +988,104 @@ namespace GUI.Types.Viewers
 
         private static void AddTextViewControl(ResourceType resourceType, Block block, TabPage blockTab)
         {
-            ViewerContentPresenter.Present(blockTab, GetTextViewContent(resourceType, block));
+            if (block.Size > MaxKeyValuesBlockSizeForText && TryGetKvDataBlock(block, out var root, out var header))
+            {
+                AddTooLargeForTextControl(block, new KVDocument(header, name: null, root), blockTab);
+                return;
+            }
+
+            ViewerContent.Text content;
+
+            try
+            {
+                content = GetTextViewContent(resourceType, block);
+            }
+            catch (OutOfMemoryException) when (TryGetKvDataBlock(block, out var kvRoot, out var kvHeader))
+            {
+                AddTooLargeForTextControl(block, new KVDocument(kvHeader, name: null, kvRoot), blockTab);
+                return;
+            }
+
+            ViewerContentPresenter.Present(blockTab, content);
+        }
+
+        private static void AddTooLargeForTextControl(Block block, KVDocument document, TabPage blockTab)
+        {
+            var message = CodeTextBox.Create(
+                $"The {block.Type} block is {block.Size:N0} bytes, which is too large to display as text.{Environment.NewLine}Save it as a text file instead.",
+                HighlightLanguage.None);
+
+            var saveButton = new ThemedButton
+            {
+                Text = "Save as text...",
+                Dock = DockStyle.Top,
+                Height = 32,
+            };
+            saveButton.Click += OnSaveClick;
+
+            blockTab.Controls.Add(message);
+            blockTab.Controls.Add(saveButton);
+
+            async void OnSaveClick(object? sender, EventArgs e)
+            {
+                var defaultName = $"{Path.GetFileNameWithoutExtension(block.Resource.FileName)}_{block.Type}.kv3";
+                var fileName = AppFileDialogs.SaveFile("Save block as text", defaultName, "kv3", "KeyValues3 (*.kv3)|*.kv3|All files (*.*)|*.*");
+
+                if (fileName == null)
+                {
+                    return;
+                }
+
+                saveButton.Enabled = false;
+
+                try
+                {
+                    await Task.Run(() =>
+                    {
+                        using var stream = File.Create(fileName);
+                        KVSerializer.Create(KVSerializationFormat.KeyValues3Text).Serialize(stream, document);
+                    }).ConfigureAwait(true);
+
+                    Log.Info(nameof(Resource), $"Saved {block.Type} block to \"{fileName}\"");
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(nameof(Resource), $"Failed to save {block.Type} block to \"{fileName}\": {ex}");
+                }
+                finally
+                {
+                    if (!saveButton.IsDisposed)
+                    {
+                        saveButton.Enabled = true;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Runs <paramref name="populate"/> the first time <paramref name="page"/> is shown, so the
+        /// contents of tabs that are never opened are not built.
+        /// </summary>
+        private static void PopulateWhenShown(TabPage page, Action populate)
+        {
+            if (page.Visible)
+            {
+                populate();
+                return;
+            }
+
+            void OnVisibleChanged(object? sender, EventArgs e)
+            {
+                if (!page.Visible || page.IsDisposed || page.Disposing)
+                {
+                    return;
+                }
+
+                page.VisibleChanged -= OnVisibleChanged;
+                populate();
+            }
+
+            page.VisibleChanged += OnVisibleChanged;
         }
 
         private static ViewerContent.Text GetTextViewContent(ResourceType resourceType, Block block)

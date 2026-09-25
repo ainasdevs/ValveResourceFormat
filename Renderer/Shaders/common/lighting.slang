@@ -5,6 +5,10 @@
 
 #include "features.slang"
 
+#include "light_cull.slang"
+
+#include "object_data.slang"
+
 #define S_SCENE_PROBE_TYPE 0 // 1 = Individual, 2 = Atlas
 
 #define renderMode_Illumination 0
@@ -144,7 +148,7 @@ void CalculateDynamicLightV1(inout LightingTerms_t lighting, MaterialProperties_
     {
         vec3 vToLight = GetLightPositionWs(nLightIndex) - mat.PositionWS;
         vLightVector = normalize(vToLight);
-        flDistanceSquared = dot(vToLight, vToLight);
+        flDistanceSquared = length_squared(vToLight);
     }
 
     if (flDistanceSquared > vFalloffParams.z)
@@ -224,8 +228,7 @@ void CalculateDirectLighting(inout LightingTerms_t lighting, inout MaterialPrope
         #if (D_BAKED_LIGHTING_FROM_LIGHTMAP == 1)
             dlsh = textureLod(g_tDirectLightShadows, mat.LightmapUv, 0.0);
         #elif (D_BAKED_LIGHTING_FROM_PROBE == 1)
-            vec3 vLightProbeShadowCoords = CalculateProbeShadowCoords(mat.PositionWS);
-            dlsh = textureLod(g_tLPV_Shadows, vLightProbeShadowCoords, 0.0);
+            dlsh = SampleProbeDirectLightShadows(mat.PositionWS);
         #endif
 
         CalculateSunLighting(lighting, mat, saturate(1.0 - dot(dlsh, g_vSunLightBakedShadowMask)));
@@ -265,7 +268,7 @@ vec3 ComputeLightmapShading(vec3 irradianceColor, vec4 irradianceDirection, Mate
 
         vTangentSpaceXY *= (LIGHTMAP_DIRECTION_MAX_XY / max(LIGHTMAP_DIRECTION_MAX_XY, length(vTangentSpaceXY)));
 
-        float sinTheta = dot(vTangentSpaceXY, vTangentSpaceXY);
+        float sinTheta = length_squared(vTangentSpaceXY);
         float cosTheta = sqrt(1.0 - sinTheta);
 
         float flCurvature = GetCurvature(mat.GeometricNormal, mat.PositionWS);

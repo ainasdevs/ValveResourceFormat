@@ -15,6 +15,7 @@ The project folders are:
     - Tests are fast, run the whole suite with `dotnet test`. If it reports `Zero tests ran` (exit code 5), do a full `dotnet build` and retry.
     - When a parsing change legitimately alters text output, run tests with `VRF_REGEN_FIXTURES=1` to rewrite the mismatching `Tests/Files/ValidOutput` dumps in the source tree.
 - **Misc/**: Auxiliary tools (ShaderValidator, RenderTest, etc.) in their own solution `Misc/MiscVrfProjects.slnx`.
+    - Download CS2/Dota 2 workshop items for testing with `dotnet run --project Misc/WorkshopDownloader -- <ids, urls or search text>` (search lists ids, files go to `Misc/workshop/`).
 - **docs/**: VitePress documentation site. When changing what VRF can parse, decompile, or export, update the support matrix and limitation tables in `docs/guides/format-support.md` in the same change.
 
 **Target:** Latest released .NET. Use modern C# features. Nullable reference types enabled.
@@ -62,6 +63,7 @@ Follow standard Microsoft C# conventions. Key rules:
 - Switch expressions, pattern matching, null coalescing, throw expressions, string interpolation
 - Using declarations rather than using statements when possible
 - `MathF` operations over `(float)Math` casts
+- Use the shared helpers in `MathUtils` instead of writing the formula inline, and add new general-purpose math there
 - Prefer early returns
 - Sort usings with System namespaces first, then others alphabetically, and remove unused ones
 - `System`, `System.Numerics`, `System.Collections.Generic` are global usings (defined in Directory.Build.props)

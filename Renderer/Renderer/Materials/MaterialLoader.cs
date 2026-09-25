@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Collections.Frozen;
 using System.Diagnostics;
 using System.IO.Hashing;
-using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -499,14 +498,14 @@ namespace ValveResourceFormat.Renderer.Materials
         /// for volumes — for array and cube targets it carries the layer (times face) count.</summary>
         internal static (int Width, int Height, int Depth) GetChainLevelSize(TextureTarget target, int width, int height, int depth, int chainLevel)
         {
-            var levelWidth = Math.Max(1, width >> chainLevel);
+            var levelWidth = MathUtils.MipLevelSize(width, chainLevel);
 
             var levelHeight = target is TextureTarget.Texture1D or TextureTarget.Texture1DArray
                 ? height
-                : Math.Max(1, height >> chainLevel);
+                : MathUtils.MipLevelSize(height, chainLevel);
 
             var levelDepth = target is TextureTarget.Texture3D
-                ? Math.Max(1, depth >> chainLevel)
+                ? MathUtils.MipLevelSize(depth, chainLevel)
                 : depth;
 
             return (levelWidth, levelHeight, levelDepth);
@@ -557,6 +556,8 @@ namespace ValveResourceFormat.Renderer.Materials
             VTexFormat.DXT5            => ImageFormat.DXT5,
             VTexFormat.ETC2            => ImageFormat.R8G8B8_ETC2,
             VTexFormat.ETC2_EAC        => ImageFormat.R8G8B8A8_ETC2_EAC,
+            VTexFormat.R11_EAC         => ImageFormat.R11_EAC,
+            VTexFormat.RG11_EAC        => ImageFormat.RG11_EAC,
 
             VTexFormat.R16             => ImageFormat.R16,
             VTexFormat.RG1616          => ImageFormat.RG1616,
@@ -575,8 +576,6 @@ namespace ValveResourceFormat.Renderer.Materials
             VTexFormat.I8              => ImageFormat.I8,
 
             //VTexFormat.IA88
-            //VTexFormat.R11_EAC
-            //VTexFormat.RG11_EAC
             //VTexFormat.RGB323232F
 #pragma warning restore format
 

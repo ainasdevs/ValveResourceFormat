@@ -1,4 +1,3 @@
-using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Renderer.SceneNodes;
 
 namespace ValveResourceFormat.Renderer
@@ -33,7 +32,7 @@ namespace ValveResourceFormat.Renderer
                 ShapeSceneNode.AddBox(vertices, node.BoundingBox, new Color32(1.0f, 0.6f, 0.0f, 1.0f));
             }
 
-            Upload(vertices, BufferUsage.Dynamic);
+            Upload(vertices);
             RenderLines();
         }
     }

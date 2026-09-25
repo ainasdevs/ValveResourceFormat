@@ -57,7 +57,7 @@ namespace GUI
                 throw new InvalidDataException("Context menu tag is not a Point");
             }
 
-            return tabs.Cast<TabPage>().Where((t, i) => tabControl.GetTabRect(i).Contains(location)).First();
+            return tabs.Cast<TabPage>().Where((t, i) => tabControl.GetDisplayTabRect(i).Contains(location)).First();
         }
 
         private void CloseToolStripMenuItem_Click(object sender, EventArgs e)
@@ -171,7 +171,7 @@ namespace GUI
                             sb.Append(':');
                         }
 
-                        sb.Append(segment.Replace('\\', '/'));
+                        sb.Append(EscapeVpkLinkPath(segment.Replace('\\', '/')));
                         firstSegment = false;
                     }
                 }
@@ -186,7 +186,8 @@ namespace GUI
                     var packageEntry = selectedNode.PackageEntry;
                     if (packageEntry != null)
                     {
-                        sb.Append(packageEntry.GetFullPath());
+                        var entryPath = packageEntry.GetFullPath();
+                        sb.Append(wantsFullPath ? EscapeVpkLinkPath(entryPath) : entryPath);
                     }
                 }
                 else
@@ -218,7 +219,7 @@ namespace GUI
 
                     while (stack.TryPop(out var name))
                     {
-                        sb.Append(name);
+                        sb.Append(wantsFullPath ? EscapeVpkLinkPath(name) : name);
                         sb.Append(Package.DirectorySeparatorChar);
                     }
                 }

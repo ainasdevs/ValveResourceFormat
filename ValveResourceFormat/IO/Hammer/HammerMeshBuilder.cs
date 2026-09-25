@@ -10,6 +10,7 @@ using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.ResourceTypes.RubikonPhysics;
 using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.ResourceTypes.RubikonPhysics.Shapes.Mesh;
+using RnHull = ValveResourceFormat.ResourceTypes.RubikonPhysics.Shapes.Hull;
 
 namespace ValveResourceFormat.IO
 {
@@ -89,7 +90,7 @@ namespace ValveResourceFormat.IO
                 var b = positions[indices[t + 1]];
                 var c = positions[indices[t + 2]];
 
-                var normal = Vector3.Cross(b - a, c - a);
+                var normal = MathUtils.TriangleCross(a, b, c);
                 var doubleArea = normal.Length();
 
                 if (doubleArea < 1e-6f)
@@ -194,7 +195,7 @@ namespace ValveResourceFormat.IO
     /// 
     /// <remarks>
     /// <para>
-    /// Add vertices with <see cref="AddVertices"/> and faces with <see cref="AddFace"/> (or use one of the adders for
+    /// Add vertices with <see cref="AddVertices(ReadOnlySpan{Vector3})"/> and faces with <see cref="AddFace"/> (or use one of the adders for
     /// render and physics meshes), then write the result with <see cref="GenerateMesh"/>.
     ///
     /// There are options for features such as <see cref="Untriangulate"/> to join
@@ -387,37 +388,23 @@ namespace ValveResourceFormat.IO
 
             var mesh = new CDmePolygonMesh();
 
-            var faceTextureScales = CreateStream<Vector2Array, Vector2>(0, "textureScale:0");
-            var faceTextureAxesU = CreateStream<Vector4Array, Vector4>(0, "textureAxisU:0");
-            var faceTextureAxesV = CreateStream<Vector4Array, Vector4>(0, "textureAxisV:0");
-            var faceMaterialIndices = CreateStream<IntArray, int>(8, "materialindex:0");
-            var faceFlags = CreateStream<IntArray, int>(3, "flags:0");
-            var faceLightmapScaleBiases = CreateStream<IntArray, int>(1, "lightmapScaleBias:0");
-            mesh.FaceData.Streams.Add(faceTextureScales);
-            mesh.FaceData.Streams.Add(faceTextureAxesU);
-            mesh.FaceData.Streams.Add(faceTextureAxesV);
-            mesh.FaceData.Streams.Add(faceMaterialIndices);
-            mesh.FaceData.Streams.Add(faceFlags);
-            mesh.FaceData.Streams.Add(faceLightmapScaleBiases);
+            var faceTextureScales = CreateStream<Vector2Array>(mesh.FaceData, 0, "textureScale:0");
+            var faceTextureAxesU = CreateStream<Vector4Array>(mesh.FaceData, 0, "textureAxisU:0");
+            var faceTextureAxesV = CreateStream<Vector4Array>(mesh.FaceData, 0, "textureAxisV:0");
+            var faceMaterialIndices = CreateStream<IntArray>(mesh.FaceData, 8, "materialindex:0");
+            var faceFlags = CreateStream<IntArray>(mesh.FaceData, 3, "flags:0");
+            var faceLightmapScaleBiases = CreateStream<IntArray>(mesh.FaceData, 1, "lightmapScaleBias:0");
 
-            var texcoords = CreateStream<Vector2Array, Vector2>(1, "texcoord:0");
-            var texcoords1 = CreateStream<Vector2Array, Vector2>(1, "texcoord:1", "texcoord1");
-            var vertexpaintblendparams = CreateStream<Vector4Array, Vector4>(1, "VertexPaintBlendParams:0");
-            var vertexpainttintcolor = CreateStream<Vector4Array, Vector4>(1, "VertexPaintTintColor:0");
-            var normals = CreateStream<Vector3Array, Vector3>(1, "normal:0");
-            var tangents = CreateStream<Vector4Array, Vector4>(1, "tangent:0");
-            mesh.FaceVertexData.Streams.Add(texcoords);
-            mesh.FaceVertexData.Streams.Add(texcoords1);
-            mesh.FaceVertexData.Streams.Add(vertexpaintblendparams);
-            mesh.FaceVertexData.Streams.Add(vertexpainttintcolor);
-            mesh.FaceVertexData.Streams.Add(normals);
-            mesh.FaceVertexData.Streams.Add(tangents);
+            var texcoords = CreateStream<Vector2Array>(mesh.FaceVertexData, 1, "texcoord:0");
+            var texcoords1 = CreateStream<Vector2Array>(mesh.FaceVertexData, 1, "texcoord:1", "texcoord1");
+            var vertexpaintblendparams = CreateStream<Vector4Array>(mesh.FaceVertexData, 1, "VertexPaintBlendParams:0");
+            var vertexpainttintcolor = CreateStream<Vector4Array>(mesh.FaceVertexData, 1, "VertexPaintTintColor:0");
+            var normals = CreateStream<Vector3Array>(mesh.FaceVertexData, 1, "normal:0");
+            var tangents = CreateStream<Vector4Array>(mesh.FaceVertexData, 1, "tangent:0");
 
-            var vertexPositions = CreateStream<Vector3Array, Vector3>(3, "position:0");
-            mesh.VertexData.Streams.Add(vertexPositions);
+            var vertexPositions = CreateStream<Vector3Array>(mesh.VertexData, 3, "position:0");
 
-            var edgeFlags = CreateStream<IntArray, int>(3, "flags:0");
-            mesh.EdgeData.Streams.Add(edgeFlags);
+            var edgeFlags = CreateStream<IntArray>(mesh.EdgeData, 3, "flags:0");
 
             for (var i = 0; i < polygonMesh.Topology.VertexCount; i++)
             {
@@ -435,13 +422,13 @@ namespace ValveResourceFormat.IO
                 mesh.VertexDataIndices.Add(vertexDataIndex);
                 mesh.VertexData.Size++;
 
-                vertexPositions.Data.Add(polygonMesh.Positions[hVertex]);
+                vertexPositions.Add(polygonMesh.Positions[hVertex]);
             }
 
             for (var i = 0; i < activeHalfEdgeCount / 2; i++)
             {
                 mesh.EdgeData.Size++;
-                edgeFlags.Data.Add((int)EdgeFlag.None);
+                edgeFlags.Add((int)EdgeFlag.None);
             }
 
             for (var i = 0; i < polygonMesh.Topology.HalfEdgeCount; i++)
@@ -470,12 +457,12 @@ namespace ValveResourceFormat.IO
 
                 // corner data was fanned onto the half edge streams in WriteFaceData(),
                 // boundary half edges keep the stream defaults (zero)
-                normals.Data.Add(polygonMesh.Normals[hEdge]);
-                tangents.Data.Add(polygonMesh.Tangents[hEdge]);
-                texcoords.Data.Add(polygonMesh.TextureCoords[hEdge]);
-                texcoords1.Data.Add(polygonMesh.TextureCoords1[hEdge]);
-                vertexpaintblendparams.Data.Add(polygonMesh.VertexPaintBlendParams[hEdge]);
-                vertexpainttintcolor.Data.Add(polygonMesh.VertexPaintTintColor[hEdge]);
+                normals.Add(polygonMesh.Normals[hEdge]);
+                tangents.Add(polygonMesh.Tangents[hEdge]);
+                texcoords.Add(polygonMesh.TextureCoords[hEdge]);
+                texcoords1.Add(polygonMesh.TextureCoords1[hEdge]);
+                vertexpaintblendparams.Add(polygonMesh.VertexPaintBlendParams[hEdge]);
+                vertexpainttintcolor.Add(polygonMesh.VertexPaintTintColor[hEdge]);
             }
 
             foreach (var material in polygonMesh.Materials)
@@ -498,12 +485,12 @@ namespace ValveResourceFormat.IO
 
                 // texture projection parameters, the axes carry the texel offset in w
                 var textureOffset = polygonMesh.TextureOffset[hFace];
-                faceTextureScales.Data.Add(polygonMesh.TextureScale[hFace]);
-                faceTextureAxesU.Data.Add(new Vector4(polygonMesh.TextureUAxis[hFace], textureOffset.X));
-                faceTextureAxesV.Data.Add(new Vector4(polygonMesh.TextureVAxis[hFace], textureOffset.Y));
-                faceMaterialIndices.Data.Add(polygonMesh.MaterialIndex[hFace]);
-                faceFlags.Data.Add(0);
-                faceLightmapScaleBiases.Data.Add(0);
+                faceTextureScales.Add(polygonMesh.TextureScale[hFace]);
+                faceTextureAxesU.Add(new Vector4(polygonMesh.TextureUAxis[hFace], textureOffset.X));
+                faceTextureAxesV.Add(new Vector4(polygonMesh.TextureVAxis[hFace], textureOffset.Y));
+                faceMaterialIndices.Add(polygonMesh.MaterialIndex[hFace]);
+                faceFlags.Add(0);
+                faceLightmapScaleBiases.Add(0);
 
                 mesh.FaceEdgeIndices.Add(halfEdgeRemap[hFace.Edge.Index]);
             }
@@ -518,20 +505,24 @@ namespace ValveResourceFormat.IO
         /// the returned base index when several source meshes are added to one builder.
         /// </summary>
         /// <param name="positions">Vertex positions.</param>
-        /// <param name="positionOffset">Offset added to every position.</param>
         /// <returns>Index of the first added vertex, to add to the indices handed to <see cref="AddFace"/>.</returns>
-        public int AddVertices(ReadOnlySpan<Vector3> positions, Vector3 positionOffset = new Vector3())
+        public int AddVertices(ReadOnlySpan<Vector3> positions) => AddVertices(positions, Matrix4x4.Identity);
+
+        /// <inheritdoc cref="AddVertices(ReadOnlySpan{Vector3})"/>
+        /// <param name="positions">Vertex positions.</param>
+        /// <param name="transform">Transform applied to every position.</param>
+        public int AddVertices(ReadOnlySpan<Vector3> positions, Matrix4x4 transform)
         {
             var baseVertex = Vertices.Count;
 
             var hVertices = Mesh.AddVertices(positions);
             Vertices.AddRange(hVertices);
 
-            if (positionOffset != Vector3.Zero)
+            if (!transform.IsIdentity)
             {
                 foreach (var hVertex in hVertices)
                 {
-                    Mesh.Positions[hVertex] += positionOffset;
+                    Mesh.Positions[hVertex] = Vector3.Transform(Mesh.Positions[hVertex], transform);
                 }
             }
 
@@ -730,14 +721,14 @@ namespace ValveResourceFormat.IO
         /// <param name="desc">Hull to add.</param>
         /// <param name="phys">Physics data the hull belongs to, read for its collision attributes.</param>
         /// <param name="materialNameProvider">Maps a surface property to the material to use.</param>
-        /// <param name="positionOffset">Offset added to every position.</param>
+        /// <param name="transform">Transform applied to every position.</param>
         /// <param name="materialOverride">Material to use instead of the one the surface property picks.</param>
-        public void AddPhysHull(HullDescriptor desc, PhysAggregateData phys, Func<string, string> materialNameProvider, Vector3 positionOffset = new Vector3(), string? materialOverride = null)
+        public void AddPhysHull(HullDescriptor desc, PhysAggregateData phys, Func<string, string> materialNameProvider, Matrix4x4 transform, string? materialOverride = null)
         {
             var attributes = phys.CollisionAttributes[desc.CollisionAttributeIndex];
-            var tags = attributes.GetArray<string>("m_InteractAsStrings") ?? attributes.GetArray<string>("m_PhysicsTagStrings");
+            var tags = PhysAggregateData.GetInteractAsTags(attributes);
             var group = attributes.GetStringProperty("m_CollisionGroupString");
-            var material = materialOverride ?? MapExtract.GetToolTextureNameForCollisionTags(new ModelExtract.SurfaceTagCombo(group, tags!));
+            var material = materialOverride ?? MapExtract.GetToolTextureNameForCollisionTags(new SurfaceTagCombo(group, tags));
 
             if (group == "Default")
             {
@@ -748,7 +739,7 @@ namespace ValveResourceFormat.IO
             }
 
             var hull = desc.Shape;
-            var baseVertex = AddVertices(hull.GetVertexPositions(), positionOffset);
+            var baseVertex = AddVertices(hull.GetVertexPositions(), transform);
 
             var hullFaces = hull.GetFaces();
             var hullEdges = hull.GetEdges();
@@ -759,10 +750,7 @@ namespace ValveResourceFormat.IO
             {
                 var indexCount = 0;
 
-                var startHe = face.Edge;
-                var he = startHe;
-
-                do
+                foreach (var vertex in RnHull.GetFaceVertices(hullEdges, face))
                 {
                     if (indexCount >= byte.MaxValue)
                     {
@@ -770,11 +758,8 @@ namespace ValveResourceFormat.IO
                         break;
                     }
 
-                    inds[indexCount] = baseVertex + hullEdges[he].Origin;
-                    he = hullEdges[he].Next;
-                    indexCount++;
+                    inds[indexCount++] = baseVertex + vertex;
                 }
-                while (he != startHe);
 
                 AddFace(inds[..indexCount], material);
             }
@@ -787,15 +772,15 @@ namespace ValveResourceFormat.IO
         /// <param name="phys">Physics data the mesh belongs to, read for its collision attributes.</param>
         /// <param name="materialNameProvider">Maps a surface property to the material to use.</param>
         /// <param name="deletedTriangles">Triangles to leave out, by index, usually the ones render geometry already covers.</param>
-        /// <param name="positionOffset">Offset added to every position.</param>
+        /// <param name="transform">Transform applied to every position.</param>
         /// <param name="materialOverride">Material to use instead of the one the surface property picks.</param>
-        public void AddPhysMesh(MeshDescriptor desc, PhysAggregateData phys, Func<string, string> materialNameProvider, IReadOnlySet<int>? deletedTriangles = null,
-            Vector3 positionOffset = new Vector3(), string? materialOverride = null)
+        public void AddPhysMesh(MeshDescriptor desc, PhysAggregateData phys, Func<string, string> materialNameProvider, IReadOnlySet<int>? deletedTriangles,
+            Matrix4x4 transform, string? materialOverride = null)
         {
             var attributes = phys.CollisionAttributes[desc.CollisionAttributeIndex];
-            var tags = attributes.GetArray<string>("m_InteractAsStrings") ?? attributes.GetArray<string>("m_PhysicsTagStrings");
+            var tags = PhysAggregateData.GetInteractAsTags(attributes);
             var group = attributes.GetStringProperty("m_CollisionGroupString");
-            var material = materialOverride ?? MapExtract.GetToolTextureNameForCollisionTags(new ModelExtract.SurfaceTagCombo(group, tags!));
+            var material = materialOverride ?? MapExtract.GetToolTextureNameForCollisionTags(new SurfaceTagCombo(group, tags));
 
             var physicsSurfaceNames = phys.SurfacePropertyHashes.Select(StringToken.GetKnownString).ToArray();
 
@@ -831,7 +816,7 @@ namespace ValveResourceFormat.IO
             }
 
             var newMesh = ReindexTriangleMesh(mesh.GetVertices(), keptTriangles.ToArray(), 0, keptTriangles.Count);
-            var baseVertex = AddVertices(CollectionsMarshal.AsSpan(newMesh.NewVertices), positionOffset);
+            var baseVertex = AddVertices(CollectionsMarshal.AsSpan(newMesh.NewVertices), transform);
 
             Span<int> inds = stackalloc int[3];
 
@@ -957,7 +942,7 @@ namespace ValveResourceFormat.IO
 
                     if (tangent is { } t)
                     {
-                        var direction = Vector3.Normalize(Vector3.TransformNormal(new Vector3(t.X, t.Y, t.Z), transform));
+                        var direction = Vector3.Normalize(Vector3.TransformNormal(t.AsVector3(), transform));
                         tangent = new Vector4(direction, t.W);
                     }
                 }
@@ -1082,26 +1067,20 @@ namespace ValveResourceFormat.IO
         }
 
         /// <summary>
-        /// Creates a named mesh data stream, optionally filled with initial values.
+        /// Adds a named, empty mesh data stream to a data array.
         /// </summary>
         /// <typeparam name="TArray">Datamodel array type backing the stream.</typeparam>
-        /// <typeparam name="T">Element type of the stream.</typeparam>
+        /// <param name="dataArray">Data array the stream is added to.</param>
         /// <param name="dataStateFlags">Flags describing how the stream is stored.</param>
         /// <param name="name">Stream name, in "semantic:index" form.</param>
         /// <param name="standardAttributeName">Name Hammer knows the stream by, defaults to the semantic.</param>
-        /// <param name="data">Values to seed the stream with.</param>
-        public static CDmePolygonMeshDataStream<T> CreateStream<TArray, T>(int dataStateFlags, string name, string? standardAttributeName = null, params T[] data)
-            where TArray : Array<T>, new()
-            where T : notnull
+        /// <returns>The array backing the stream, to be filled with its values.</returns>
+        public static TArray CreateStream<TArray>(CDmePolygonMeshDataArray dataArray, int dataStateFlags, string name, string? standardAttributeName = null)
+            where TArray : System.Collections.IList, new()
         {
+            var data = new TArray();
 
-            var dmArray = new TArray();
-            foreach (var item in data)
-            {
-                dmArray.Add(item);
-            }
-
-            var stream = new CDmePolygonMeshDataStream<T>
+            dataArray.Streams.Add(new CDmePolygonMeshDataStream
             {
                 Name = name,
                 StandardAttributeName = string.IsNullOrEmpty(standardAttributeName) ? name[..^2] : standardAttributeName,
@@ -1110,10 +1089,10 @@ namespace ValveResourceFormat.IO
                 VertexBufferLocation = 0,
                 DataStateFlags = dataStateFlags,
                 SubdivisionBinding = null,
-                Data = dmArray
-            };
+                Data = data
+            });
 
-            return stream;
+            return data;
         }
 
         internal static IList<T>? GetElementArraySafe<T>(Element Element, string elementName)

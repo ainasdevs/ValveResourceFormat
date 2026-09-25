@@ -11,6 +11,32 @@ namespace ValveResourceFormat.Renderer.Entities;
 /// </summary>
 public abstract class BaseModelEntity : BaseEntity
 {
+    /// <summary>SolidType_t from CS2: https://s2v.app/SchemaExplorer/cs2/client/SolidType_t.</summary>
+    public enum SolidType
+    {
+        /// <summary>Not solid.</summary>
+        SOLID_NONE = 0,
+        /// <summary>Brush model.</summary>
+        SOLID_BSP = 1,
+        /// <summary>Axis-aligned bounding box.</summary>
+        SOLID_BBOX = 2,
+        /// <summary>Oriented bounding box.</summary>
+        SOLID_OBB = 3,
+        /// <summary>Sphere.</summary>
+        SOLID_SPHERE = 4,
+        /// <summary>Point.</summary>
+        SOLID_POINT = 5,
+        /// <summary>The model's physics collision.</summary>
+        SOLID_VPHYSICS = 6,
+        /// <summary>Capsule.</summary>
+        SOLID_CAPSULE = 7,
+        /// <summary>Cylinder.</summary>
+        SOLID_CYLINDER = 8,
+    }
+
+    /// <summary>Gets the solid type.</summary>
+    public SolidType Solid { get; protected set; }
+
     /// <summary>
     /// Gets the node this entity draws as, or <see langword="null"/> when its model has no meshes. A brush
     /// compiled for collision alone is the usual reason.
@@ -22,6 +48,7 @@ public abstract class BaseModelEntity : BaseEntity
     /// </summary>
     protected BaseModelEntity(EntitySystem system, EntitySpawnInfo spawnInfo) : base(system, spawnInfo)
     {
+        Solid = KeyValues.ContainsKey("solid") ? KeyValues.GetEnumValue<SolidType>("solid") : SolidType.SOLID_NONE;
     }
 
     /// <summary>
@@ -47,21 +74,31 @@ public abstract class BaseModelEntity : BaseEntity
         if (fileLoader.LoadFileCompiled(modelName)?.DataBlock is not Model model)
         {
             EntitySystem.Logger.LogWarning("{Classname} '{TargetName}' failed to load model \"{Model}\"", Classname, TargetName, modelName);
+
+            // Shown in place of the missing model, the way the engine does, so the gap is visible
+            if (fileLoader.LoadFile("models/dev/error.vmdl_c")?.DataBlock is Model errorModel)
+            {
+                return new ModelSceneNode(Scene, errorModel, Data?.GetStringProperty("skin"))
+                {
+                    Name = "error",
+                };
+            }
+
             return base.CreateRootNode();
         }
 
         var modelNode = new ModelSceneNode(Scene, model, Data?.GetStringProperty("skin"))
         {
             Name = modelName,
-            Tint = Data?.GetRenderTint() ?? Vector4.One,
+            TintAlpha = Data?.GetRenderTint() ?? Vector4.One,
         };
 
-        // Model-referenced particles spawn regardless of meshes, as the plain loader path does
+        // Model-referenced particles spawn regardless of meshes
         var particleNodes = ParticleSceneNode.CreateModelParticles(Scene, model, modelNode);
 
         foreach (var particleNode in particleNodes)
         {
-            particleNode.LayerName = "Particles";
+            particleNode.LayerName = Scene.ParticlesLayerName;
             Scene.Add(particleNode, true);
         }
 
@@ -104,8 +141,11 @@ public abstract class BaseModelEntity : BaseEntity
 
         if (EntityCollider.LoadPhysics(model, fileLoader) is { } physics)
         {
-            Collider = new EntityCollider(physics);
-            UpdateColliderTransform();
+            if (Scene.EntitiesCollide && BuildsCollider)
+            {
+                Collider = new EntityCollider(physics);
+                UpdateColliderTransform();
+            }
 
             // Owned outright rather than hung off the model: a brush compiled for collision alone has no
             // model node to hang them from, and its hulls are then the only thing there is to show.
@@ -119,5 +159,49 @@ public abstract class BaseModelEntity : BaseEntity
         }
 
         return ModelNode ?? base.CreateRootNode();
+    }
+
+    /// <summary>
+    /// Gets whether the model's physics becomes a <see cref="BaseEntity.Collider"/>. Its hulls are drawn
+    /// either way. Read while the entity is constructed, so an override must not depend on its own state.
+    /// </summary>
+    protected virtual bool BuildsCollider => true;
+
+    /// <summary>Tints the model with <c>"R G B"</c> in 0-255.</summary>
+    [EntityInput("Color")]
+    protected void InputColor(EntityInputData data)
+    {
+        if (ModelNode is not { } node)
+        {
+            return;
+        }
+
+        if (data.Parameter == null || !EntityTransformHelper.TryParseVector3(data.Parameter.Trim(), out var color))
+        {
+            EntitySystem.Logger.LogWarning("{Classname} '{TargetName}' cannot take Color \"{Value}\", which is not \"R G B\"", Classname, TargetName, data.Parameter);
+            return;
+        }
+
+        node.Tint = Vector3.Clamp(color / 255f, Vector3.Zero, Vector3.One);
+    }
+
+    /// <summary>Sets the model's alpha from 0-255.</summary>
+    [EntityInput("Alpha")]
+    protected void InputAlpha(EntityInputData data)
+    {
+        if (ModelNode is not { } node)
+        {
+            return;
+        }
+
+        var alpha = data.Float(float.NaN);
+
+        if (float.IsNaN(alpha))
+        {
+            EntitySystem.Logger.LogWarning("{Classname} '{TargetName}' cannot take Alpha \"{Value}\", which is not a number", Classname, TargetName, data.Parameter);
+            return;
+        }
+
+        node.Alpha = MathUtils.Saturate(alpha / 255f);
     }
 }

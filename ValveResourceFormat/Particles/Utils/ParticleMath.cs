@@ -28,17 +28,6 @@ namespace ValveResourceFormat.Particles.Utils
         /// </summary>
         public static float HalfWave(float t) => (4f - (4f * t)) * t;
 
-        /// <summary>
-        /// Scales <paramref name="value"/> to unit length, returning <see cref="Vector3.Zero"/> for a
-        /// vector with no length rather than the NaN a plain divide would give.
-        /// </summary>
-        public static Vector3 Normalize(Vector3 value)
-        {
-            var lengthSquared = value.LengthSquared();
-
-            return lengthSquared == 0f ? Vector3.Zero : value / MathF.Sqrt(lengthSquared);
-        }
-
         public static float Square(float value) => value * value;
 
         /// <summary>
@@ -121,8 +110,8 @@ namespace ValveResourceFormat.Particles.Utils
             if (biasType == ParticleFloatBiasType.PF_BIAS_TYPE_EXPONENTIAL)
             {
                 var exponent = biasParameter >= 0f
-                    ? 1f - Math.Clamp(biasParameter, 0f, 1f)
-                    : 20f - (Math.Clamp(biasParameter + 1f, 0f, 1f) * 19f);
+                    ? 1f - MathUtils.Saturate(biasParameter)
+                    : 20f - (MathUtils.Saturate(biasParameter + 1f) * 19f);
 
                 if (exponent <= 0f)
                 {
@@ -148,7 +137,7 @@ namespace ValveResourceFormat.Particles.Utils
                 return 0f;
             }
 
-            var bias = Math.Clamp((biasParameter + 1f) * 0.5f, 0f, 1f);
+            var bias = MathUtils.Saturate((biasParameter + 1f) * 0.5f);
 
             if (bias <= 0f)
             {

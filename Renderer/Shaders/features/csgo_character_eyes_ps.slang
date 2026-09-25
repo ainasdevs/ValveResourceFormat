@@ -30,7 +30,7 @@ void ApplyEye(EyePixelInput i, vec2 texCoord, inout MaterialProperties_t mat)
 
         vec3 viewDirInv = -mat.ViewDir;
         float _11278 = dot(vEyeBallViewSpace, viewDirInv);
-        float _15588 = fma(_11278, _11278, -fma(-g_flEyeBallRadius1, g_flEyeBallRadius1, dot(vEyeBallViewSpace, vEyeBallViewSpace)));
+        float _15588 = fma(_11278, _11278, -fma(-g_flEyeBallRadius1, g_flEyeBallRadius1, length_squared(vEyeBallViewSpace)));
         float flWithinEyeBallSphere = (_15588 > 0.0) ? ((-_11278) - sqrt(_15588)) : 0.0;
 
         //mat.Albedo = _11278.xxx;
@@ -52,12 +52,7 @@ void ApplyEye(EyePixelInput i, vec2 texCoord, inout MaterialProperties_t mat)
             vec3 vEyeColor = vEyeTexel.rgb;
 
             // Iris hue shift
-            const float cosHue = cos(g_flEyeHueShift1);
-            const float sinHue = sin(g_flEyeHueShift1);
-            const vec3 tan30deg = vec3(tan(radians(30.0)));
-
-            vec3 vHueShifted = ((vEyeColor * cosHue) + (cross(tan30deg, vEyeColor) * sinHue)) + ((tan30deg * dot(tan30deg, vEyeColor)) * (1.0 - cosHue));
-            vEyeColor = mix(vEyeColor, vHueShifted, vIrisMask);
+            vEyeColor = mix(vEyeColor, RotateHue(vEyeColor, g_flEyeHueShift1), vIrisMask);
 
             // Iris saturation
             vec3 vSaturated = mix(GetLuma(vEyeColor).xxx, vEyeColor, vec3(g_flEyeSaturation1));

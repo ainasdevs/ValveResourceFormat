@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using OpenTK.Graphics.OpenGL;
-using ValveResourceFormat.Renderer.Shaders;
 using ValveResourceFormat.Renderer.World;
 
 namespace ValveResourceFormat.Renderer;
@@ -72,7 +71,9 @@ public sealed class LightBinner(Scene scene) : IDisposable
     /// <summary>Gets the buffer holding this scene's per tile and per depth bin masks.</summary>
     public StorageBuffer? CullBits { get; private set; }
 
-    private bool CanCull => (scene.LightingInfo.LightingData.NumBarnLights > 0 || scene.LightingInfo.EnvMaps.Count > 0)
+    private bool CanCull => (scene.LightingInfo.LightingData.NumBarnLights > 0
+            || scene.LightingInfo.EnvMaps.Count > 0
+            || scene.ProbeAtlasVolumes.Count > 0)
         && TileCullBitsShader != null
         && DepthBinCullBitsShader != null;
 
@@ -158,8 +159,8 @@ public sealed class LightBinner(Scene scene) : IDisposable
         var width = Math.Max(viewportWidth, 1);
         var height = Math.Max(viewportHeight, 1);
 
-        TileCols = (width + tileSize - 1) >> TileShift;
-        TileRows = (height + tileSize - 1) >> TileShift;
+        TileCols = MathUtils.DivideRoundUp(width, tileSize);
+        TileRows = MathUtils.DivideRoundUp(height, tileSize);
 
         Feeder.Begin(
             TileCols, TileRows, tileSize,
@@ -173,6 +174,7 @@ public sealed class LightBinner(Scene scene) : IDisposable
         {
             Feeder.AddBarnLights(scene.LightingInfo.BinnedBarnLightVolumes);
             Feeder.AddEnvMaps(scene.LightingInfo.EnvMaps);
+            Feeder.AddLightProbes(scene.ProbeAtlasVolumes);
         }
         else
         {
@@ -182,7 +184,8 @@ public sealed class LightBinner(Scene scene) : IDisposable
             // logs and never assigns a shader index to, and iterating them would read off the end of the UBO.
             Feeder.AddCounts(
                 scene.LightingInfo.BinnedBarnLightVolumes.Length,
-                Math.Min(scene.LightingInfo.EnvMaps.Count, EnvMapArray.MAX_ENVMAPS));
+                Math.Min(scene.LightingInfo.EnvMaps.Count, EnvMapArray.MAX_ENVMAPS),
+                scene.ProbeAtlasVolumes.Count);
         }
 
         Feeder.End();
@@ -207,6 +210,11 @@ public sealed class LightBinner(Scene scene) : IDisposable
         Constants.EnvMapBinBase = Feeder.BinBase(TiledCullFeeder.BatchEnvMaps);
         Constants.EnvMapCullWords = Feeder.Stride(TiledCullFeeder.BatchEnvMaps);
         Constants.EnvMapCount = (uint)Feeder.SlotCount(TiledCullFeeder.BatchEnvMaps);
+
+        Constants.LightProbeTileBase = Feeder.TileBase(TiledCullFeeder.BatchLightProbes);
+        Constants.LightProbeBinBase = Feeder.BinBase(TiledCullFeeder.BatchLightProbes);
+        Constants.LightProbeCullWords = Feeder.Stride(TiledCullFeeder.BatchLightProbes);
+        Constants.LightProbeCount = (uint)Feeder.SlotCount(TiledCullFeeder.BatchLightProbes);
 
         Constants.LightCullCameraPosition = viewConstants.CameraPosition;
         Constants.LightCullCameraDir = viewConstants.CameraDirWs;
@@ -289,7 +297,7 @@ public sealed class LightBinner(Scene scene) : IDisposable
         }
 
         VisibilityReadback ??= new ReadbackRing(MaxBatchWords);
-        VisibleBitsGpu ??= StorageBuffer.Allocate<uint>(ReservedBufferSlots.BufferSlot2, "VisibleCullBits", MaxBatchWords, BufferUsage.GpuOnly);
+        VisibleBitsGpu ??= StorageBuffer.Allocate<uint>(ReservedBufferSlots.BufferSlot15, "VisibleCullBits", MaxBatchWords, BufferUsage.GpuOnly);
 
         if (VisibilityReadback.InFlight == ReadbackRing.Depth)
         {
@@ -347,7 +355,7 @@ public sealed class LightBinner(Scene scene) : IDisposable
 
             while (i < count && ReferenceEquals(snapshot[i].Light, light))
             {
-                if ((words[i >> 5] & (1u << (i & 31))) != 0u)
+                if (MathUtils.GetBit(words, i))
                 {
                     visibleFaces |= 1u << snapshot[i].FaceIndex;
                 }
@@ -368,9 +376,9 @@ public sealed class LightBinner(Scene scene) : IDisposable
         CullParamsGpu ??= new UniformBuffer<CullParams>(ReservedBufferSlots.CullParams);
         ConstantsGpu ??= new UniformBuffer<LightCullConstants>(ReservedBufferSlots.LightCull);
 
-        CullItemsGpu ??= StorageBuffer.Allocate<CullItem>(ReservedBufferSlots.BufferSlot2, "CullItems", Feeder.ItemArray.Length, BufferUsage.Dynamic);
+        CullItemsGpu ??= StorageBuffer.Allocate<CullItem>(ReservedBufferSlots.BufferSlot15, "CullItems", Feeder.ItemArray.Length, BufferUsage.Dynamic);
 
-        CullPlanesGpu ??= StorageBuffer.Allocate<Vector2>(ReservedBufferSlots.BufferSlot3, "CullPlanes", Feeder.PlaneArray.Length, BufferUsage.Dynamic);
+        CullPlanesGpu ??= StorageBuffer.Allocate<Vector2>(ReservedBufferSlots.BufferSlot11, "CullPlanes", Feeder.PlaneArray.Length, BufferUsage.Dynamic);
 
         if (CullBits == null || CullBitsWords < Feeder.TotalWords)
         {

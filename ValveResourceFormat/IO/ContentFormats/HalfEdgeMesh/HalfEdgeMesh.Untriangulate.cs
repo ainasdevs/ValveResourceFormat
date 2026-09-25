@@ -28,23 +28,33 @@ partial class HalfEdgeMesh
         {
             // visit each full edge once
             if (GetFullEdgeForHalfEdge(hEdge) != hEdge)
+            {
                 continue;
+            }
 
             var hFaceA = hEdge.Face;
             var hFaceB = hEdge.OppositeEdge.Face;
 
             if (hFaceA == FaceHandle.Invalid || hFaceB == FaceHandle.Invalid || hFaceA == hFaceB)
+            {
                 continue;
+            }
 
             // only look at triangles
             if (ComputeNumEdgesInFace(hFaceA) != 3 || ComputeNumEdgesInFace(hFaceB) != 3)
+            {
                 continue;
+            }
 
             if (canMergeFaces != null && !canMergeFaces(hFaceA, hFaceB))
+            {
                 continue;
+            }
 
             if (!EdgeShouldBeRemoved(hEdge, positions, angleFaceCos, angleShape))
+            {
                 continue;
+            }
 
             EdgeToQuadVerts(hEdge, positions, out var v1, out var v2, out var v3, out var v4);
             candidates.Add((QuadCalcError(v1, v2, v3, v4), hEdge));
@@ -62,7 +72,9 @@ partial class HalfEdgeMesh
             var hFaceB = hEdge.OppositeEdge.Face;
 
             if (mergedFaces.Contains(hFaceA) || mergedFaces.Contains(hFaceB))
+            {
                 continue;
+            }
 
             if (DissolveEdge(hEdge, out _))
             {
@@ -100,11 +112,15 @@ partial class HalfEdgeMesh
 
         // written this way so nan normals from degenerate triangles also delimit
         if (!(Vector3.Dot(normalA, normalB) >= angleFaceCos))
+        {
             return false;
+        }
 
         // a flipped face is out of the question
         if (IsQuadFlip(v1, v2, v3, v4))
+        {
             return false;
+        }
 
         var e0 = Vector3.Normalize(v1 - v2);
         var e1 = Vector3.Normalize(v2 - v3);
@@ -112,10 +128,10 @@ partial class HalfEdgeMesh
         var e3 = Vector3.Normalize(v4 - v1);
 
         // every corner of the quad must stay within the shape angle limit of 90 degrees, inverted comparisons so nan also fails
-        if (!(MathF.Abs(AngleNormalized(e0, e1) - HalfPi) <= angleShape) ||
-            !(MathF.Abs(AngleNormalized(e1, e2) - HalfPi) <= angleShape) ||
-            !(MathF.Abs(AngleNormalized(e2, e3) - HalfPi) <= angleShape) ||
-            !(MathF.Abs(AngleNormalized(e3, e0) - HalfPi) <= angleShape))
+        if (!(MathF.Abs(MathUtils.AngleBetween(e0, e1) - HalfPi) <= angleShape) ||
+            !(MathF.Abs(MathUtils.AngleBetween(e1, e2) - HalfPi) <= angleShape) ||
+            !(MathF.Abs(MathUtils.AngleBetween(e2, e3) - HalfPi) <= angleShape) ||
+            !(MathF.Abs(MathUtils.AngleBetween(e3, e0) - HalfPi) <= angleShape))
         {
             return false;
         }
@@ -132,10 +148,10 @@ partial class HalfEdgeMesh
 
         // normal difference, planarity of the quad measured across both diagonals
         {
-            var angleA = AngleNormalized(TriangleNormal(v1, v2, v3), TriangleNormal(v1, v3, v4));
-            var angleB = AngleNormalized(TriangleNormal(v2, v3, v4), TriangleNormal(v4, v1, v2));
+            var angleA = MathUtils.AngleBetween(TriangleNormal(v1, v2, v3), TriangleNormal(v1, v3, v4));
+            var angleB = MathUtils.AngleBetween(TriangleNormal(v2, v3, v4), TriangleNormal(v4, v1, v2));
 
-            error += (angleA + angleB) / (MathF.PI * 2f);
+            error += (angleA + angleB) / MathF.Tau;
         }
 
         // colinearity, how far the corners deviate from 90 degrees
@@ -145,10 +161,10 @@ partial class HalfEdgeMesh
             var e2 = Vector3.Normalize(v3 - v4);
             var e3 = Vector3.Normalize(v4 - v1);
 
-            error += (MathF.Abs(AngleNormalized(e0, e1) - HalfPi) +
-                      MathF.Abs(AngleNormalized(e1, e2) - HalfPi) +
-                      MathF.Abs(AngleNormalized(e2, e3) - HalfPi) +
-                      MathF.Abs(AngleNormalized(e3, e0) - HalfPi)) / (MathF.PI * 2f);
+            error += (MathF.Abs(MathUtils.AngleBetween(e0, e1) - HalfPi) +
+                      MathF.Abs(MathUtils.AngleBetween(e1, e2) - HalfPi) +
+                      MathF.Abs(MathUtils.AngleBetween(e2, e3) - HalfPi) +
+                      MathF.Abs(MathUtils.AngleBetween(e3, e0) - HalfPi)) / MathF.Tau;
         }
 
         // concavity, area imbalance between the two diagonal splits
@@ -174,26 +190,25 @@ partial class HalfEdgeMesh
         var d41 = v1 - v4;
 
         if (Vector3.Dot(Vector3.Cross(d12, d23), Vector3.Cross(d34, d41)) < 0f)
+        {
             return true;
+        }
 
         if (Vector3.Dot(Vector3.Cross(d23, d34), Vector3.Cross(d41, d12)) < 0f)
+        {
             return true;
+        }
 
         return false;
     }
 
     private static Vector3 TriangleNormal(Vector3 a, Vector3 b, Vector3 c)
     {
-        return Vector3.Normalize(Vector3.Cross(b - a, c - a));
+        return Vector3.Normalize(MathUtils.TriangleCross(a, b, c));
     }
 
     private static float TriangleArea(Vector3 a, Vector3 b, Vector3 c)
     {
-        return Vector3.Cross(b - a, c - a).Length() * 0.5f;
-    }
-
-    private static float AngleNormalized(Vector3 a, Vector3 b)
-    {
-        return MathF.Acos(Math.Clamp(Vector3.Dot(a, b), -1f, 1f));
+        return MathUtils.TriangleCross(a, b, c).Length() * 0.5f;
     }
 }

@@ -4,7 +4,6 @@ using System.IO;
 using System.Windows.Forms;
 using GUI.Controls;
 using GUI.Utils;
-using ValveKeyValue;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.Particles;
 using ValveResourceFormat.Particles.Upgrade;
@@ -47,6 +46,7 @@ namespace GUI.Types.GLViewers
         private ParticleSceneNode? particleSceneNode;
         private GLViewerSliderControl? slowmodeTrackBar;
         private ThemedButton? restartButton;
+        private ThemedButton? pauseButton;
         private ThemedButton? endCapButton;
         private float screenSize = SnapshotParticleSystem.DefaultScreenSize;
         private bool ShowRenderBounds { get; set; }
@@ -64,6 +64,7 @@ namespace GUI.Types.GLViewers
 
             slowmodeTrackBar?.Dispose();
             restartButton?.Dispose();
+            pauseButton?.Dispose();
             endCapButton?.Dispose();
         }
 
@@ -152,6 +153,22 @@ namespace GUI.Types.GLViewers
                 particleSceneNode?.Restart();
             };
 
+            pauseButton = new ThemedButton
+            {
+                Text = "Pause",
+                AutoSize = true,
+            };
+            pauseButton.Click += (_, _) =>
+            {
+                if (particleSceneNode == null)
+                {
+                    return;
+                }
+
+                particleSceneNode.IsPaused = !particleSceneNode.IsPaused;
+                pauseButton.Text = particleSceneNode.IsPaused ? "Resume" : "Pause";
+            };
+
             endCapButton = new ThemedButton
             {
                 Text = "Play Endcap",
@@ -192,6 +209,7 @@ namespace GUI.Types.GLViewers
                 });
 
                 UiControl.AddControl(restartButton);
+                UiControl.AddControl(pauseButton);
                 UiControl.AddControl(endCapButton);
 
                 slowmodeTrackBar = UiControl.AddTrackBar(value =>

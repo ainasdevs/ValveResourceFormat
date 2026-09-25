@@ -10,32 +10,37 @@
 // Whether this material responds to weather at all.
 uniform int F_WETNESS = 0;
 
-// Where water collects. Puddles fill anything the height map puts below the water level, and the
+// Where water collects. Puddles fill anything the height map puts below the water line, and the
 // wet edge is the damp ring that spreads out around them.
-uniform float g_fPuddleStrength = 1.0;
+uniform float g_fPuddleHeight = 0.5;
 uniform float g_fPuddleRoughness = 0.02;
 uniform float g_fPuddleBlendSoftness = 0.08;
 uniform float g_fWetEdgeStrength = 0.5;
 uniform float g_fWetEdgeSpread = 0.2;
+uniform float g_fWetEdgeSoftness = 0.2;
+
+// old wetness
+uniform float g_fPuddleStrength = 1.0;
 uniform bool g_bPuddlesOnVerticalSurfaces = false;
+uniform float g_fPuddleSedimentHeight = 0.9;
+uniform bool g_bWetnessUseHeightmapAdjustments = false;
+uniform float g_flHorizontalSurfaceTolerance = 32.0;
+uniform float g_flWetnessUnderlyingHeightMapInfluence = 1.0;
 
 // Silt left in the bottom of a puddle.
 uniform vec3 g_vPuddleSedimentColor = vec3(0.62, 0.56, 0.5); // SrgbRead(true)
-uniform float g_fPuddleSedimentHeight = 0.9;
 uniform float g_fPuddleSedimentOpacity = 0.25;
 
 // Sheen over everything else, independent of whether water pooled.
 uniform float g_fWetnessStrength = 1.0;
 uniform float g_flWetnessDarkeningStrength1 = 1.0;
+uniform float g_flWetnessDarkeningStrength2 = 1.0;
+uniform float g_flWetnessDarkeningStrength3 = 1.0;
 
 // Animated water. Both are scaled by the weather's own strength, so a material opting in still
 // shows nothing until it rains.
 uniform float g_fRainStrength = 1.0;
 uniform float g_fRippleStrength = 1.0;
-
-// Clamps the height map to positive before any of it is read, for materials whose height map is
-// authored signed around its zero point.
-uniform bool g_bWetnessUseHeightmapAdjustments = false;
 
 // Global weather state
 #define g_flEnvWetnessCoverage g_vEnvWetness.x
@@ -50,6 +55,11 @@ uniform sampler2D g_tWetnessWaves; // reserved, materials/dev/water_waves.vtex
 // at the bottom of this file. Zero means no water, which is the identity for that term.
 float g_flPuddleWaterScattering = 0.0;
 
+float WetnessHeight(float height, float zeroPoint, float scale)
+{
+    return (height - zeroPoint) * scale * g_flWetnessUnderlyingHeightMapInfluence + 0.5;
+}
+
 // Surface derived ripple normal, in world space, plus the roughness the ripples add.
 // Two scrolling samples of the same wave normal map, each projected onto a flow direction that
 // the weather can rotate. Both are damped once a sample is small enough on screen to alias.
@@ -58,10 +68,7 @@ vec3 GetWaterRipples(vec3 posWS, vec3 geometricNormal, float wetPaint, float str
 {
     vec3 flowDir = normalize(vec3(-1.0, 0.2, 0.0));
 
-    float angle = g_flEnvPuddleRippleDirection * 6.283185482025146484375;
-    float sinAngle = sin(angle);
-    float cosAngle = cos(angle);
-    flowDir.xy = flowDir.xy * mat2(vec2(cosAngle, -sinAngle), vec2(sinAngle, cosAngle));
+    flowDir.xy = RotateVector2D(flowDir.xy, g_flEnvPuddleRippleDirection * 360.0);
 
     vec3 flowSide = -cross(flowDir, geometricNormal);
     float alongSide = dot(posWS, flowSide);
@@ -76,7 +83,7 @@ vec3 GetWaterRipples(vec3 posWS, vec3 geometricNormal, float wetPaint, float str
 
     vec2 coarseUv = vec2(phase.x, alongSide) * vec2(0.02, 0.011);
     vec4 coarse = texture(g_tWetnessWaves, coarseUv + vec2(0.2, 0.0) * g_flTime);
-    vec2 coarseNormal = coarse.xy * 2.0 - 1.0;
+    vec2 coarseNormal = UnpackFromColor(coarse.xy);
     float coarseBlur = saturate(length(fwidth(coarseUv)) * 10.0);
     vec2 coarseOffset = coarseNormal * vec2(0.1, 0.05) * wetPaint * mix(1.0, 0.3, coarseBlur);
 
@@ -84,7 +91,7 @@ vec3 GetWaterRipples(vec3 posWS, vec3 geometricNormal, float wetPaint, float str
     // each other into a visible grid.
     vec2 fineUv = vec2(phase.y, alongSide) * vec2(0.036, 0.0162) + coarseNormal * 0.05;
     vec4 fine = texture(g_tWetnessWaves, fineUv + vec2(0.15, 0.0) * g_flTime);
-    vec2 fineNormal = (fine.xy * 2.0 - 1.0) * 0.052 * wetPaint;
+    vec2 fineNormal = UnpackFromColor(fine.xy) * 0.052 * wetPaint;
     fineNormal.y *= 0.5;
     float fineBlur = saturate(length(fwidth(fineUv)) * 10.0);
     vec2 fineOffset = fineNormal * mix(1.0, 0.3, fineBlur);
@@ -96,7 +103,7 @@ vec3 GetWaterRipples(vec3 posWS, vec3 geometricNormal, float wetPaint, float str
     // that has gone too small to resolve turns into a rough sheen instead of shimmering.
     roughnessAdd = strength * 0.04 * (coarseBlur + fineBlur);
 
-    // Where the two wave layers pile up. Only the scattering term below reads this.
+    // Where the two wave layers pile up. Only the scattering term reads this.
     foam = wetPaint * (coarse.z + fine.z);
 
     return vec3(offset * strength, 0.0);
@@ -153,10 +160,96 @@ vec3 GetRainImpacts(vec3 posWS, float height, float puddle, float strength)
     return accum;
 }
 
-// Applies the whole effect in place. rawHeight is the height map before its zero point is taken
-// off, wetPaint and paintSoftness are the blend value stream's z and w, and reflectance is the
-// dielectric F0 the caller is about to build its specular colour from.
-void ApplyWetness(inout MaterialProperties_t mat, float rawHeight, float wetPaint, float paintSoftness,
+void ApplyWetness(inout MaterialProperties_t mat, float wetHeight, float wetPaint, float darkeningStrength,
+    inout float reflectance)
+{
+    if (F_WETNESS != 1)
+    {
+        return;
+    }
+
+    vec3 posWS = mat.PositionWS;
+    vec3 geometricNormal = mat.GeometricNormal;
+
+    vec4 waves = texture(g_tWetnessWaves, posWS.xy * 0.006);
+    float upFacing = pow(max(0.0, geometricNormal.z), g_flHorizontalSurfaceTolerance);
+
+    float coverage = min(min(wetPaint, saturate(g_flEnvWetnessCoverage)),
+        1.0 - (saturate(g_flEnvWetnessDryingAmount - 0.5) * 2.0));
+
+    float waterDepth = ((coverage - wetHeight) - 0.65) + g_fPuddleHeight;
+
+    float overflow = saturate(coverage - 0.75);
+    float waterLevel = coverage + (4.0 * overflow * overflow);
+    float fadeIn = saturate(waterLevel * 20.0);
+
+    float puddle = saturate((waterDepth / max(g_fPuddleBlendSoftness, 1e-4)) + 0.5) * upFacing * fadeIn;
+
+    float sheen = saturate(((waterLevel * 2.0) - (mix(0.5, waves.w, saturate(upFacing * 20.0)) * 0.5))
+        - (wetHeight * 0.5) + 0.25) * g_fWetnessStrength * fadeIn * (1.0 - saturate(g_flEnvWetnessDryingAmount * 2.0));
+
+    float wetEdge = saturate(((waterDepth + g_fWetEdgeSpread) / max(g_fWetEdgeSoftness, 1e-4)) + 0.5) * g_fWetEdgeStrength;
+    float wetAmount = max(max(sheen, puddle), wetEdge);
+
+    vec3 waterNormal = vec3(0.0, 0.0, 1.0);
+    float rippleRoughness = 0.0;
+    float rainSparkle = 0.0;
+    float foam = 0.0;
+
+    float animated = float(wetAmount > 0.5);
+    float rippleStrength = g_fRippleStrength * g_flEnvPuddleRippleStrength;
+
+    if (rippleStrength > 0.0)
+    {
+        vec3 ripples = GetWaterRipples(posWS, geometricNormal, wetPaint, rippleStrength, rippleRoughness, foam);
+        float rippling = animated * float(puddle > 0.0);
+
+        waterNormal.xy += ripples.xy * upFacing * rippling;
+        rippleRoughness *= rippling;
+        foam *= upFacing * rippleStrength * rippling;
+    }
+
+    float rainStrength = (g_fRainStrength * g_flEnvRainStrength) * g_flEnvRainStrength;
+
+    if (rainStrength > 0.0)
+    {
+        vec3 impacts = GetRainImpacts(posWS, wetHeight, puddle, rainStrength) * upFacing * animated;
+
+        waterNormal.xy += impacts.xy;
+        rainSparkle = impacts.z;
+    }
+
+    waterNormal = normalize(waterNormal);
+
+    vec3 wetNormal = normalize(mix(mat.Normal, waterNormal, puddle));
+    float normalAliasing = length(fwidth(wetNormal)) * 0.5;
+
+    if (wetPaint == 0.0)
+    {
+        return;
+    }
+
+    vec3 sedimentMix = vec3(puddle * saturate(waterDepth * puddle * g_fPuddleSedimentOpacity * 12.0));
+
+    vec3 darkened = mix(mat.Albedo, pow(mat.Albedo, vec3(1.3)) * 0.8,
+        saturate((pow(mat.Albedo, vec3(0.25)) * (wetAmount * mat.RoughnessTex.x)) * 8.0) * darkeningStrength);
+
+    mat.Albedo = mix(darkened * mix(1.0, mat.AmbientOcclusion, puddle), g_vPuddleSedimentColor, sedimentMix)
+        * (1.0 + rainSparkle) + (rainSparkle * 0.1);
+
+    float roughness = mat.RoughnessTex.x;
+    mat.RoughnessTex = saturate(mix(vec2(roughness), vec2(g_fPuddleRoughness),
+        vec2(max(puddle, (1.0 - roughness * roughness) * wetAmount))) + vec2(rippleRoughness + normalAliasing));
+
+    mat.AmbientOcclusion = mix(mat.AmbientOcclusion, 1.0, puddle);
+
+    reflectance = mix(reflectance, 0.035, wetAmount);
+    mat.AmbientNormal = mix(mat.Normal, waterNormal, sedimentMix);
+    mat.Normal = wetNormal;
+    g_flPuddleWaterScattering = puddle * (0.2 + (0.15 * foam * foam * foam));
+}
+
+void ApplyWetnessOld(inout MaterialProperties_t mat, float rawHeight, float wetPaint, float paintSoftness,
     inout float reflectance)
 {
     if (F_WETNESS != 1 || (g_fPuddleStrength + g_fWetnessStrength) <= 0.0 || wetPaint <= 0.0)
@@ -209,7 +302,7 @@ void ApplyWetness(inout MaterialProperties_t mat, float rawHeight, float wetPain
 
     // Negative, and more so the deeper under the water line the fragment sits.
     float depth = (coverage - 1.0) - height;
-    float sedimentHeight = (g_fPuddleSedimentHeight * 2.0) - 1.0;
+    float sedimentHeight = UnpackFromColor(g_fPuddleSedimentHeight);
     float sediment = saturate(depth + sedimentHeight) * g_fPuddleSedimentOpacity * puddle;
 
     // The sheen, blotched by the wave texture's alpha so it is not a flat wash, and never less

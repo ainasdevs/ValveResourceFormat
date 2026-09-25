@@ -50,6 +50,7 @@ in the Dump column.
 | vcss     | Panorama Style             | text                          | yes     | `.css` (prettified minified text)                                                                            |
 | vdata    | Data                       | text (3D for CS2 bomb damage) | generic | KV3 text                                                                                                     |
 | vdpn     | Dota Patch Notes           | text                          | generic | KV3 text                                                                                                     |
+| vdsp     | DSP Presets                | text                          | generic | KV3 text                                                                                                     |
 | vdvn     | Dota Visual Novels         | text                          | generic | KV3 text                                                                                                     |
 | vents    | Entity Lump                | graph, text                   | yes     | entity dump; glTF/GLB; included in map exports                                                               |
 | vjs      | Panorama Script            | text                          | yes     | `.js` (byte-exact; see [Panorama](#choreo-captions-and-ui))                                                  |
@@ -78,7 +79,7 @@ in the Dump column.
 | vseq     | Sequence Group             | text                          | generic | -                                                                                                            |
 | vsmart   | Smart Prop                 | 3D (partial)                  | yes     | KV3 text                                                                                                     |
 | vsnap    | Particle Snapshot          | 3D                            | yes     | `.vsnap`                                                                                                     |
-| vsnd     | Sound                      | audio                         | yes     | `.wav` / `.mp3` + phonemes `.txt` + `.vsnd` KV3 for newer sounds                                             |
+| vsnd     | Sound                      | audio                         | yes     | `.wav` / `.mp3` / `.aac` + phonemes `.txt` + `.vsnd` KV3 for newer sounds                                    |
 | vsndevts | Sound Event Script         | text                          | generic | KV3 text (lossless)                                                                                          |
 | vsndstck | Sound Stack Script         | text                          | yes     | script text                                                                                                  |
 | vsurf    | Surface Properties         | text                          | generic | -                                                                                                            |
@@ -122,19 +123,18 @@ See the [exporting models guide](./exporting-models.md) for the workflow.
 Decompiling produces a `.vmdl` plus DMX files for meshes, physics shapes, and animations,
 loadable in ModelDoc. Reconstructed: render meshes with all vertex streams, skeleton,
 attachments, bodygroups, LOD groups, hitbox sets, material groups (skins), static collision
-shapes, bone constraints, IK chains and the legacy IK control rig, face flexes (morph targets
-with position, normal and wrinkle deltas, and the flex controllers and rules that drive them),
-breakable pieces, embedded sequences with events/layers/root motion, Animgraph 2 clips and
-references, and a wide range of game data blocks (prop_data, particle attachments, and many
-more) passed through verbatim.
+shapes, physics joints and body properties, bone constraints, IK chains and control rigs,
+face flexes, breakable pieces, embedded sequences with events/layers/root motion, Animgraph 2
+clips and references, and a wide range of game data blocks (prop_data, particle attachments,
+and many more) passed through verbatim.
 
 What a recompiled model will be missing:
 
 | What                                      | Why                          | Details                                                                                                                                                                                                                                                                                                                                                               |
 | ----------------------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Cloth simulation                          | Partly not in compiled files | The compiled `FeModel` cloth data is not parsed, and some of the authored cloth attributes do not survive compilation in recoverable form, so recompiled models will not simulate. [#653](https://github.com/ValveResourceFormat/ValveResourceFormat/issues/653)                                                                                                      |
-| Ragdoll joints                            | Not implemented              | Physics constraints (`m_constraints2`) are not parsed anywhere; only the collision shapes survive.                                                                                                                                                                                                                                                                    |
-| Stereo flex controls                      | Not in compiled files        | A face rig is authored as one slider per expression plus a left/right balance map, which the compiler bakes into two independent controllers (`left_lipStretcher`, `right_lipStretcher`). Both come back and animate correctly, just as two sliders instead of one. |
+| Physics constraints and motors            | Not implemented              | `m_constraints2` constraints are not parsed, and joint motors are not exported.                                                                                                                                                                                                                                                                                       |
+| Stereo flex controls                      | Not in compiled files        | The compiler splits a stereo slider into independent left and right controllers, so it comes back as two sliders.                                                                                                                                                                                                                                                     |
 | Animations from external animation groups | Not implemented              | Only embedded sequences and Animgraph 2 clips get DMX files; sequences in referenced `vagrp` files are skipped. Animations from referenced include-models are not written either, but their `AnimIncludeModel` references are kept, so they come back if those models are decompiled too.                                                                             |
 | Additional external physics files         | Not implemented              | Only the first `m_refPhysicsData` reference is extracted; shapes from further files are dropped.                                                                                                                                                                                                                                                                      |
 | Blend sequences (blend spaces)            | Not implemented              | Multi-reference blend sequences collapse to their first referenced animation.                                                                                                                                                                                                                                                                                         |
@@ -154,7 +154,7 @@ model that references an external `.vphys_c` exports without one (map exports ha
 | Lower LODs                 | Intentional       | Only the highest-detail LOD is exported. [#535](https://github.com/ValveResourceFormat/ValveResourceFormat/issues/535)                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Source 2 material features | Format limitation | Materials are flattened to glTF PBR metallic-roughness. Layered blend materials export only one layer ([#1161](https://github.com/ValveResourceFormat/ValveResourceFormat/issues/1161)), cloth sheen has no accurate glTF equivalent ([#576](https://github.com/ValveResourceFormat/ValveResourceFormat/issues/576)), vertex-color-driven shaders like foliage do not translate ([#1180](https://github.com/ValveResourceFormat/ValveResourceFormat/issues/1180)). Every exported material also carries the original shader name and parameters in a `vmat` extras block for custom tooling. |
 | Flex controllers           | Format limitation | glTF has no flex rig; controller-driven morph animation is baked into per-frame morph weights instead.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| Morph wrinkle weights      | Format limitation | Position and normal deltas are both exported; the wrinkle weight a `NormalWrinkle` bundle carries alongside the normal has no glTF equivalent and is dropped.                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Morph wrinkle weights      | Format limitation | Position and normal deltas are exported; the wrinkle weight has no glTF equivalent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Additive animations        | Format limitation | glTF has no additive concept; clips are composed over the bind pose, or written as delta tracks flagged via a VRF-specific extras convention that generic viewers will play back incorrectly.                                                                                                                                                                                                                                                                                                                                                                                                |
 | Hitboxes                   | Format limitation | glTF has no collision volume concept; hitboxes are not exported.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Cloth simulation           | Not implemented   | There is no cloth solver; procedural cloth bones are rigidly pinned to their anchor bones.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -209,6 +209,14 @@ entities) are skipped (trigger volumes do carry a physics model in compiled maps
 collision lands in the companion physics file), baked lighting (lightmaps, probes) is not
 exported, and a placed prop that names an animation via its entity properties exports only
 that one, while props naming none export their full animation set.
+
+The viewer culls a map with its world visibility (`vvis_c`) the way the game's engine does.
+Visibility data it leaves unused:
+
+| What                         | Details                                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Older region box tree layout | Found only in some Dota 2 scene maps, whose engine ignores it too; it is not parsed and those maps render without visibility culling. |
+| Two cluster octrees          | Visibility with two clusters or fewer culls nothing, as in the game.                                                                  |
 
 ## Materials (vmat)
 
@@ -289,11 +297,12 @@ All four collision shape types (sphere, capsule, hull, mesh) parse, render, and 
 glTF as visualization geometry. Decompiled `.vmdl` files carry all four; `.vmap` decompiles
 carry only hulls and meshes. Hitboxes fully round-trip into decompiled models.
 
-Not parsed anywhere: ragdoll joints/constraints (`m_constraints2`) and the `FeModel`
-cloth/softbody block; both are visible only in the raw text dump. Surface properties are
-resolved by name only; their physical values (friction, density, sounds) are not consumed
-or exported. Text-dumping the PHYS block of gigabyte-class maps can run out of memory; dump
-the block to a file via the CLI instead
+Joints (`m_joints`) and their bodies' mass, inertia, damping, drag, center of mass and tags
+export into decompiled models; joint motors do not. Not parsed anywhere: constraints
+(`m_constraints2`) and the `FeModel` cloth/softbody block; both are visible only in the raw
+text dump. Surface properties are resolved by name only; their physical values (friction,
+density, sounds) are not consumed or exported. Text-dumping the PHYS block of gigabyte-class
+maps can run out of memory; dump the block to a file via the CLI instead
 ([#840](https://github.com/ValveResourceFormat/ValveResourceFormat/issues/840)).
 
 ## Particles (vpcf)

@@ -11,7 +11,6 @@ using OpenTK.Graphics.OpenGL;
 using SkiaSharp;
 using Svg.Skia;
 using ValveResourceFormat;
-using ValveResourceFormat.Graphs;
 using ValveResourceFormat.Renderer;
 using ValveResourceFormat.Renderer.Input;
 using ValveResourceFormat.Renderer.Materials;
@@ -43,6 +42,22 @@ namespace GUI.Types.GLViewers
             Point,
             Linear,
         }
+
+        enum SpriteSheetDisplay
+        {
+            FullSheet,
+            OutlineFrame,
+            CropToFrame,
+        }
+
+        static readonly string[] SpriteSheetDisplayNames = ["Full sheet", "Outline current frame", "Crop to current frame"];
+
+        /// <summary>
+        /// Largest animation rate the speed slider reaches, in passes per second, or in frames per
+        /// second when animating in FPS.
+        /// </summary>
+        const float SpriteRateSliderMax = 4f;
+        const float SpriteFpsSliderMax = 60f;
 
         protected VrfGuiContext VrfGuiContext;
         private Resource? Resource;
@@ -79,6 +94,20 @@ namespace GUI.Types.GLViewers
         private bool ShowLightBackground;
         private bool WasMovingLastFrame;
 
+        private SpritesheetData? SpriteSheetData;
+        private int SelectedSequence;
+        private SpriteSheetDisplay SpriteSheetDisplayMode = SpriteSheetDisplay.OutlineFrame;
+        private bool IsSpritePlaying = true;
+        private bool SpriteLoop = true;
+        private float SpriteCyclePosition;
+        private float SpriteAnimationRate = 1f;
+        private bool SpriteAnimateInFps;
+        private float spriteRateSliderValue = 1f / SpriteRateSliderMax;
+        private int CurrentSpriteFrame;
+        private Label? spriteFrameLabel;
+        private GLViewerSliderControl? spriteFrameTrackBar;
+        private GLViewerSliderControl? spriteSpeedTrackBar;
+
         private int DisplayedImageCount => Math.Max(1 << (int)ChannelSplitMode, VisualizeTiling ? 2 : 1);
 
         private Vector2 ActualTextureSize
@@ -106,6 +135,11 @@ namespace GUI.Types.GLViewers
                         : new Vector2(DisplayedImageCount, 1);
 
                     size *= mult;
+                }
+
+                if (SpriteSheetDisplayMode == SpriteSheetDisplay.CropToFrame && TryGetCurrentSpriteFrameRect(out var frameRect))
+                {
+                    size *= new Vector2(frameRect.Z - frameRect.X, frameRect.W - frameRect.Y);
                 }
 
                 return size;
@@ -173,12 +207,12 @@ namespace GUI.Types.GLViewers
             if (Bitmap != null)
             {
                 // Image viewer
-                AddChannelsComboBox();
+                AddChannelsComboBox(HasTranslucentPixels(Bitmap));
             }
             else if (Svg != null)
             {
                 // Svg viewer
-                AddChannelsComboBox();
+                AddChannelsComboBox(transparentByDefault: true);
             }
             else if (Resource != null)
             {
@@ -233,7 +267,7 @@ namespace GUI.Types.GLViewers
 
             if (Resource.ResourceType == ResourceType.PanoramaVectorGraphic)
             {
-                AddChannelsComboBox();
+                AddChannelsComboBox(Svg != null);
                 return;
             }
             else if (Resource.ResourceType == ResourceType.PostProcessing && Resource.DataBlock is PostProcessing postProcessingData)
@@ -289,12 +323,12 @@ namespace GUI.Types.GLViewers
                 {
                     string GetMipLevelSizeString(int mipLevel)
                     {
-                        var mipWidth = Math.Max(1, textureData.Width >> mipLevel);
-                        var mipHeight = Math.Max(1, textureData.Height >> mipLevel);
+                        var mipWidth = MathUtils.MipLevelSize(textureData.Width, mipLevel);
+                        var mipHeight = MathUtils.MipLevelSize(textureData.Height, mipLevel);
 
                         if ((textureData.Flags & VTexFlags.VOLUME_TEXTURE) != 0)
                         {
-                            var mipDepth = Math.Max(1, textureData.Depth >> mipLevel);
+                            var mipDepth = MathUtils.MipLevelSize(textureData.Depth, mipLevel);
                             return $"(#{mipLevel}) {mipWidth}x{mipHeight}x{mipDepth}";
                         }
 
@@ -408,7 +442,7 @@ namespace GUI.Types.GLViewers
 
             using (UiControl.BeginGroup("View"))
             {
-                AddChannelsComboBox();
+                AddChannelsComboBox(HasTranslucentPixels(textureData, decodeFlags));
 
                 var forceSoftwareDecode = textureData.IsRawAnyImage;
                 var projectionBeforeSoftwareDecode = (int)CubemapProjection.Equirectangular;
@@ -449,6 +483,139 @@ namespace GUI.Types.GLViewers
                     softwareDecodeCheckBox.Enabled = false;
                 }
             }
+
+            AddSpriteSheetControls(textureData);
+        }
+
+        private void AddSpriteSheetControls(Texture textureData)
+        {
+            Debug.Assert(UiControl != null);
+
+            var spriteSheetData = textureData.GetSpriteSheetData();
+
+            if (spriteSheetData == null || spriteSheetData.Sequences.Length == 0)
+            {
+                return;
+            }
+
+            SpriteSheetData = spriteSheetData;
+
+            using var _ = UiControl.BeginGroup("Sprite Sheet");
+
+            ComboBox? sequenceComboBox = null;
+
+            if (spriteSheetData.Sequences.Length > 1)
+            {
+                sequenceComboBox = UiControl.AddSelection("Sequence", (name, index) =>
+                {
+                    SelectedSequence = index;
+                    SpriteCyclePosition = 0f;
+                    SetSpriteFrame(spriteSheetData.Sequences[index], 0);
+
+                    if (spriteFrameTrackBar != null)
+                    {
+                        spriteFrameTrackBar.Slider.Value = 0f;
+                    }
+
+                    RecenterTexture();
+                });
+
+                sequenceComboBox.Items.AddRange([.. spriteSheetData.Sequences.Select(GetSequenceDisplayName)]);
+            }
+
+            spriteFrameLabel = new Label
+            {
+                AutoSize = true,
+            };
+
+            UiControl.AddControl(spriteFrameLabel);
+
+            var displayComboBox = UiControl.AddSelection("Display", (name, index) =>
+            {
+                SpriteSheetDisplayMode = (SpriteSheetDisplay)index;
+                RecenterTexture();
+            });
+
+            displayComboBox.Items.AddRange(SpriteSheetDisplayNames);
+
+            UiControl.AddCheckBox("Autoplay", IsSpritePlaying, isChecked => IsSpritePlaying = isChecked);
+            UiControl.AddCheckBox("Loop", SpriteLoop, isChecked => SpriteLoop = isChecked);
+
+            spriteFrameTrackBar = UiControl.AddTrackBar(value =>
+            {
+                var sequence = spriteSheetData.Sequences[SelectedSequence];
+                var frameCount = sequence.Frames.Length;
+
+                if (frameCount == 0)
+                {
+                    return;
+                }
+
+                var frame = Math.Clamp((int)(value * frameCount), 0, frameCount - 1);
+
+                SpriteCyclePosition = sequence.GetFrameStartTime(frame) / sequence.EffectiveTotalTime;
+                SetSpriteFrame(sequence, frame);
+            });
+
+            UiControl.AddCheckBox("Animate in FPS", SpriteAnimateInFps, isChecked =>
+            {
+                SpriteAnimateInFps = isChecked;
+                UpdateSpriteAnimationRate();
+            });
+
+            spriteSpeedTrackBar = UiControl.AddTrackBar(value =>
+            {
+                spriteRateSliderValue = value;
+                UpdateSpriteAnimationRate();
+            }, spriteRateSliderValue);
+
+            displayComboBox.SelectedIndex = (int)SpriteSheetDisplayMode;
+
+            if (sequenceComboBox != null)
+            {
+                sequenceComboBox.SelectedIndex = 0;
+            }
+
+            SetSpriteFrame(spriteSheetData.Sequences[0], 0);
+        }
+
+        /// <summary>
+        /// Formats a sequence as its id and frame count, with its name in between when the name is
+        /// neither the authoring class name nor a bare number.
+        /// </summary>
+        private static string GetSequenceDisplayName(SpritesheetData.Sequence sequence)
+        {
+            var isDescriptive = sequence.IsNamed && !uint.TryParse(sequence.Name, out _);
+
+            return isDescriptive
+                ? $"#{sequence.Id} {sequence.Name} ({sequence.Frames.Length} frames)"
+                : $"#{sequence.Id} ({sequence.Frames.Length} frames)";
+        }
+
+        private void UpdateSpriteAnimationRate()
+        {
+            SpriteAnimationRate = spriteRateSliderValue * (SpriteAnimateInFps ? SpriteFpsSliderMax : SpriteRateSliderMax);
+
+            if (SpriteSheetData != null)
+            {
+                SetSpriteFrameLabel(SpriteSheetData.Sequences[SelectedSequence], CurrentSpriteFrame);
+            }
+        }
+
+        private void SetSpriteFrame(SpritesheetData.Sequence sequence, int frame)
+        {
+            CurrentSpriteFrame = frame;
+
+            SetSpriteFrameLabel(sequence, frame);
+        }
+
+        private void SetSpriteFrameLabel(SpritesheetData.Sequence sequence, int frame)
+        {
+            if (spriteFrameLabel != null)
+            {
+                var unit = SpriteAnimateInFps ? "frames/s" : "passes/s";
+                spriteFrameLabel.Text = $"Frame: {frame + 1} / {sequence.Frames.Length}    Rate: {SpriteAnimationRate:0.##} {unit}";
+            }
         }
 
         public GLTextureViewer(VrfGuiContext vrfGuiContext, RendererContext rendererContext, SKBitmap? bitmap) : this(vrfGuiContext, rendererContext)
@@ -484,7 +651,50 @@ namespace GUI.Types.GLViewers
             OriginalHeight = Svg.Picture.CullRect.Height;
         }
 
-        private void AddChannelsComboBox()
+        private const int TranslucencyScanPixelLimit = 2048 * 2048;
+        private const TextureCodec DataInAlphaCodecs = TextureCodec.YCoCg | TextureCodec.RGBM | TextureCodec.HemiOctRB | TextureCodec.NormalizeNormals | TextureCodec.Dxt5nm;
+
+        private static bool HasTranslucentPixels(Texture textureData, TextureCodec codec)
+        {
+            if (textureData.Format == VTexFormat.UNKNOWN || (codec & DataInAlphaCodecs) != 0)
+            {
+                return false;
+            }
+
+            var mipLevel = Math.Max(textureData.NumMipLevels - 1, 0);
+            var width = MathUtils.MipLevelSize(textureData.Width, mipLevel);
+            var height = MathUtils.MipLevelSize(textureData.Height, mipLevel);
+
+            if (width * height > TranslucencyScanPixelLimit)
+            {
+                return false;
+            }
+
+            using var bitmap = textureData.GenerateBitmap(mipLevel: (uint)mipLevel);
+            return HasTranslucentPixels(bitmap);
+        }
+
+        private static bool HasTranslucentPixels(SKBitmap bitmap)
+        {
+            if (bitmap.ColorType is not (SKColorType.Bgra8888 or SKColorType.Rgba8888))
+            {
+                return false;
+            }
+
+            var pixels = bitmap.GetPixelSpan();
+
+            for (var i = 3; i < pixels.Length; i += 4)
+            {
+                if (pixels[i] != byte.MaxValue)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void AddChannelsComboBox(bool transparentByDefault)
         {
             Debug.Assert(UiControl != null);
 
@@ -510,9 +720,8 @@ namespace GUI.Types.GLViewers
 
             channelsComboBox.Items.AddRange([.. ChannelsComboBoxOrder.Select(c => (object)c.ChoiceString)]);
 
-            channelsComboBox.SelectedIndex = Svg != null
-                ? Array.FindIndex(ChannelsComboBoxOrder, channel => channel.Channels == ChannelMapping.RGBA)
-                : Array.FindIndex(ChannelsComboBoxOrder, channel => channel.Channels == ChannelMapping.RGB);
+            var defaultChannels = transparentByDefault ? ChannelMapping.RGBA : ChannelMapping.RGB;
+            channelsComboBox.SelectedIndex = Array.FindIndex(ChannelsComboBoxOrder, channel => channel.Channels == defaultChannels && channel.ChannelSplitMode == ChannelSplitting.None);
 
             var samplingComboBox = UiControl.AddSelection("Sampling", (name, index) =>
             {
@@ -627,6 +836,14 @@ namespace GUI.Types.GLViewers
 
             decodeFlagsListBox?.Dispose();
             decodeFlagsListBox = null;
+
+            spriteFrameTrackBar?.Dispose();
+            spriteFrameTrackBar = null;
+            spriteSpeedTrackBar?.Dispose();
+            spriteSpeedTrackBar = null;
+            spriteFrameLabel?.Dispose();
+            spriteFrameLabel = null;
+            SpriteSheetData = null;
 
             base.Dispose();
         }
@@ -1082,32 +1299,16 @@ namespace GUI.Types.GLViewers
 
             IsZoomedIn = GLControl.Height < height || GLControl.Width < width;
 
-            if (IsZoomedIn)
+            if (IsZoomedIn || MovedFromOrigin_Unzoomed)
             {
-                if (GLControl.Width < width)
-                {
-                    Position.X = Math.Clamp(Position.X, 0, width - GLControl.Width);
-                }
-                else
-                {
-                    Position.X = Math.Clamp(Position.X, Math.Min(0, -GLControl.Width + width), 0);
-                }
+                // The far bound is negative on an axis where the texture is smaller than the control
+                Position.X = MathUtils.Clamp(Position.X, 0, width - GLControl.Width);
+                Position.Y = MathUtils.Clamp(Position.Y, 0, height - GLControl.Height);
 
-                if (GLControl.Height < height)
+                if (IsZoomedIn)
                 {
-                    Position.Y = Math.Clamp(Position.Y, 0, height - GLControl.Height);
+                    MovedFromOrigin_Unzoomed = false;
                 }
-                else
-                {
-                    Position.Y = Math.Clamp(Position.Y, Math.Min(0, -GLControl.Height + height), 0);
-                }
-
-                MovedFromOrigin_Unzoomed = false;
-            }
-            else if (MovedFromOrigin_Unzoomed)
-            {
-                Position.X = Math.Clamp(Position.X, Math.Min(0, -GLControl.Width + width), 0);
-                Position.Y = Math.Clamp(Position.Y, Math.Min(0, -GLControl.Height + height), 0);
             }
             else
             {
@@ -1116,6 +1317,23 @@ namespace GUI.Types.GLViewers
 
             Position.X = MathF.Round(Position.X);
             Position.Y = MathF.Round(Position.Y);
+        }
+
+        private void RecenterTexture()
+        {
+            if (texture == null)
+            {
+                return;
+            }
+
+            MovedFromOrigin_Unzoomed = false;
+            ClickPosition = null;
+            TextureScaleOld = TextureScale;
+            TextureScaleChangeTime = 0f;
+            PositionOld = Position;
+
+            CenterPosition();
+            ClampPosition();
         }
 
         private void CenterPosition()
@@ -1325,7 +1543,7 @@ namespace GUI.Types.GLViewers
 
         protected override void OnGLLoad()
         {
-            if (Svg == null) /// Svg will be setup on <see cref="OnFirstPaint"/> because it needs to be rescaled
+            if (Svg == null) // Svg will be setup on OnFirstPaint because it needs to be rescaled
             {
                 SetupTexture(false);
             }
@@ -1375,7 +1593,7 @@ namespace GUI.Types.GLViewers
 
             UiControl.BeginInvoke(UpdateZoomLabel);
 
-            /// This will call <see cref="CenterPosition"/> since it could not have been moved by user on first paint yet
+            // This will call CenterPosition since it could not have been moved by user on first paint yet
             ClampPosition();
         }
 
@@ -1383,6 +1601,62 @@ namespace GUI.Types.GLViewers
         {
             HandleArrowKeyMovement(deltaTime);
             TextureScaleChangeTime += deltaTime;
+
+            UpdateSpritePlayback(deltaTime);
+        }
+
+        private void UpdateSpritePlayback(float deltaTime)
+        {
+            if (SpriteSheetData == null || spriteFrameTrackBar == null || !IsSpritePlaying || spriteFrameTrackBar.Slider.Clicked)
+            {
+                return;
+            }
+
+            var sequence = SpriteSheetData.Sequences[SelectedSequence];
+
+            if (sequence.Frames.Length < 2)
+            {
+                return;
+            }
+
+            var passesPerSecond = SpriteAnimateInFps
+                ? SpriteAnimationRate / sequence.EffectiveTotalTime
+                : SpriteAnimationRate;
+
+            var cycle = SpriteCyclePosition + deltaTime * passesPerSecond;
+
+            SpriteCyclePosition = SpriteLoop
+                ? MathUtils.Fract(cycle)
+                : MathUtils.Saturate(cycle);
+
+            var (frame, _, _) = sequence.GetFrameAtPosition(SpriteCyclePosition * sequence.EffectiveTotalTime);
+
+            if (frame == CurrentSpriteFrame)
+            {
+                return;
+            }
+
+            CurrentSpriteFrame = frame;
+
+            var trackBar = spriteFrameTrackBar;
+
+            if (trackBar.InvokeRequired)
+            {
+                trackBar.BeginInvoke(() => SyncSpriteFrameToPlayback(sequence, frame));
+                return;
+            }
+
+            SyncSpriteFrameToPlayback(sequence, frame);
+        }
+
+        private void SyncSpriteFrameToPlayback(SpritesheetData.Sequence sequence, int frame)
+        {
+            if (spriteFrameTrackBar != null)
+            {
+                spriteFrameTrackBar.Slider.Value = (float)frame / sequence.Frames.Length;
+            }
+
+            SetSpriteFrameLabel(sequence, frame);
         }
 
         protected override void OnPaint(float frameTime)
@@ -1440,7 +1714,8 @@ namespace GUI.Types.GLViewers
                 VisualizeTiling,
                 ShowLightBackground,
                 MainFramebuffer.Width,
-                MainFramebuffer.Height
+                MainFramebuffer.Height,
+                HashCode.Combine(CurrentSpriteFrame, SelectedSequence, SpriteSheetDisplayMode)
             );
         }
 
@@ -1498,8 +1773,57 @@ namespace GUI.Types.GLViewers
             shader.SetUniform("g_nCubemapProjectionType", (int)CubemapProjectionType);
             shader.SetUniform("g_nDecodeFlags", (int)(decodeFlags & ~removeFlags));
 
+            SetSpriteSheetUniforms(captureFullSizeImage);
+
             GL.BindVertexArray(RendererContext.MeshBufferCache.EmptyVAO);
             GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
+        }
+
+        private bool TryGetCurrentSpriteFrameRect(out Vector4 frameRect)
+        {
+            frameRect = new Vector4(0f, 0f, 1f, 1f);
+
+            if (SpriteSheetData == null)
+            {
+                return false;
+            }
+
+            var sequence = SpriteSheetData.Sequences[SelectedSequence];
+
+            if (sequence.Frames.Length == 0)
+            {
+                return false;
+            }
+
+            var frame = sequence.Frames[Math.Clamp(CurrentSpriteFrame, 0, sequence.Frames.Length - 1)];
+
+            if (frame.Images.Length == 0)
+            {
+                return false;
+            }
+
+            var image = frame.Images[0];
+            frameRect = new Vector4(image.UncroppedMin.X, image.UncroppedMin.Y, image.UncroppedMax.X, image.UncroppedMax.Y);
+            return true;
+        }
+
+        private void SetSpriteSheetUniforms(bool captureFullSizeImage)
+        {
+            Debug.Assert(shader != null);
+
+            var mode = SpriteSheetDisplay.FullSheet;
+
+            if (captureFullSizeImage || !TryGetCurrentSpriteFrameRect(out var frameRect))
+            {
+                frameRect = new Vector4(0f, 0f, 1f, 1f);
+            }
+            else
+            {
+                mode = SpriteSheetDisplayMode;
+            }
+
+            shader.SetUniform("g_nSpriteSheetMode", (int)mode);
+            shader.SetUniform("g_vSpriteFrameMinMax", frameRect);
         }
 
         protected (float Scale, Vector2 Position) GetCurrentPositionAndScale()

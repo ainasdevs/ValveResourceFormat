@@ -1,4 +1,3 @@
-using OpenTK.Graphics.OpenGL;
 using ValveResourceFormat.Renderer.SceneNodes;
 
 namespace ValveResourceFormat.Renderer
@@ -59,7 +58,7 @@ namespace ValveResourceFormat.Renderer
             var vertices = new List<SimpleVertex>();
             AddOctreeNode(vertices, octree.Root, 0);
 
-            Upload(vertices, dynamic ? BufferUsage.Dynamic : BufferUsage.Static);
+            Upload(vertices);
         }
 
         /// <summary>Renders the octree visualization for the current frame, rebuilding geometry if dynamic.</summary>

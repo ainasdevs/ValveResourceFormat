@@ -1,9 +1,7 @@
 using System.Linq;
-using Microsoft.Extensions.Logging;
 using ValveKeyValue;
 using ValveResourceFormat.Blocks;
 using ValveResourceFormat.Particles;
-using ValveResourceFormat.Particles.Utils;
 using ValveResourceFormat.Renderer.Particles.Renderers;
 using ValveResourceFormat.ResourceTypes;
 using ValveResourceFormat.Serialization.KeyValues;
@@ -79,6 +77,9 @@ namespace ValveResourceFormat.Renderer.Particles
 
             SetupRenderers(simulation.Definition.GetArray("m_Renderers") ?? [], scene);
 
+            simulation.RenderState.SequenceDurations = CollectSequenceDurations();
+            simulation.RenderState.Lighting = scene.LightingInfo;
+
             foreach (var childSimulation in simulation.Children)
             {
                 childRenderers.Add(new ParticleRenderer(childSimulation, rendererContext, scene));
@@ -86,6 +87,7 @@ namespace ValveResourceFormat.Renderer.Particles
 
             Passes = CollectPasses();
             WantsSceneDepth = renderers.Any(static r => r.WantsSceneDepth) || childRenderers.Any(static c => c.WantsSceneDepth);
+            CanRenderReplacement = renderers.Any(static r => r.CanRenderReplacement) || childRenderers.Any(static c => c.CanRenderReplacement);
         }
 
         private void SetupRenderers(IReadOnlyList<KVObject> rendererData, Scene scene)
@@ -112,12 +114,44 @@ namespace ValveResourceFormat.Renderer.Particles
             }
         }
 
+        /// <summary>
+        /// How long each sequence of the first sheet this system's renderers offer runs, in frames, or
+        /// null when none of them draws with one.
+        /// </summary>
+        private float[]? CollectSequenceDurations()
+        {
+            foreach (var renderer in renderers)
+            {
+                if (renderer.SpriteSheet is not { } sheet)
+                {
+                    continue;
+                }
+
+                var durations = new float[sheet.Sequences.Length];
+
+                for (var i = 0; i < durations.Length; i++)
+                {
+                    durations[i] = sheet.Sequences[i].TotalTime;
+                }
+
+                return durations;
+            }
+
+            return null;
+        }
+
         private CustomRenderPasses CollectPasses()
         {
             var passes = CustomRenderPasses.None;
 
             foreach (var renderer in renderers)
             {
+                if (renderer.OnlyRenderInEffectsBloomPass)
+                {
+                    // todo: add bloom effects pass
+                    continue;
+                }
+
                 passes |= renderer.OnlyRenderInEffectsWaterPass
                     ? CustomRenderPasses.WaterEffects
                     : renderer.Pass == RenderPass.Opaque
@@ -137,6 +171,10 @@ namespace ValveResourceFormat.Renderer.Particles
 
             return passes;
         }
+
+        /// <summary>The renderers of this system and the systems nested under it.</summary>
+        public IEnumerable<ParticleFunctionRenderer> EnumerateRenderers()
+            => renderers.Concat(childRenderers.SelectMany(static child => child.EnumerateRenderers()));
 
         /// <inheritdoc/>
         public void OnFrameSimulated(ParticleCollection particles, ParticleSystemState state)
@@ -216,11 +254,7 @@ namespace ValveResourceFormat.Renderer.Particles
 
             foreach (var renderer in renderers)
             {
-                var inPass = depthPass
-                    ? renderer.CanRenderDepth
-                    : renderer.Pass == pass && renderer.OnlyRenderInEffectsWaterPass == waterEffectsLayer;
-
-                if (!inPass || renderer.GetOperatorRunStrength(Simulation.RenderState) <= 0.0f)
+                if (!InPass(renderer, pass, waterEffectsLayer) || renderer.GetOperatorRunStrength(Simulation.RenderState) <= 0.0f)
                 {
                     continue;
                 }
@@ -240,6 +274,60 @@ namespace ValveResourceFormat.Renderer.Particles
             if (rendered)
             {
                 PerfStats.Active.Count(Counter.ParticleSystem);
+            }
+        }
+
+        /// <summary>
+        /// Whether <paramref name="renderer"/> draws in <paramref name="pass"/>. The outline pass owns
+        /// no renderer of its own, so everything the system has draws in it.
+        /// </summary>
+        private static bool InPass(ParticleFunctionRenderer renderer, RenderPass pass, bool waterEffectsLayer)
+        {
+            if (renderer.OnlyRenderInEffectsBloomPass)
+            {
+                return false;
+            }
+
+            return pass switch
+            {
+                RenderPass.DepthOnly => renderer.CanRenderDepth,
+                RenderPass.Outline => !renderer.OnlyRenderInEffectsWaterPass,
+                _ => renderer.Pass == pass && renderer.OnlyRenderInEffectsWaterPass == waterEffectsLayer,
+            };
+        }
+
+        /// <inheritdoc cref="ParticleFunctionRenderer.CanRenderReplacement"/>
+        public bool CanRenderReplacement { get; }
+
+        /// <summary>
+        /// Draws the renderers belonging to <paramref name="pass"/> with a pass replacement shader.
+        /// </summary>
+        public void RenderReplacement(Shader replacement, uint objectId, RenderPass pass, Camera camera)
+        {
+            foreach (var childRenderer in childRenderers)
+            {
+                if (!childRenderer.CanRenderReplacement || !childRenderer.Simulation.ShouldRunAsChildOf(Simulation.RenderState))
+                {
+                    continue;
+                }
+
+                childRenderer.RenderReplacement(replacement, objectId, pass, camera);
+            }
+
+            if (!IsWithinDrawDistance(camera) || Simulation.Particles.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var renderer in renderers)
+            {
+                if (!renderer.CanRenderReplacement || !InPass(renderer, pass, false)
+                    || renderer.GetOperatorRunStrength(Simulation.RenderState) <= 0.0f)
+                {
+                    continue;
+                }
+
+                renderer.RenderReplacement(replacement, objectId);
             }
         }
 

@@ -178,6 +178,11 @@ namespace GUI.Types.GLViewers
 
                 var vfxDescription = vcsDescriptionByName.GetValueOrDefault(paramName);
 
+                if (parameterPresence == ParameterPresence.ShaderOnly && vcsDescriptionByName.Count > 0 && vfxDescription == null)
+                {
+                    continue;
+                }
+
                 // Handle float parameters
                 if (materialParams.FloatParams.ContainsKey(paramName) || shaderParams.FloatParams.ContainsKey(paramName))
                 {
@@ -847,7 +852,7 @@ namespace GUI.Types.GLViewers
                 {
                     if (previewNode != null)
                     {
-                        previewNode.Tint = ColorToVector4(pickedColor);
+                        previewNode.TintAlpha = ColorToVector4(pickedColor);
                     }
 
                     colorButton.BackColor = pickedColor;

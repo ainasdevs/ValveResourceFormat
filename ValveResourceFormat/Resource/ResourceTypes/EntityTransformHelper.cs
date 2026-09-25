@@ -93,8 +93,10 @@ namespace ValveResourceFormat.ResourceTypes
 
             var xyDist = MathF.Sqrt(forwardX * forwardX + forwardY * forwardY);
 
-            Vector3 angles = new();
-            angles.X = MathF.Atan2(-forwardZ, xyDist);
+            Vector3 angles = new()
+            {
+                X = MathF.Atan2(-forwardZ, xyDist)
+            };
 
             if (xyDist > 0.001f)
             {
@@ -113,6 +115,14 @@ namespace ValveResourceFormat.ResourceTypes
 
             return Vector3.RadiansToDegrees(angles);
         }
+
+        /// <summary>
+        /// Gets the angle a rotation turns about the Z axis, leaving out any swing away from that axis.
+        /// </summary>
+        /// <param name="rotation">The rotation.</param>
+        /// <returns>The twist angle in radians.</returns>
+        public static float GetTwistAngleAroundZ(Quaternion rotation)
+            => 2f * MathF.Atan2(rotation.Z, rotation.W);
 
         /// <summary>
         /// Converts Euler angles (pitch, yaw, roll) to a normalized forward direction vector.

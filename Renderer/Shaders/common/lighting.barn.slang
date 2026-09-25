@@ -23,11 +23,13 @@ struct BarnLightConstants
     mat3x4 m_mBarnIlluminationFromWorld;
 };
 
-layout(std430, binding = 11) readonly buffer BarnLightBuffer {
+layout(std430, binding = 3) readonly buffer BarnLightBuffer {
     BarnLightConstants g_BarnLights[];
 };
 
 uint g_nBarnLightsIterated = 0u;
+
+const uint BARN_LIGHT_FLAG_LIT_INSIDE_NEAR_PLANE = 0x8000u;
 
 // Game uses Texture3D
 uniform sampler2DArray g_tLightCookieTexture; // ClampToBorder, reserved
@@ -103,7 +105,11 @@ void CalculateBarnLighting(inout LightingTerms_t lighting, in MaterialProperties
 
         vec4 clipPos = barnLight.m_mBarnFrustum * vec4(mat.PositionWS, 1.0);
         vec3 ndc = clipPos.xyz / clipPos.w;
-        if (any(lessThanEqual(ndc, vec3(-1.0, -1.0, 0.0))) || any(greaterThanEqual(ndc, vec3(1.0))))
+
+        bool bLitInsideNearPlane = (barnLight.m_nPathTraceIndex_BarnLightFlags & BARN_LIGHT_FLAG_LIT_INSIDE_NEAR_PLANE) != 0u;
+        bool bBeforeNearPlane = bLitInsideNearPlane ? clipPos.w <= 0.0001 : ndc.z <= 0.0;
+
+        if (bBeforeNearPlane || any(lessThanEqual(ndc.xy, vec2(-1.0))) || any(greaterThanEqual(ndc, vec3(1.0))))
         {
             continue;
         }
@@ -152,11 +158,11 @@ void CalculateBarnLighting(inout LightingTerms_t lighting, in MaterialProperties
                 float proj = dot(-segStart, segDir);
                 closestDir = proj <= 0.0
                     ? segStart
-                    : segStart + segDir * min(1.0, proj / dot(segDir, segDir));
+                    : segStart + segDir * min(1.0, proj / length_squared(segDir));
             }
 
             vec3 entityForward = QuaternionRotation(vec3(1, 0, 0), barnLight.m_vBarnLightOrientationQ);
-            attenuation *= clamp(barnLight.m_vBarnLightAngleFade.x + barnLight.m_vBarnLightAngleFade.y * dot(entityForward, normalize(closestDir)), 0.0, 1.0);
+            attenuation *= saturate(barnLight.m_vBarnLightAngleFade.x + barnLight.m_vBarnLightAngleFade.y * dot(entityForward, normalize(closestDir)));
         }
         else
         {

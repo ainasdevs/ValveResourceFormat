@@ -5,7 +5,6 @@ using System.Text;
 using ValveKeyValue;
 using ValveResourceFormat.Graphs;
 using ValveResourceFormat.ResourceTypes;
-using ValveResourceFormat.ResourceTypes.ModelData.Attachments;
 using ValveResourceFormat.Serialization.KeyValues;
 using static ValveResourceFormat.IO.KVHelpers;
 
@@ -364,7 +363,10 @@ public class AnimationGraphExtract : IDisposable
         "CFollowAttachment", "CFollowPath", "CFootAdjustment", "CFootLock", "CFootStepTrigger", "CHitReact",
         "CInputStream", "CJiggleBone", "CLookAt", "CMotionMatching", "CMover", "CPathHelper", "CRagdoll",
         "CRoot", "CSelector", "CSequence", "CSetFacing", "CSingleFrame", "CSkeletalInput",
-        "CSlowDownonSlopes", "CSolveIKChain", "CSpeedScale", "CStateMachine", "CStopAtGoal",
+        "CSlowDownOnSlopes", "CSolveIKChain", "CSpeedScale", "CStateMachine", "CStopAtGoal",
+        "CComment", "CGroundIKSolve", "CStrideLengthAdjuster",
+        "CGroup", "CGroupInput", "CGroupOutput", "CJumpHelper", "CStanceOverride",
+        "CStanceScale", "CSubGraph", "CTargetSelector",
         "CSubtract", "CTurnHelper", "CTwoBoneIK", "CWayPointHelper", "CZeroPose", "CFootPinning",
         "CAimCamera", "CTargetWarp", "COrientationWarp", "CPairedSequence", "CFollowTarget"
     };
@@ -378,6 +380,13 @@ public class AnimationGraphExtract : IDisposable
         string? outputKey)
     {
         var destKey = outputKey ?? key;
+
+        // A per-class arm above may already have written this key from another compiled block.
+        if (node.ContainsKey(destKey))
+        {
+            return;
+        }
+
         switch (action)
         {
             case PropAction.Copy:
@@ -485,7 +494,7 @@ public class AnimationGraphExtract : IDisposable
         nodeIndexToIdMap = [];
 
         var assignedNodeIds = new HashSet<long>();
-        var idCursor = GeneratedNodeIdMin;
+        ref var idCursor = ref generatedNodeIdCursor;
         for (var i = 0; i < compiledNodes.Count; i++)
         {
             var compiledNode = compiledNodes[i];
@@ -527,13 +536,23 @@ public class AnimationGraphExtract : IDisposable
     private const long GeneratedNodeIdMin = 100_000_000L;
     private const long GeneratedNodeIdMax = 999_999_999L;
 
-    private static long GenerateNewNodeId(HashSet<long> assignedNodeIds, ref long cursor)
+    /// <summary>
+    /// Ids handed to nodes the document needs but the compiled graph does not number. One cursor
+    /// serves the whole document: every generated id has to be unique across it, not just within the
+    /// pass that produced it.
+    /// </summary>
+    private long generatedNodeIdCursor = GeneratedNodeIdMin;
+
+    /// <summary>Every id already handed out, so no two generated nodes can share one.</summary>
+    private readonly HashSet<long> issuedNodeIds = [];
+
+    private long GenerateNewNodeId(HashSet<long> assignedNodeIds, ref long cursor)
     {
         if (cursor < GeneratedNodeIdMin)
         {
             cursor = GeneratedNodeIdMin;
         }
-        while (cursor <= GeneratedNodeIdMax && assignedNodeIds.Contains(cursor))
+        while (cursor <= GeneratedNodeIdMax && (assignedNodeIds.Contains(cursor) || issuedNodeIds.Contains(cursor)))
         {
             cursor++;
         }
@@ -541,6 +560,9 @@ public class AnimationGraphExtract : IDisposable
         {
             throw new InvalidOperationException("Exhausted the generated node id range.");
         }
+
+        issuedNodeIds.Add(cursor);
+
         return cursor++;
     }
 
@@ -967,27 +989,32 @@ public class AnimationGraphExtract : IDisposable
     }
     private static KVObject MakeNodeIdObjectValue(long nodeId)
     {
-        var nodeIdObject = new KVObject();
-        nodeIdObject.Add("m_id", unchecked((uint)nodeId));
+        var nodeIdObject = new KVObject
+        {
+            { "m_id", unchecked((uint)nodeId) }
+        };
         return nodeIdObject;
     }
 
     private static KVObject MakeInputConnection(long nodeId)
     {
         var nodeIdObject = MakeNodeIdObjectValue(nodeId);
-        var inputConnection = new KVObject();
-
-        inputConnection.Add("m_nodeID", nodeIdObject);
-        inputConnection.Add("m_outputID", nodeIdObject);
+        var inputConnection = new KVObject
+        {
+            { "m_nodeID", nodeIdObject },
+            { "m_outputID", nodeIdObject }
+        };
 
         return inputConnection;
     }
 
     private static KVObject MakeNodeManagerEntry(long nodeId, KVObject nodeData)
     {
-        var entry = new KVObject();
-        entry.Add("key", MakeNodeIdObjectValue(nodeId));
-        entry.Add("value", nodeData);
+        var entry = new KVObject
+        {
+            { "key", MakeNodeIdObjectValue(nodeId) },
+            { "value", nodeData }
+        };
         return entry;
     }
 
@@ -1103,17 +1130,21 @@ public class AnimationGraphExtract : IDisposable
 
     private static void CopyIfPresent(KVObject source, KVObject target, string key, string? destKey = null)
     {
-        if (source.ContainsKey(key))
+        var name = destKey ?? key;
+
+        if (source.ContainsKey(key) && !target.ContainsKey(name))
         {
-            target.Add(destKey ?? key, source[key]);
+            target.Add(name, source[key]);
         }
     }
 
     private static void CopyBoolIfPresent(KVObject source, KVObject target, string key, string? destKey = null)
     {
-        if (source.ContainsKey(key))
+        var name = destKey ?? key;
+
+        if (source.ContainsKey(key) && !target.ContainsKey(name))
         {
-            target.Add(destKey ?? key, source.GetIntegerProperty(key) > 0);
+            target.Add(name, source.GetIntegerProperty(key) > 0);
         }
     }
 
@@ -1558,8 +1589,10 @@ public class AnimationGraphExtract : IDisposable
         paramCondition.Add("m_comparisonOp", comparisonOp);
         paramCondition.Add("m_comparisonString", "");
 
-        var comparisonValue = new KVObject();
-        comparisonValue.Add("m_nType", componentType);
+        var comparisonValue = new KVObject
+        {
+            { "m_nType", componentType }
+        };
 
         var componentArray = KVObject.Array();
         for (var i = 0; i < componentValues.Length; i++)
@@ -2572,7 +2605,7 @@ public class AnimationGraphExtract : IDisposable
         var nodes = new List<KVObject>();
         var idMap = new Dictionary<long, long>();
         var assignedIds = new HashSet<long>();
-        var idCursor = GeneratedNodeIdMin;
+        ref var idCursor = ref generatedNodeIdCursor;
 
         // Pass 1: assign IDs in BFS order
         {
@@ -2739,6 +2772,19 @@ public class AnimationGraphExtract : IDisposable
         defaultNode.Add("m_networkMode", "ServerAuthoritative");
 
         return defaultNode;
+    }
+
+    /// <summary>
+    /// Writes an animation node's authored name, which the compiled graph carries under a different key.
+    /// A node with no name keeps a placeholder.
+    /// </summary>
+    /// <returns>The name written, which a caller that derives more from it can read back.</returns>
+    private static string AddNodeName(KVObject node, object value)
+    {
+        var name = value.ToString() ?? "Unnamed";
+        node.Add("m_sName", name);
+
+        return name;
     }
 
     private KVObject ConvertToUncompiled(KVObject compiledNode)
@@ -3209,7 +3255,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    node.Add("m_sName", value.ToString() ?? "Unnamed");
+                    AddNodeName(node, value);
                     continue;
                 }
                 else if (key == "m_flJumpEndCycle")
@@ -3249,7 +3295,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    node.Add("m_sName", value.ToString() ?? "Unnamed");
+                    AddNodeName(node, value);
                     continue;
                 }
             }
@@ -3329,8 +3375,10 @@ public class AnimationGraphExtract : IDisposable
                         var chainData = chainsToSolveData[i];
                         var targetHandle = i < targetHandles.Count ? targetHandles[i] : null;
 
-                        var ikChain = new KVObject();
-                        ikChain.Add("_class", "CSolveIKChainAnimNodeChainData");
+                        var ikChain = new KVObject
+                        {
+                            { "_class", "CSolveIKChainAnimNodeChainData" }
+                        };
 
                         if (chainData.ContainsKey("m_nChainIndex"))
                         {
@@ -3358,8 +3406,10 @@ public class AnimationGraphExtract : IDisposable
 
                             if (targetSettings.ContainsKey("m_Bone"))
                             {
-                                var boneNameObj = new KVObject();
-                                boneNameObj.Add("m_Name", targetSettings.GetSubCollection("m_Bone").GetStringProperty("m_Name"));
+                                var boneNameObj = new KVObject
+                                {
+                                    { "m_Name", targetSettings.GetSubCollection("m_Bone").GetStringProperty("m_Name") }
+                                };
                                 overrideTargetSettings.Add("m_Bone", boneNameObj);
                             }
 
@@ -3447,8 +3497,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.ToString() ?? "Unnamed";
-                    node.Add("m_sName", nameValue);
+                    AddNodeName(node, value);
                     continue;
                 }
                 else if (key == "m_opFixedSettings")
@@ -3582,8 +3631,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.ToString() ?? "Unnamed";
-                    node.Add("m_sName", nameValue);
+                    AddNodeName(node, value);
                     continue;
                 }
                 else if (key == "m_opFixedData")
@@ -3649,8 +3697,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.ToString() ?? "Unnamed";
-                    node.Add("m_sName", nameValue);
+                    var nameValue = AddNodeName(node, value);
 
                     var colonIndex = nameValue.LastIndexOf(':');
                     if (colonIndex != -1)
@@ -3677,8 +3724,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    var nameValue = value.ToString() ?? "Unnamed";
-                    node.Add("m_sName", nameValue);
+                    AddNodeName(node, value);
                     continue;
                 }
                 else if (key == "m_dataSet")
@@ -3713,7 +3759,7 @@ public class AnimationGraphExtract : IDisposable
                                     var motionParams = new List<KVObject>();
                                     var motionParamIds = new List<long>();
                                     var motionParamIdSet = new HashSet<long>();
-                                    var motionParamCursor = GeneratedNodeIdMin;
+                                    ref var motionParamCursor = ref generatedNodeIdCursor;
 
                                     if (compiledGroup.ContainsKey("m_motionGraphConfigs"))
                                     {
@@ -3905,7 +3951,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    node.Add("m_sName", value.ToString() ?? "Unnamed");
+                    AddNodeName(node, value);
                     continue;
                 }
                 else if (key == "m_opFixedSettings")
@@ -3938,8 +3984,10 @@ public class AnimationGraphExtract : IDisposable
                     {
                         var propJoints = opFixedSettings.GetIntegerArray("m_propJoints").Select(jointIndex =>
                         {
-                            var propJoint = new KVObject();
-                            propJoint.Add("m_jointName", GetBoneName((int)jointIndex));
+                            var propJoint = new KVObject
+                            {
+                                { "m_jointName", GetBoneName((int)jointIndex) }
+                            };
                             return propJoint;
                         }).ToArray();
                         node.Add("m_propJoints", MakeArray(propJoints));
@@ -3951,7 +3999,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    node.Add("m_sName", value.ToString() ?? "Unnamed");
+                    AddNodeName(node, value);
                     continue;
                 }
                 if (!node.ContainsKey("m_eLinearRootMotionMode"))
@@ -3963,7 +4011,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    node.Add("m_sName", value.ToString() ?? "Unnamed");
+                    AddNodeName(node, value);
                     continue;
                 }
             }
@@ -3971,7 +4019,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    node.Add("m_sName", value.ToString() ?? "Unnamed");
+                    AddNodeName(node, value);
                     continue;
                 }
                 if (!node.ContainsKey("m_previewSequenceName"))
@@ -3983,7 +4031,7 @@ public class AnimationGraphExtract : IDisposable
             {
                 if (key == "m_name")
                 {
-                    node.Add("m_sName", value.ToString() ?? "Unnamed");
+                    AddNodeName(node, value);
                     continue;
                 }
                 else if (key == "m_opFixedData")
@@ -3995,9 +4043,13 @@ public class AnimationGraphExtract : IDisposable
                         node.Add("m_boneName", GetBoneName((int)opFixedData.GetIntegerProperty("m_boneIndex")));
                     }
 
-                    var targetSettings = new KVObject();
-                    targetSettings.Add("m_TargetSource",
-                        opFixedData.GetIntegerProperty("m_bBoneTarget", 0) > 0 ? "Bone" : "AnimgraphParameter");
+                    var targetSettings = new KVObject
+                    {
+                        {
+                            "m_TargetSource",
+                            opFixedData.GetIntegerProperty("m_bBoneTarget", 0) > 0 ? "Bone" : "AnimgraphParameter"
+                        }
+                    };
 
                     var boneNameAndIndex = new KVObject();
                     if (opFixedData.ContainsKey("m_boneTargetIndex"))
@@ -4022,10 +4074,12 @@ public class AnimationGraphExtract : IDisposable
                 {
                     if (!node.ContainsKey("m_TargetSettings"))
                     {
-                        var targetSettings = new KVObject();
-                        targetSettings.Add("m_TargetSource", "AnimgraphParameter");
-                        targetSettings.Add("m_Bone", KVObject.Null());
-                        targetSettings.Add("m_TargetCoordSystem", "Model");
+                        var targetSettings = new KVObject
+                        {
+                            { "m_TargetSource", "AnimgraphParameter" },
+                            { "m_Bone", KVObject.Null() },
+                            { "m_TargetCoordSystem", "Model" }
+                        };
                         node.Add("m_TargetSettings", targetSettings);
                     }
 
