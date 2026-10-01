@@ -880,7 +880,7 @@ namespace ValveResourceFormat.ResourceTypes
                 VTexFormat.RG11_EAC => new DecodeRG11EAC(blockWidth, blockHeight),
 
                 // Simple colors
-                VTexFormat.I8 => new DecodeI8(),
+                VTexFormat.I8 or VTexFormat.R8 => new DecodeI8(),
                 VTexFormat.RGBA8888 => new DecodeRGBA8888(),
                 VTexFormat.R16 => new DecodeR16(),
                 VTexFormat.RG1616 => new DecodeRG1616(),

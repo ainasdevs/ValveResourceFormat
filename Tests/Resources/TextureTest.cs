@@ -75,6 +75,32 @@ namespace Tests.Resources
         }
 
         [Test]
+        public async Task R8DecodesToGreyscale()
+        {
+            using var resource = new Resource();
+            resource.Read(Path.Combine(TexturesDir, "R8_glove_slick_half_back_tintid_psd_c52afb8a.vtex_c"));
+
+            var texture = (Texture?)resource.DataBlock;
+            Debug.Assert(texture != null);
+
+            using var bitmap = texture.GenerateBitmap();
+
+            using (Assert.Multiple())
+            {
+                await Assert.That(texture.Format).IsEqualTo(VTexFormat.R8);
+                await Assert.That(bitmap.Width).IsEqualTo(1024);
+                await Assert.That(bitmap.Height).IsEqualTo(1024);
+
+                await Assert.That(bitmap.GetPixel(0, 0)).IsEqualTo(new SKColor(0, 0, 0));
+                await Assert.That(bitmap.GetPixel(100, 900)).IsEqualTo(new SKColor(36, 36, 36));
+                await Assert.That(bitmap.GetPixel(641, 584)).IsEqualTo(new SKColor(69, 69, 69));
+                await Assert.That(bitmap.GetPixel(435, 493)).IsEqualTo(new SKColor(105, 105, 105));
+                await Assert.That(bitmap.GetPixel(900, 100)).IsEqualTo(new SKColor(133, 133, 133));
+                await Assert.That(bitmap.GetPixel(236, 330)).IsEqualTo(new SKColor(255, 255, 255));
+            }
+        }
+
+        [Test]
         public async Task R11EacDecodesToGreyscale()
         {
             using var resource = new Resource();
