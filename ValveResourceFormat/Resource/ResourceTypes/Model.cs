@@ -509,10 +509,11 @@ namespace ValveResourceFormat.ResourceTypes
         /// </summary>
         /// <param name="fileLoader">The file loader to use.</param>
         /// <param name="includeAnimationGraphClips">Whether to load the clips of the model's animation graphs too.</param>
+        /// <param name="includeAnimationGraphClip">Optional filter applied to animation graph clip resource names before loading them.</param>
         /// <returns>Enumerable of all animations.</returns>
-        public IEnumerable<AnimationBase> GetAllAnimations(IFileLoader fileLoader, bool includeAnimationGraphClips)
+        public IEnumerable<AnimationBase> GetAllAnimations(IFileLoader fileLoader, bool includeAnimationGraphClips, Predicate<string>? includeAnimationGraphClip = null)
         {
-            if (CachedAnimations != null && includeAnimationGraphClips)
+            if (CachedAnimations != null && includeAnimationGraphClips && includeAnimationGraphClip == null)
             {
                 return CachedAnimations;
             }
@@ -525,6 +526,11 @@ namespace ValveResourceFormat.ResourceTypes
             {
                 // Animation graph (AG2) clips are part of the model's animation set.
                 var clipNames = IO.AnimationGraphLoader.GetClipNames(this, fileLoader);
+                if (includeAnimationGraphClip != null)
+                {
+                    clipNames = [.. clipNames.Where(name => includeAnimationGraphClip(name))];
+                }
+
                 var clips = IO.AnimationGraphLoader.LoadClips(clipNames, fileLoader);
 
                 foreach (var clipName in clipNames)
@@ -562,7 +568,7 @@ namespace ValveResourceFormat.ResourceTypes
                 sequenceAnimation.IsAdditive |= additiveSequences.Contains(sequenceName);
             }
 
-            if (includeAnimationGraphClips)
+            if (includeAnimationGraphClips && includeAnimationGraphClip == null)
             {
                 CachedAnimations = animations;
             }

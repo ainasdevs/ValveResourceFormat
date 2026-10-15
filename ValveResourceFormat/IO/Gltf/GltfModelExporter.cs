@@ -211,21 +211,33 @@ namespace ValveResourceFormat.IO
                 return true;
             }
 
-            if (filter.Contains(name))
+            var matchedName = MatchAnimation(filter, name);
+            if (matchedName != null)
             {
-                matchedAnimationFilter.Add(name);
-                return true;
-            }
-
-            var leafName = Path.GetFileName(name);
-            if (leafName.Length != name.Length && filter.Contains(leafName))
-            {
-                matchedAnimationFilter.Add(leafName);
+                matchedAnimationFilter.Add(matchedName);
                 return true;
             }
 
             return false;
         }
+
+        private static string? MatchAnimation(HashSet<string> filter, string name)
+        {
+            if (filter.Contains(name))
+            {
+                return name;
+            }
+
+            var leafName = Path.GetFileName(name);
+            return leafName.Length != name.Length && filter.Contains(leafName) ? leafName : null;
+        }
+
+        // Applies AnimationFilter to animation graph clips by resource name, so clips it excludes are never loaded.
+        private IEnumerable<AnimationBase> GetExportAnimations(VModel model, HashSet<string> animationFilter)
+            => model.GetAllAnimations(
+                FileLoader,
+                includeAnimationGraphClips: true,
+                animationFilter.Count == 0 ? null : clipName => MatchAnimation(animationFilter, ClipAnimationName(clipName)) != null);
 
         private void ReportUnmatchedAnimationFilter()
         {
@@ -529,7 +541,7 @@ namespace ValveResourceFormat.IO
             {
                 Debug.Assert(joints != null);
 
-                var animations = model.GetAllAnimations(FileLoader);
+                var animations = GetExportAnimations(model, animationFilter);
                 var animationWriter = new AnimationWriter(model.Skeleton, model.FlexControllers) { ComposeAdditive = ComposeAdditiveAnimations };
 
                 foreach (var animation in animations)
