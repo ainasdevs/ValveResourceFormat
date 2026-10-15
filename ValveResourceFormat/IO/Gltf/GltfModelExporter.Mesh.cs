@@ -60,7 +60,10 @@ public partial class GltfModelExporter
                 if (flexData != null && normalData != null)
                 {
                     var vertexCount = drawCall.GetInt32Property("m_nVertexCount");
-                    AddMorphTargetsToPrimitive(vmesh.MorphData!, flexData, normalData, primitive, exportedModel, vertexOffset, vertexCount);
+                    if (primitive != null)
+                    {
+                        AddMorphTargetsToPrimitive(vmesh.MorphData!, flexData, normalData, primitive, exportedModel, vertexOffset, vertexCount);
+                    }
                     vertexOffset += vertexCount;
                 }
             }
@@ -315,14 +318,10 @@ public partial class GltfModelExporter
         }).ToArray();
     }
 
-    private MeshPrimitive CreateMeshFromDrawCall(KVObject drawCall, Mesh mesh, VBIB vbib, Dictionary<string,
+    private MeshPrimitive? CreateMeshFromDrawCall(KVObject drawCall, Mesh mesh, VBIB vbib, Dictionary<string,
         AttributeAccessor>[] vertexBufferAccessors, ModelRoot exportedModel, Dictionary<string, string>? skinMaterialTable, Vector4 parentTintColor)
     {
         CancellationToken.ThrowIfCancellationRequested();
-
-        var indexBufferInfo = drawCall.GetSubCollection("m_indexBuffer");
-        var indexBufferIndex = indexBufferInfo.GetInt32Property("m_hBuffer");
-        var indexBuffer = vbib.IndexBuffers[indexBufferIndex];
 
         var materialPath = VMesh.GetMaterialName(drawCall)!;
 
@@ -330,6 +329,25 @@ public partial class GltfModelExporter
         {
             materialPath = skinMaterialPath;
         }
+
+        foreach (var (pattern, replacement) in MaterialRemapPatterns)
+        {
+            if (pattern.IsMatch(materialPath))
+            {
+                materialPath = replacement;
+                break;
+            }
+        }
+
+        if (ExcludedMaterialPatterns.Count > 0
+            && ExcludedMaterialPatterns.Any(pattern => pattern.IsMatch(materialPath)))
+        {
+            return null;
+        }
+
+        var indexBufferInfo = drawCall.GetSubCollection("m_indexBuffer");
+        var indexBufferIndex = indexBufferInfo.GetInt32Property("m_hBuffer");
+        var indexBuffer = vbib.IndexBuffers[indexBufferIndex];
 
         Resource? materialResource = null;
 

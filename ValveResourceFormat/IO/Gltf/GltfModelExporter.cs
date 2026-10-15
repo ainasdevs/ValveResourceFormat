@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading;
 using SharpGLTF.Memory;
 using SharpGLTF.Schema2;
@@ -94,6 +95,18 @@ namespace ValveResourceFormat.IO
         /// The filter does not apply when exporting a vmesh resource.
         /// </summary>
         public HashSet<string> MeshFilter { get; } = [];
+
+        /// <summary>
+        /// Gets the list of regex patterns for material paths to exclude during export.
+        /// Draw calls whose effective material path matches any pattern are skipped entirely (no geometry emitted).
+        /// </summary>
+        public List<Regex> ExcludedMaterialPatterns { get; } = [];
+
+        /// <summary>
+        /// Gets the list of regex-based material remapping rules.
+        /// The first matching pattern replaces the draw call's material path, after any skin material replacement.
+        /// </summary>
+        public List<(Regex Pattern, string Replacement)> MaterialRemapPatterns { get; } = [];
 
         private string DstDir = string.Empty;
         private CancellationToken CancellationToken;
