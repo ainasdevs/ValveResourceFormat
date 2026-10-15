@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using GUI.Controls;
+using GUI.Forms;
 using GUI.Utils;
 using ValveResourceFormat.IO;
 using static ValveResourceFormat.CompiledShader.ShaderUtilHelpers;
@@ -17,6 +18,9 @@ namespace GUI.Types.Viewers
         private readonly TreeView fileListView;
         private readonly Container components;
         private readonly ThemedContextMenuStrip shaderFileContextMenu;
+        private readonly ThemedContextMenuStrip collectionContextMenu;
+        private readonly ThemedContextMenuStrip programContextMenu;
+        private readonly ThemedToolStripMenuItem exportSpirvNamedMenuItem;
         private readonly VrfGuiContext vrfGuiContext;
         private VfxProgramData? featuresProgram;
 
@@ -52,6 +56,91 @@ namespace GUI.Types.Viewers
             };
             exportBytecodeMenuItem.Click += OnExportBytecodeClick;
             shaderFileContextMenu.Items.Add(exportBytecodeMenuItem);
+
+            exportSpirvNamedMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export SPIR-V (with renamed symbols)",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportSpirvNamedMenuItem.Click += OnExportSpirvNamedClick;
+            shaderFileContextMenu.Items.Add(exportSpirvNamedMenuItem);
+            shaderFileContextMenu.Opening += OnShaderFileContextMenuOpening;
+
+            collectionContextMenu = new ThemedContextMenuStrip(components)
+            {
+                ImageScalingSize = new System.Drawing.Size(24, 24),
+            };
+            var exportCollectionMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export all decompiled shaders...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportCollectionMenuItem.Click += OnExportCollectionClick;
+            collectionContextMenu.Items.Add(exportCollectionMenuItem);
+            var exportCollectionStaticMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export decompiled shaders (static combos only)...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportCollectionStaticMenuItem.Click += OnExportCollectionStaticOnlyClick;
+            collectionContextMenu.Items.Add(exportCollectionStaticMenuItem);
+
+            if (IsSpirvCrossAvailable())
+            {
+                var exportCollectionSpirvMenuItem = new ThemedToolStripMenuItem
+                {
+                    Text = "Export all SPIR-V (with renamed symbols)...",
+                    SVGImageResourceName = "GUI.Icons.Export.svg",
+                };
+                exportCollectionSpirvMenuItem.Click += OnExportCollectionSpirvClick;
+                collectionContextMenu.Items.Add(exportCollectionSpirvMenuItem);
+
+                var exportCollectionSpirvStaticMenuItem = new ThemedToolStripMenuItem
+                {
+                    Text = "Export SPIR-V (with renamed symbols, static combos only)...",
+                    SVGImageResourceName = "GUI.Icons.Export.svg",
+                };
+                exportCollectionSpirvStaticMenuItem.Click += OnExportCollectionSpirvStaticOnlyClick;
+                collectionContextMenu.Items.Add(exportCollectionSpirvStaticMenuItem);
+            }
+
+            programContextMenu = new ThemedContextMenuStrip(components)
+            {
+                ImageScalingSize = new System.Drawing.Size(24, 24),
+            };
+            var exportProgramMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export decompiled shaders...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportProgramMenuItem.Click += OnExportProgramClick;
+            programContextMenu.Items.Add(exportProgramMenuItem);
+            var exportProgramStaticMenuItem = new ThemedToolStripMenuItem
+            {
+                Text = "Export decompiled shaders (static combos only)...",
+                SVGImageResourceName = "GUI.Icons.Export.svg",
+            };
+            exportProgramStaticMenuItem.Click += OnExportProgramStaticOnlyClick;
+            programContextMenu.Items.Add(exportProgramStaticMenuItem);
+
+            if (IsSpirvCrossAvailable())
+            {
+                var exportProgramSpirvMenuItem = new ThemedToolStripMenuItem
+                {
+                    Text = "Export SPIR-V (with renamed symbols)...",
+                    SVGImageResourceName = "GUI.Icons.Export.svg",
+                };
+                exportProgramSpirvMenuItem.Click += OnExportProgramSpirvClick;
+                programContextMenu.Items.Add(exportProgramSpirvMenuItem);
+
+                var exportProgramSpirvStaticMenuItem = new ThemedToolStripMenuItem
+                {
+                    Text = "Export SPIR-V (with renamed symbols, static combos only)...",
+                    SVGImageResourceName = "GUI.Icons.Export.svg",
+                };
+                exportProgramSpirvStaticMenuItem.Click += OnExportProgramSpirvStaticOnlyClick;
+                programContextMenu.Items.Add(exportProgramSpirvStaticMenuItem);
+            }
 
             control = new TextControl(HighlightLanguage.Shaders);
             control.AddControl(fileListView);
@@ -230,6 +319,9 @@ namespace GUI.Types.Viewers
                 control?.Dispose();
                 components?.Dispose();
                 shaderFileContextMenu?.Dispose();
+                collectionContextMenu?.Dispose();
+                programContextMenu?.Dispose();
+                exportSpirvNamedMenuItem?.Dispose();
             }
         }
 
@@ -240,12 +332,27 @@ namespace GUI.Types.Viewers
                 return;
             }
 
-            if (e.Button == MouseButtons.Right && e.Node.Tag is VfxShaderFile clickedShader)
+            if (e.Button == MouseButtons.Right)
             {
-                if (clickedShader.Bytecode.Length > 0)
+                if (e.Node.Tag is VfxShaderFile clickedShader && clickedShader.Bytecode.Length > 0)
                 {
                     shaderFileContextMenu.Tag = clickedShader;
                     shaderFileContextMenu.Show(fileListView, e.Location);
+                    return;
+                }
+
+                if (e.Node.Tag is ShaderExtract shaderExtractForExport)
+                {
+                    collectionContextMenu.Tag = shaderExtractForExport;
+                    collectionContextMenu.Show(fileListView, e.Location);
+                    return;
+                }
+
+                if (e.Node.Tag is VfxProgramData programForExport)
+                {
+                    programContextMenu.Tag = programForExport;
+                    programContextMenu.Show(fileListView, e.Location);
+                    return;
                 }
 
                 return;
@@ -417,6 +524,290 @@ namespace GUI.Types.Viewers
             control.TextBox.Text = output.ToString();
         }
 
+        private void OnExportCollectionClick(object? sender, EventArgs e)
+        {
+            if (collectionContextMenu.Tag is not ShaderExtract shaderExtract)
+            {
+                return;
+            }
+
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
+
+            _ = Task.Run(() =>
+            {
+                foreach (var program in shaderExtract.Shaders)
+                {
+                    ExportProgram(program, folderPath);
+                }
+
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
+            });
+        }
+
+        private void OnExportProgramClick(object? sender, EventArgs e)
+        {
+            if (programContextMenu.Tag is not VfxProgramData program)
+            {
+                return;
+            }
+
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
+
+            _ = Task.Run(() =>
+            {
+                ExportProgram(program, folderPath);
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
+            });
+        }
+
+        private static bool PromptDynamicComboIndex(out int dynamicComboIndex)
+        {
+            dynamicComboIndex = 0;
+
+            using var prompt = new PromptForm("Dynamic combo index");
+
+            if (prompt.ShowDialog() != DialogResult.OK)
+            {
+                return false;
+            }
+
+            if (!int.TryParse(prompt.ResultText, out dynamicComboIndex) || dynamicComboIndex < 0)
+            {
+                _ = AppMessageDialogs.ShowMessageAsync("Invalid dynamic combo index.", "Export", MessageIcon.Warning);
+                return false;
+            }
+
+            return true;
+        }
+
+        private void OnExportCollectionStaticOnlyClick(object? sender, EventArgs e)
+        {
+            if (collectionContextMenu.Tag is not ShaderExtract shaderExtract)
+            {
+                return;
+            }
+
+            if (!PromptDynamicComboIndex(out var dynamicComboIndex))
+            {
+                return;
+            }
+
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
+
+            _ = Task.Run(() =>
+            {
+                foreach (var program in shaderExtract.Shaders)
+                {
+                    ExportProgram(program, folderPath, dynamicComboIndex);
+                }
+
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
+            });
+        }
+
+        private void OnExportProgramStaticOnlyClick(object? sender, EventArgs e)
+        {
+            if (programContextMenu.Tag is not VfxProgramData program)
+            {
+                return;
+            }
+
+            if (!PromptDynamicComboIndex(out var dynamicComboIndex))
+            {
+                return;
+            }
+
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
+
+            _ = Task.Run(() =>
+            {
+                ExportProgram(program, folderPath, dynamicComboIndex);
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
+            });
+        }
+
+        private void OnExportCollectionSpirvClick(object? sender, EventArgs e)
+            => RunBulkSpirvExport(collectionContextMenu.Tag, dynamicComboIndex: null);
+
+        private void OnExportCollectionSpirvStaticOnlyClick(object? sender, EventArgs e)
+        {
+            if (!PromptDynamicComboIndex(out var index))
+            {
+                return;
+            }
+
+            RunBulkSpirvExport(collectionContextMenu.Tag, dynamicComboIndex: index);
+        }
+
+        private void OnExportProgramSpirvClick(object? sender, EventArgs e)
+            => RunBulkSpirvExport(programContextMenu.Tag, dynamicComboIndex: null);
+
+        private void OnExportProgramSpirvStaticOnlyClick(object? sender, EventArgs e)
+        {
+            if (!PromptDynamicComboIndex(out var index))
+            {
+                return;
+            }
+
+            RunBulkSpirvExport(programContextMenu.Tag, dynamicComboIndex: index);
+        }
+
+        private static void RunBulkSpirvExport(object? tag, int? dynamicComboIndex)
+        {
+            IEnumerable<VfxProgramData> programs = tag switch
+            {
+                ShaderExtract shaderExtract => shaderExtract.Shaders,
+                VfxProgramData program => [program],
+                _ => [],
+            };
+
+            var programsList = programs.ToList();
+            if (programsList.Count == 0)
+            {
+                return;
+            }
+
+            var folderPath = AppFileDialogs.PickFolder("Select export folder", AppFileDialogs.RememberIn.SaveDirectory);
+            if (folderPath == null)
+            {
+                return;
+            }
+
+            _ = Task.Run(() =>
+            {
+                foreach (var program in programsList)
+                {
+                    ExportProgram(program, folderPath, dynamicComboIndex, ShaderExportMode.SpirvWithNames);
+                }
+
+                _ = AppMessageDialogs.ShowMessageAsync($"Export complete.\n{folderPath}", "Export");
+            });
+        }
+
+        private enum ShaderExportMode
+        {
+            DecompiledText,
+            SpirvWithNames,
+        }
+
+        private static void ExportProgram(VfxProgramData program, string baseDir, int? dynamicComboIndex = null,
+            ShaderExportMode mode = ShaderExportMode.DecompiledText)
+        {
+            if (program.StaticComboEntries.Count == 0)
+                return;
+
+            var configGen = new ComboConfigMapping(program);
+            List<string> sfNamesAbbrev = [];
+            List<string> dfNamesAbbrev = [];
+
+            foreach (var staticComboEntry in program.StaticComboEntries)
+            {
+                VfxStaticComboData combo;
+                try
+                {
+                    combo = staticComboEntry.Value.Unserialize();
+                }
+                catch
+                {
+                    continue;
+                }
+
+                var sConfig = configGen.GetConfigState(staticComboEntry.Key);
+                sfNamesAbbrev.Clear();
+
+                for (var i = 0; i < program.StaticComboArray.Length; i++)
+                {
+                    if (sConfig[i] == 0)
+                        continue;
+
+                    var sfBlock = program.StaticComboArray[i];
+                    sfNamesAbbrev.Add(sConfig[i] > 1 ? $"{sfBlock.Name}={sConfig[i]}" : sfBlock.Name);
+                }
+
+                var staticPart = sfNamesAbbrev.Count > 0 ? string.Join("+", sfNamesAbbrev) : "base";
+
+                var sourceIdToRenderStateInfo = new Dictionary<int, VfxRenderStateInfo>(combo.ShaderFiles.Length);
+                foreach (var renderStateInfo in combo.DynamicComboRenderStates)
+                    sourceIdToRenderStateInfo.TryAdd(renderStateInfo.ShaderFileId, renderStateInfo);
+
+                var candidateFiles = combo.ShaderFiles.Where(sf => sf.Bytecode.Length > 0);
+                if (mode == ShaderExportMode.SpirvWithNames)
+                {
+                    candidateFiles = candidateFiles.OfType<VfxShaderFileVulkan>();
+                }
+
+                if (dynamicComboIndex.HasValue)
+                {
+                    candidateFiles = candidateFiles.Where(sf => sf.ShaderFileId == dynamicComboIndex.Value);
+                }
+
+                foreach (var shaderFile in candidateFiles)
+                {
+                    dfNamesAbbrev.Clear();
+                    if (sourceIdToRenderStateInfo.TryGetValue(shaderFile.ShaderFileId, out var renderStateInfo))
+                    {
+                        var dConfig = program.GetDynamicComboConfig(renderStateInfo.DynamicComboId);
+                        for (var i = 0; i < program.DynamicComboArray.Length; i++)
+                        {
+                            if (dConfig[i] == 0)
+                                continue;
+
+                            var dfBlock = program.DynamicComboArray[i];
+                            dfNamesAbbrev.Add(dConfig[i] > 1 ? $"{dfBlock.Name}={dConfig[i]}" : dfBlock.Name);
+                        }
+                    }
+
+                    var dynamicPart = dfNamesAbbrev.Count > 0 ? $"__{string.Join("+", dfNamesAbbrev)}" : string.Empty;
+
+                    var platform = shaderFile.SourceType.ToLowerInvariant();
+                    var ext = mode switch
+                    {
+                        ShaderExportMode.SpirvWithNames => "spv",
+                        _ => platform is "glsl" or "vulkan" ? "glsl" : "hlsl",
+                    };
+                    var rawName = $"{staticPart}{dynamicPart}.{ext}";
+                    var safeName = string.Concat(rawName.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+
+                    var dir = Path.Combine(baseDir, program.ShaderName ?? "unknown", program.VcsProgramType.ToString(), platform);
+                    Directory.CreateDirectory(dir);
+                    var filePath = Path.Combine(dir, safeName);
+
+                    try
+                    {
+                        if (mode == ShaderExportMode.SpirvWithNames)
+                        {
+                            var bytes = ShaderSpirvRewriter.InjectMetadataNames((VfxShaderFileVulkan)shaderFile);
+                            File.WriteAllBytes(filePath, bytes);
+                        }
+                        else
+                        {
+                            File.WriteAllText(filePath, shaderFile.GetDecompiledFile());
+                        }
+                    }
+                    catch
+                    {
+                        // Skip files that fail to export
+                    }
+                }
+            }
+        }
+
         private void OnExportBytecodeClick(object? sender, EventArgs e)
         {
             if (shaderFileContextMenu.Tag is not VfxShaderFile shaderFile)
@@ -441,6 +832,46 @@ namespace GUI.Types.Viewers
             }
 
             File.WriteAllBytes(fileName, shaderFile.Bytecode);
+        }
+
+        private void OnShaderFileContextMenuOpening(object? sender, CancelEventArgs e)
+        {
+            var isVulkan = shaderFileContextMenu.Tag is VfxShaderFileVulkan;
+            exportSpirvNamedMenuItem.Visible = isVulkan && IsSpirvCrossAvailable();
+        }
+
+        private void OnExportSpirvNamedClick(object? sender, EventArgs e)
+        {
+            if (shaderFileContextMenu.Tag is not VfxShaderFileVulkan vulkanSource)
+            {
+                return;
+            }
+
+            var combo = vulkanSource.ParentCombo;
+            Debug.Assert(combo.ParentProgramData != null);
+
+            var fileName = AppFileDialogs.SaveFile(
+                "Export SPIR-V with renamed symbols",
+                $"{combo.ParentProgramData.ShaderName}_{combo.StaticComboId:x08}_{vulkanSource.ShaderFileId:x02}_named",
+                "spv",
+                "SPIR-V bytecode (*.spv)|*.spv|All files (*.*)|*.*");
+            if (fileName == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var rewritten = ShaderSpirvRewriter.InjectMetadataNames(vulkanSource);
+                File.WriteAllBytes(fileName, rewritten);
+            }
+            catch (Exception ex)
+            {
+                _ = AppMessageDialogs.ShowMessageAsync(
+                    $"Failed to rewrite SPIR-V binary:\n\n{ex.Message}",
+                    "Export SPIR-V",
+                    MessageIcon.Error);
+            }
         }
     }
 }
