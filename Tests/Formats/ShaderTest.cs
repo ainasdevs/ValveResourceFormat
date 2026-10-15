@@ -521,6 +521,94 @@ namespace Tests.Formats
         }
 
         [Test]
+        public async Task TestSpirvRewriterInjectsNames()
+        {
+            if (!IsSpirvCrossAvailable())
+            {
+                Skip.Test("There are no native binaries for SPIR-V on arm linux yet.");
+                return;
+            }
+
+            var path = Path.Combine(ShadersDir, "vcs69_bloom_vulkan_40_ps.vcs");
+            using var shader = new VfxProgramData();
+            shader.Read(path);
+
+            var staticCombo = shader.GetStaticCombo(0);
+            var dynamicCombo = staticCombo.DynamicComboRenderStates[0];
+            var vulkanSource = (VfxShaderFileVulkan)staticCombo.ShaderFiles[dynamicCombo.ShaderFileId];
+
+            var rewritten = ShaderSpirvRewriter.InjectMetadataNames(vulkanSource);
+
+            await Assert.That(rewritten.Length).IsGreaterThanOrEqualTo(vulkanSource.Bytecode.Length).Because(
+                "Rewritten binary should not shrink below the original size.");
+            await Assert.That(BitConverter.ToUInt32(rewritten, 0)).IsEqualTo(0x07230203u).Because(
+                "SPIR-V magic number should be preserved.");
+
+            var (idNames, memberNames) = ExtractDebugNames(rewritten);
+
+            await Assert.That(idNames.Values).Contains("g_tInputBuffer").Because(
+                "Reflected texture name should be embedded as an OpName.");
+            await Assert.That(idNames.Values).Contains("_Globals_").Because(
+                "Reflected uniform buffer name should be embedded as an OpName.");
+            await Assert.That(memberNames.Values).Contains("g_vInvTexDim").Because(
+                "Reflected uniform buffer member name should be embedded as an OpMemberName.");
+
+            // Round-trip through SPIRV-Cross to confirm the rewritten binary is structurally valid.
+            // (Names get re-applied by reflection here, but a parse failure would surface a bad binary.)
+            var roundtrip = new VfxShaderFileVulkan(rewritten);
+            var decompiled = roundtrip.GetDecompiledFile();
+            await Assert.That(decompiled).DoesNotContain("SPIR-V reflection failed").Because(
+                $"SPIRV-Cross must accept the rewritten binary. Output:\n{decompiled}");
+        }
+
+        private static (Dictionary<uint, string> Ids, Dictionary<(uint, uint), string> Members) ExtractDebugNames(byte[] spirv)
+        {
+            const ushort OpName = 5;
+            const ushort OpMemberName = 6;
+            const int HeaderBytes = 20;
+
+            var ids = new Dictionary<uint, string>();
+            var members = new Dictionary<(uint, uint), string>();
+            var pos = HeaderBytes;
+
+            while (pos + 4 <= spirv.Length)
+            {
+                var word0 = BitConverter.ToUInt32(spirv, pos);
+                var opcode = (ushort)(word0 & 0xFFFF);
+                var wordCount = (ushort)(word0 >> 16);
+                var instructionEnd = pos + wordCount * 4;
+
+                if (wordCount == 0 || instructionEnd > spirv.Length)
+                {
+                    break;
+                }
+
+                if (opcode == OpName && wordCount >= 2)
+                {
+                    var id = BitConverter.ToUInt32(spirv, pos + 4);
+                    ids[id] = ReadNullTerminatedString(spirv, pos + 8, instructionEnd);
+                }
+                else if (opcode == OpMemberName && wordCount >= 3)
+                {
+                    var typeId = BitConverter.ToUInt32(spirv, pos + 4);
+                    var memberIdx = BitConverter.ToUInt32(spirv, pos + 8);
+                    members[(typeId, memberIdx)] = ReadNullTerminatedString(spirv, pos + 12, instructionEnd);
+                }
+
+                pos = instructionEnd;
+            }
+
+            return (ids, members);
+        }
+
+        private static string ReadNullTerminatedString(byte[] bytes, int start, int end)
+        {
+            var terminator = Array.IndexOf(bytes, (byte)0, start, end - start);
+            var length = terminator < 0 ? end - start : terminator - start;
+            return System.Text.Encoding.UTF8.GetString(bytes, start, length);
+        }
+
+        [Test]
         public async Task TestDepthStencilStateBitLayouts()
         {
             // Depth test+write with LessEqual, stencil disabled with Always funcs and full masks. The bit layout changed in version 71.
