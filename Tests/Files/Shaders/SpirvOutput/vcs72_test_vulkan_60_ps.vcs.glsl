@@ -1,8 +1,3 @@
-// SPIR-V reflection failed for backend HLSL:
-// Only Logical addressing model can be used with HLSL.
-//
-// Re-attempting reflection with the GLSL backend.
-
 // VRF-TEST
 // SPIR-V source, GLSL reflection with SPIRV-Cross by KhronosGroup
 

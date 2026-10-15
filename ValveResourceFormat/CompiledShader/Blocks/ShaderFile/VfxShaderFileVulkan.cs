@@ -327,8 +327,8 @@ public class VfxShaderFileVulkan : VfxShaderFile
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Decompiles SPIR-V bytecode to HLSL or GLSL using SPIRV-Cross reflection, attempting multiple backends until successful.
-    /// When every backend fails, the errors are returned as comments.
+    /// Decompiles SPIR-V bytecode to GLSL using SPIRV-Cross reflection.
+    /// When reflection fails, the errors are returned as comments.
     /// </remarks>
     public override string GetDecompiledFile()
     {
@@ -337,15 +337,15 @@ public class VfxShaderFileVulkan : VfxShaderFile
     }
 
     /// <summary>
-    /// Decompiles SPIR-V bytecode to HLSL or GLSL using SPIRV-Cross reflection, attempting multiple backends until successful.
+    /// Decompiles SPIR-V bytecode to GLSL using SPIRV-Cross reflection.
     /// </summary>
-    /// <param name="code">The decompiled code, or the errors of each backend as comments when every backend failed.</param>
-    /// <returns><see langword="true"/> if a backend succeeded.</returns>
+    /// <param name="code">The decompiled code, or the reflection errors as comments when it failed.</param>
+    /// <returns><see langword="true"/> if reflection succeeded.</returns>
     public bool TryGetDecompiledFile(out string code)
     {
         using var buffer = new StringWriter(CultureInfo.InvariantCulture);
 
-        var backendsToTry = new[] { Backend.HLSL, Backend.GLSL, /* Backend.MSL, */ };
+        var backendsToTry = new[] { Backend.GLSL, /* Backend.MSL, */ };
         for (var i = 0; i < backendsToTry.Length; i++)
         {
             var backend = backendsToTry[i];

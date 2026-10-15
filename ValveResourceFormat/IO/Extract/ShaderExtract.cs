@@ -692,7 +692,7 @@ public sealed class ShaderExtract
                     && spirv.TryGetDecompiledFile(out var decompiledSpirv))
                 {
                     variant0Source.Append(decompiledSpirv);
-                    variant0Source.AppendLine("// ---------  SPIRV -> HLSL end  --------- ");
+                    variant0Source.AppendLine("// ---------  SPIRV -> GLSL end  --------- ");
                 }
             }
 
