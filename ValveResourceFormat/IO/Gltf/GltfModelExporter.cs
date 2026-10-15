@@ -62,6 +62,12 @@ namespace ValveResourceFormat.IO
         public bool SatelliteImages { get; set; } = true;
 
         /// <summary>
+        /// Gets or sets a value indicating whether material textures are decoded and written as glTF images.
+        /// When false, materials keep their parameters and extras but reference no image, and no texture is read.
+        /// </summary>
+        public bool ExportTextureImages { get; set; } = true;
+
+        /// <summary>
         /// Gets or sets a value indicating whether to export extra data.
         /// </summary>
         public bool ExportExtras { get; set; }
