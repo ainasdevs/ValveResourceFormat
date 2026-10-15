@@ -811,6 +811,10 @@ namespace ValveResourceFormat.ResourceTypes
                     return 0.0D;
                 case KV3BinaryNodeType.DOUBLE_ONE:
                     return 1.0D;
+                case KV3BinaryNodeType.UINT32_ZERO:
+                    return 0U;
+                case KV3BinaryNodeType.UINT32_ONE:
+                    return 1U;
 
                 // 1 byte values
                 case KV3BinaryNodeType.BOOLEAN:
@@ -820,7 +824,15 @@ namespace ValveResourceFormat.ResourceTypes
 
                     return value;
                 }
-                // TODO: 22 might be INT32_AS_BYTE, and 23 is UINT32_AS_BYTE
+                case KV3BinaryNodeType.INT8:
+                {
+                    Debug.Assert(context.Version >= 4);
+
+                    var value = (int)(sbyte)buffer.Bytes1[0];
+                    buffer.Bytes1 = buffer.Bytes1[1..];
+
+                    return value;
+                }
                 case KV3BinaryNodeType.INT32_AS_BYTE:
                 {
                     Debug.Assert(context.Version >= 4);
